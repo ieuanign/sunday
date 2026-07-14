@@ -1,0 +1,14 @@
+# Private — the individual "improve Sunday" recipe (not published)
+/CLAUDE.md
+/.claude/
+/skills-lock.json
+/docs/agents/
+
+# Config secrets (the template .env.example stays tracked)
+/.env
+
+# Child repo clones (each is its own independent repo)
+/repos/
+
+# Scratch
+/.scratch/

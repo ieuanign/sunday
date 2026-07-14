@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "nodejs@22",
+    "gh@latest",
+    "git@latest",
+    "jq@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "echo 'Sunday devbox ready. Docker (daemon) and your agent CLI (default: claude) are installed separately — see README.md.'"
+    ],
+    "scripts": {}
+  }
+}
