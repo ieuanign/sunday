@@ -1,0 +1,16 @@
+{
+  "name": "sunday",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "@tsconfig/node24": "^24.0.4",
+    "@types/node": "^24",
+    "typescript": "^5"
+  }
+}

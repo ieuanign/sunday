@@ -1,7 +1,5 @@
 # Sunday
 
-_Your coding assistant workspace — where the development process feels like a breeze on Sunday morning._
-
 Sunday is a **reusable workspace template** that turns GitHub issues into autonomous,
 sandbox-isolated code implementations that open pull requests. It hosts multiple project
 repositories under one shared setup and drives them through an event-driven automation
@@ -51,6 +49,7 @@ Public (tracked) layout:
 │   └── sandbox-prompt.md  the baseline injected into every sandbox run
 ├── listener/              (planned) the Node webhook listener
 ├── config/                (planned) per-repo routing
+├── scripts/               dev helpers (e.g. gen-workspace.sh)
 └── repos/                 child repo clones — gitignored, each its own repo
     └── <child>/           own origin, own .sandcastle/, own rules
 ```
@@ -59,6 +58,19 @@ Child repositories live under `repos/` as independent clones — each with its o
 its own `.sandcastle/Dockerfile`, and its own agent rules. They are **gitignored**: Sunday
 never tracks or commits them, and every git operation inside a run resolves to the child's
 own `.git`/`origin`, so branches and pushes land in the child, never in Sunday.
+
+### Editor: per-child git status
+
+Because `repos/` is gitignored, editors grey out everything under it — hiding each child's *own*
+tracked/ignored status. Give each child its own editor root so decorations follow the **child's**
+`.gitignore`, not Sunday's:
+
+- **VS Code / Cursor / Windsurf:** run `scripts/gen-workspace.sh` after cloning a child, then open
+  the generated `sunday.code-workspace`. Re-run it whenever you add a child — it rebuilds the roots
+  from `repos/`, so you never hand-edit it. (The generated file is gitignored, since it lists your
+  child paths.)
+- **JetBrains:** add each child under *Settings → Version Control → Directory Mappings*.
+- **Any editor:** open the child in its own window, or check `git -C repos/<child> status --ignored`.
 
 ## Documentation
 

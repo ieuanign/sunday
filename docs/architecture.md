@@ -41,7 +41,7 @@ GitHub issue (labelled)
 
 Two labels required (**AND**), fired on the second label:
 
-- **`ready-for-agents`** — the issue is spec-ready.
+- **`ready-for-agent`** — the issue is spec-ready.
 - **`auto-dev`** — automate it.
 
 Parents/trackers are never auto-dev'd — see *Dependency DAG*.
@@ -59,7 +59,7 @@ Parents/trackers are never auto-dev'd — see *Dependency DAG*.
 GitHub labels are the **human-visible source of truth**.
 
 ```
-ready-for-agents + auto-dev   (admitted)
+ready-for-agent + auto-dev   (admitted)
         → agent-working
             ├── awaiting-human   gate: agent asked a question, resumes on reply
             ├── agent-failed     could not reach green: draft PR + diagnosis, manual retry
@@ -83,8 +83,9 @@ to the child repo's own rules. The full prompt is [`sandbox-prompt.md`](sandbox-
   parents are trackers, never auto-dev'd.
 - **Stacking:** issue *A* starts once blocker *B*'s **draft PR is open**; *A* branches from
   *B*'s head and its PR targets *B*'s branch.
-- **On *B* merge:** an agent runs `git rebase --onto main <B-ref> A`, retargets *A*'s PR base
-  to `main`, and cascades up the chain.
+- **On *B* merge:** the **listener (TS) drives** `git rebase --onto main <B-ref> A`, retargets
+  *A*'s PR base to `main`, and cascades up the chain — summoning an agent **only** on a genuine
+  source conflict (regenerable artifacts like lockfiles are regenerated, never agent-merged).
 - **Global invariant: rebase only, never merge.** History stays linear; PR merges are
   squash/rebase.
 - **Rebase conflicts:** the agent resolves them; if it cannot (within the fix bound), it

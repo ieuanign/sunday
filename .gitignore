@@ -3,6 +3,7 @@
 /.claude/
 /skills-lock.json
 /docs/agents/
+/teach/
 
 # Config secrets (the template .env.example stays tracked)
 /.env
@@ -10,5 +11,11 @@
 # Child repo clones (each is its own independent repo)
 /repos/
 
+# Node deps (package-lock.json IS tracked — it locks the exact pins)
+/node_modules/
+
 # Scratch
 /.scratch/
+
+# Editor — personal multi-root workspace (names the private child)
+/*.code-workspace
