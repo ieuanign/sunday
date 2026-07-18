@@ -98,23 +98,38 @@ integration risk before any machinery is added.
 Goal: labelling an issue drives it automatically, with concurrency, state, the gate, and stacking.
 
 1. **`config/` routing schema:** `repository.full_name → { path, imageName, promptFile, labels }`.
-2. **`gh webhook forward`** per-repo (`--repo`, personal account), subscribing `issues`,
-   `issue_comment`, `pull_request`; webhook secret in `.env`. (No replay — reconcile compensates.)
-3. **The listener process** — a single async **serializing loop**: admission (trigger
+2. **`gh webhook forward`** per-repo (`--repo`, personal account) subscribing `issues`,
+   `issue_comment`, `pull_request`, delivered to a **local** `node:http` receiver on
+   `LISTENER_PORT` (`--url http://localhost:<port>/`) — **no public endpoint** (gh dials out to
+   GitHub's relay). Requires the experimental **`cli/gh-webhook`** extension (gh ships no built-in
+   `webhook` command). Webhook secret (HMAC) in `.env`. No replay → reconcile compensates.
+   **Fallback if forwarding proves flaky: poll GitHub** on a timer (same query as reconcile; the
+   admission logic is identical either way). *(gh-webhook evaluated live and chosen — good latency,
+   all event types flowing — 2026-07-18; polling held in reserve.)*
+3. **Shared run action (`runIssue`):** extract M1's compose→run→push→PR into a single module both
+   the one-shot CLI wrapper (`run-one.mts`) and the listener call — given a `RepoConfig` + issue#,
+   it composes the prompt, `run()`s the sandbox, and (on commits) pushes + opens the PR. This is
+   the one place the per-issue action lives; the CLI and the listener must not drift.
+4. **The listener process** — a single async **serializing loop**: admission (trigger
    `ready-for-agent` + `auto-dev`; never auto-dev parents/trackers), **double-launch guard**
    (`agent-working` claim label + in-flight set), **global concurrency cap** (`MAX_CONCURRENCY`,
    default 3 — one shared quota), and `.scratch` **JSON state** (in-flight / `session_id` /
-   branch / last-seen comment id, keyed by `(repo, issue#)`, temp-then-rename).
-4. **Human gate:** an `issue_comment` reply → TS `run({ resumeSession })` on the captured session
+   branch / last-seen comment id, keyed by `(repo, issue#)`, temp-then-rename). **Single active
+   instance** across ALL machines — the in-flight set is per-process and the `agent-working` label
+   is only best-effort cross-instance (no atomic label CAS); run exactly one active listener, a
+   second machine is a cold standby (see Accepted risks).
+5. **Human gate:** an `issue_comment` reply → TS `run({ resumeSession })` on the captured session
    → clears `awaiting-human`. (The agent *signals* the gate; TS posts the comment + applies the
    label — see doc corrections.)
-5. **Dependency DAG + stacking:** *A* starts once blocker *B*'s draft PR is open, branches from
+6. **Dependency DAG + stacking:** *A* starts once blocker *B*'s draft PR is open, branches from
    *B*'s head, PR targets *B*'s branch. **On *B* merge, TS drives** `git rebase --onto main
    <B-ref> A`, retargets *A*'s PR base to `main`, cascades up — summoning an agent **only** on a
    genuine source conflict (bounded 2 attempts, then the gate). Rebase-only, never merge.
-6. **Reconcile-on-restart:** re-derive all pending work from GitHub (new issues, missed gate
+7. **Reconcile-on-restart:** re-derive all pending work from GitHub (new issues, missed gate
    replies, missed PR-merge restacks, orphaned `agent-working`). GitHub is the truth → an outage
-   is a delay, not a loss.
+   is a delay, not a loss. The `.scratch` state is the "save data" — it carries the `session_id`
+   that lets a run **resume** rather than restart; lose it and work is still re-derived from GitHub,
+   but in-flight sessions restart from scratch.
 
 **Verify M2:** label a real issue → automatic end-to-end run; a gate round-trip resumes; a
 stacked pair opens correctly; merging *B* restacks *A*.
@@ -143,9 +158,18 @@ Telegram command round-trips.
 
 ### M4 — Supervision
 
-1. **systemd** units on the Linux reference host: the listener + a **templated per-repo**
-   `gh webhook forward` unit.
-2. **launchd or foreground** on macOS for development.
+Preferred shape: a **Docker Compose "Sunday orchestration stack"** (mirrors the existing
+`liddlemise-prod` ops model) — a `listener` service + a **templated per-repo** `webhook-forward`
+service (`--url http://listener:<port>/` over the compose network, `GH_TOKEN` injected).
+
+1. **Two hard constraints.** (a) The **listener is a singleton** — its serializing loop + the
+   double-launch guard assume one process, so **never scale it to replicas** (two would
+   double-admit the same issue; unlike stateless `backend-1/backend-2`). (b) **Docker-out-of-Docker**
+   — a containerized listener spawns sandcastle sandboxes, so it needs the host docker socket
+   mounted **and** `repos/` mapped to its host path (sandcastle bind-mounts resolve against the host
+   daemon, not the container). The ephemeral sandboxes are **not** compose services.
+2. **Alternatives:** **systemd** units on the Linux reference host, or **launchd/foreground** on
+   macOS for development.
 
 **Verify M4:** kill the listener → supervisor restarts it → reconcile recovers all pending work.
 
@@ -210,6 +234,10 @@ The following were written under a superseded design and are corrected as part o
 - **Ready stacked PRs on unreviewed bases.**
 - **Sandcastle is early / solo-maintained** — pinned exactly; re-vet on upgrade.
 - **`gh webhook forward` has no replay** — reconcile compensates.
+- **Single active instance** — the listener is a singleton across ALL machines; the `agent-working`
+  label is best-effort cross-instance protection, not a distributed lock (GitHub has no atomic label
+  CAS). Run one active listener — a second machine is a **cold standby**, not active/active; true
+  active/active would need a real lease (Redis/DB), which is out of scope.
 
 ## Out of scope (this plan)
 

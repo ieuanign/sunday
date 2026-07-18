@@ -8,6 +8,9 @@
 # Config secrets (the template .env.example stays tracked)
 /.env
 
+# Real routing table — names private children (config/repos.example.json stays tracked)
+/config/repos.json
+
 # Child repo clones (each is its own independent repo)
 /repos/
 
