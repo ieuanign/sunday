@@ -17,6 +17,7 @@ import { loadRepos, type RepoConfig } from "#config/repos.mts";
 import { createScheduler } from "./scheduler.mts";
 import { runIssue } from "./run-issue.mts";
 import { sh } from "./helper.mts";
+import { getIssue, setIssue } from "./state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 const port = Number(process.env.LISTENER_PORT ?? 8787);
@@ -48,8 +49,8 @@ export function admitIssue(
   if (missing.length > 0) {
     return { admit: false, reason: `missing trigger label(s) [${missing.join(", ")}]` };
   }
-  // TODO(step 4c): also skip issues already `done` (state), and never auto-dev
-  // parent/tracker issues (needs a tracker-label convention).
+  // (The done/in-flight state skip lives in the handler; parent/tracker
+  //  exclusion is still TODO — needs a tracker-label convention.)
   return { admit: true };
 }
 
@@ -60,10 +61,21 @@ async function runAdmitted(
   cfg: RepoConfig,
   issue: string,
 ): Promise<void> {
+  const key = `${fullName}#${issue}`;
   const childDir = resolve(parentRoot, cfg.path);
+  setIssue(key, { status: "in-flight" });
   sh("gh", ["issue", "edit", issue, "--add-label", "agent-working"], childDir);
   try {
-    await runIssue(fullName, cfg, issue);
+    const outcome = await runIssue(fullName, cfg, issue);
+    setIssue(key, {
+      status: outcome.committed ? "done" : "failed",
+      branch: outcome.branch,
+      prUrl: outcome.prUrl,
+      sessionId: outcome.sessionId,
+    });
+  } catch (err) {
+    setIssue(key, { status: "failed" });
+    throw err; // let the scheduler log it
   } finally {
     sh("gh", ["issue", "edit", issue, "--remove-label", "agent-working"], childDir);
   }
@@ -100,16 +112,21 @@ const server = createServer((req, res) => {
       );
 
       if (event === "issues" && TRIGGER_ACTIONS.has(rawAction)) {
+        const key = `${repo}#${number}`;
         const decision = admitIssue(repo, labels, repos);
-        if (decision.admit) {
-          console.log(`  ✓ ADMIT ${repo}#${number}`);
+        const prior = getIssue(key);
+        if (!decision.admit) {
+          console.log(`  · skip — ${decision.reason}`);
+        } else if (prior && prior.status !== "failed") {
+          // already in-flight or done — don't re-run (a `failed` issue may retry)
+          console.log(`  · skip ${key} — state=${prior.status}`);
+        } else {
+          console.log(`  ✓ ADMIT ${key}`);
           const cfg = repos[repo];
           scheduler.enqueue({
-            key: `${repo}#${number}`,
+            key,
             run: () => runAdmitted(repo, cfg, String(number)),
           });
-        } else {
-          console.log(`  · skip — ${decision.reason}`);
         }
       }
     } catch {
