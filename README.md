@@ -47,6 +47,9 @@ Public (tracked) layout:
 ├── docs/
 │   ├── architecture.md    the pipeline design
 │   └── sandbox-prompt.md  the baseline injected into every sandbox run
+├── .claude/               tracked slice of the discipline floor:
+│   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger)
+│   └── skills/            roster skills (tdd, code-review-mp, diagnosing-bugs)
 ├── listener/              (planned) the Node webhook listener
 ├── config/                (planned) per-repo routing
 ├── scripts/               dev helpers (e.g. gen-workspace.sh)
@@ -109,6 +112,20 @@ Note: the agent must run **headless inside the Docker sandbox**. Sandcastle runs
 in the container, so swapping to an agent it does not yet support is more than a config
 line — that agent has to be runnable in the sandbox first.
 
+### Engineering-skills setup (per repo)
+
+Sunday's default roster expects each repo it runs in to carry the engineering-skills
+scaffolding under `docs/agents/` — the triage-label vocabulary, issue-tracker and domain-doc
+conventions, and the coding-standards rubric the `reviewer` links. Run both setup skills
+**once per repo** (Sunday itself, and each hosted child) before the roster's first use:
+
+- **`setup-matt-pocock-skills`** — issue tracker, triage labels, and domain-doc layout.
+- **`setup-ieuanign-skills`** — distills `docs/agents/coding-standards.md`, the Standards rubric
+  the `reviewer` (via `code-review-mp`) links.
+
+Without them the roster still runs — the `reviewer` falls back to `CLAUDE.md` and whatever the
+repo documents — but the tailored rubric and label vocabulary won't be present.
+
 ## Security
 
 - **Agent auth** — the agent token/OAuth lives in `.env`, which is gitignored. Never commit
@@ -118,4 +135,6 @@ line — that agent has to be runnable in the sandbox first.
 - **Sandbox isolation** — each run executes in a Docker sandbox as a **non-root** user;
   agents never run directly on the host.
 - **The private recipe** — the individual tooling used to improve Sunday itself (`CLAUDE.md`,
-  `.claude/`, `docs/agents/`) is gitignored and never published.
+  `docs/agents/`, and most of `.claude/`) is gitignored and never published. The exception is the
+  shipped discipline floor — `.claude/agents/` and the `tdd`/`code-review-mp`/`diagnosing-bugs`
+  skills — which is tracked (see [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) §2).

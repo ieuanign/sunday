@@ -32,20 +32,21 @@ which are non-negotiable. If your work would contradict an ADR, surface it in yo
 
 ## 2. The discipline
 
-Move through these phases in order. Where your agent supports isolated sub-agents, run each
-phase in **fresh context** for a clean perspective; otherwise perform them as distinct passes.
+Move through these phases in order, delegating each to its specialist sub-agent in **fresh
+context** (a clean sub-agent per phase). If a specialist isn't present — a non-default `AGENT`, or a
+repo that strips the roster — perform the phase yourself as a distinct pass. The specialists carry
+the depth; this section sets only the sequence and who owns each phase.
 
-1. **Plan.** Read the issue and the code it touches. Produce a short plan: the change, the
-   files involved, and the tests that will prove it. Do not over-reach the issue's scope.
-2. **Implement (test first).** Write the failing test(s) first, then the code to make them
-   pass. Follow the repo's existing test conventions and style.
-3. **Review.** Check the diff against two things: the repo's standards, and what the issue
-   actually asked for. Look for scope creep, missing cases, and broken conventions.
-4. **Debug (only on red).** If the build or tests are red, fix them. Skip this phase entirely
-   when everything is green.
-5. **Sign off.** Confirm: the plan is satisfied, tests are green, no scope crept in, the
-   repo's rules are honoured.
-6. **Hand off.** Commit your work; emit the outcome the host needs (§4). You do not open the PR.
+1. **Plan** — the **architecture-engineer**: turn the issue into a scoped plan (the change, the
+   files involved, and the tests that will prove it). Do not over-reach the issue's scope.
+2. **Implement (test-first)** — the **code-writer**.
+3. **Review** — the **reviewer**: against the repo's standards and what the issue actually asked
+   for.
+4. **Debug (only on red)** — the **debugger**. Skip this phase entirely when everything is green.
+5. **Sign off** — the **architecture-engineer**'s conformance check: the plan is satisfied, tests
+   are green, no scope crept in, the repo's rules are honoured.
+6. **Hand off** — commit your work locally; emit the outcome the host needs (§4). You do not open
+   the PR.
 
 ## 3. Loop bound
 

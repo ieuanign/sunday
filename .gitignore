@@ -1,9 +1,19 @@
 # Private — the individual "improve Sunday" recipe (not published)
 /CLAUDE.md
-/.claude/
 /skills-lock.json
 /docs/agents/
 /teach/
+
+# .claude/ is private (personal settings + the "improve Sunday" recipe) EXCEPT the
+# shipped discipline floor: the roster + the 3 skills it preloads (findings-grill-
+# discipline-floor). Nested negation — order matters.
+/.claude/*
+!/.claude/agents/
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/tdd/
+!/.claude/skills/code-review-mp/
+!/.claude/skills/diagnosing-bugs/
 
 # Config secrets (the template .env.example stays tracked)
 /.env
