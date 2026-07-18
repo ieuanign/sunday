@@ -53,15 +53,33 @@ Attempt any single fix — a review finding, a debugger fix, a rebase conflict �
 **2 times**. If it is still unresolved after the second attempt, stop and either open the
 gate (§6) or fail (§7). Do not loop indefinitely.
 
-## 4. Outcome (what you hand the host)
+## 4. Outcome — emit one structured result (required)
 
-The host opens the PR from your committed work; you provide the *signal* and the *description*:
+The host reads your outcome from **exactly one** `<sunday-result>` tag, which you emit **once, as
+the very last thing you output**:
 
-- Signal **ready** only when the run passed cleanly *and* sign-off is clean. A clean stacked run
-  is ready even if its base branch has not merged yet.
-- Signal **draft** on any doubt, or when a gate is open (§6).
-- Provide a description of what was done, how it was verified, and any ADR tension or follow-up —
-  the host uses it verbatim as the PR body.
+```
+<sunday-result>{ "signal": "ready" | "draft" | "gate" | "fail", "summary": "…", "question": "…" }</sunday-result>
+```
+
+- **`signal`** — one of:
+  - **ready** — the run passed cleanly *and* sign-off is clean. (A clean stacked run is ready even
+    if its base branch has not merged yet.) → host pushes and opens a normal PR.
+  - **draft** — work is committed but you have doubt (partial, unsure, wants human eyes). → host
+    pushes and opens a **draft** PR.
+  - **gate** — you need a human decision before you can finish (§6). → host opens **no** PR, posts
+    your `question` to the issue, and waits. Your session is resumed with the human's reply.
+  - **fail** — you could not reach green within the fix bounds (§7); commit WIP first. → host
+    pushes and opens a **draft** PR labelled for a human to retry.
+- **`summary`** — plain English: what you did, how you verified it, any ADR tension or follow-up.
+  The host uses it **verbatim** as the PR body (ready/draft) or the failure diagnosis (fail). For a
+  gate, one line of context.
+- **`question`** — **required when `signal` is `gate`**: the exact question the host posts to the
+  issue for the human. Omit otherwise.
+
+Emit valid JSON in a single `<sunday-result>…</sunday-result>` tag — write the tag literally, the
+host scans stdout for it. Do not push, comment, or label; the host does all of that from this
+result.
 
 ## 5. Git discipline (non-negotiable)
 
@@ -79,8 +97,8 @@ The host opens the PR from your committed work; you provide the *signal* and the
 If you hit a genuine decision only a human can make (ambiguous spec, a product call, an
 unresolvable conflict):
 
-1. **Emit your question in plain English** as your result (the host posts it to the issue as a
-   comment and applies the `awaiting-human` label — you do neither yourself).
+1. **Emit `signal: "gate"`** with your question in `question` (§4). The host posts it to the issue
+   and applies the `awaiting-human` label — you do neither yourself.
 2. Exit cleanly. The listener resumes your session when the human replies — do not block
    waiting.
 
@@ -89,10 +107,10 @@ unresolvable conflict):
 If you cannot get to a green, signed-off state within the fix bounds:
 
 1. **Commit your work-in-progress.**
-2. **Signal failure** and emit a **diagnosis**: what you tried, where it stands, what's blocking
-   green. The host pushes the WIP, opens a **draft** PR with your diagnosis, and applies the
-   `agent-failed` label. This is a deliberate handoff — a human retries by relabelling. Do not
-   auto-resume.
+2. **Emit `signal: "fail"`** (§4) with a **diagnosis** in `summary`: what you tried, where it
+   stands, what's blocking green. The host pushes the WIP, opens a **draft** PR with your diagnosis,
+   and applies the `agent-failed` label. This is a deliberate handoff — a human retries by
+   relabelling. Do not auto-resume.
 
 ## 8. Rebase conflicts
 

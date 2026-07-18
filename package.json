@@ -14,6 +14,7 @@
     "@ai-hero/sandcastle": "0.12.0",
     "@tsconfig/node24": "^24.0.4",
     "@types/node": "^24.13.3",
-    "typescript": "^5"
+    "typescript": "^5",
+    "zod": "^4.4.3"
   }
 }

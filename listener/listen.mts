@@ -15,9 +15,9 @@ import { resolve } from "node:path";
 
 import { loadRepos, type RepoConfig } from "#config/repos.mts";
 import { createScheduler } from "./scheduler.mts";
-import { runIssue } from "./run-issue.mts";
+import { runIssue, SUNDAY_MARKER } from "./run-issue.mts";
 import { sh } from "./helper.mts";
-import { getIssue, setIssue } from "./state.mts";
+import { getIssue, setIssue, type IssueStatus } from "./state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 const port = Number(process.env.LISTENER_PORT ?? 8787);
@@ -55,20 +55,34 @@ export function admitIssue(
 }
 
 /** Claim the issue with `agent-working` (the durable cross-restart guard), run
- *  it, then release the claim regardless of outcome. */
+ *  or resume it, map the agent's signal to durable state, then release the claim
+ *  regardless of outcome. `resume` continues a gated session with a human reply. */
 async function runAdmitted(
   fullName: string,
   cfg: RepoConfig,
   issue: string,
+  resume?: { sessionId: string; reply: string },
 ): Promise<void> {
   const key = `${fullName}#${issue}`;
   const childDir = resolve(parentRoot, cfg.path);
   setIssue(key, { status: "in-flight" });
   sh("gh", ["issue", "edit", issue, "--add-label", "agent-working"], childDir);
+  if (resume) {
+    sh("gh", ["issue", "edit", issue, "--remove-label", "awaiting-human"], childDir);
+  }
   try {
-    const outcome = await runIssue(fullName, cfg, issue);
+    const outcome = await runIssue(fullName, cfg, issue, resume);
+    // gate → keep the session open for a human; fail (or ready/draft that shipped
+    // nothing) → failed; ready/draft with a PR → done. runIssue already posted the
+    // gate comment + `awaiting-human` label.
+    const status: IssueStatus =
+      outcome.signal === "gate"
+        ? "awaiting-human"
+        : outcome.signal === "fail" || !outcome.prUrl
+          ? "failed"
+          : "done";
     setIssue(key, {
-      status: outcome.committed ? "done" : "failed",
+      status,
       branch: outcome.branch,
       prUrl: outcome.prUrl,
       sessionId: outcome.sessionId,
@@ -118,7 +132,8 @@ const server = createServer((req, res) => {
         if (!decision.admit) {
           console.log(`  · skip — ${decision.reason}`);
         } else if (prior && prior.status !== "failed") {
-          // already in-flight or done — don't re-run (a `failed` issue may retry)
+          // already in-flight / done / awaiting-human — don't re-run
+          // (a `failed` issue may retry on a re-label).
           console.log(`  · skip ${key} — state=${prior.status}`);
         } else {
           console.log(`  ✓ ADMIT ${key}`);
@@ -126,6 +141,28 @@ const server = createServer((req, res) => {
           scheduler.enqueue({
             key,
             run: () => runAdmitted(repo, cfg, String(number)),
+          });
+        }
+      } else if (event === "issue_comment" && rawAction === "created") {
+        // Gate resume: a human reply on an `awaiting-human` issue continues the
+        // agent's session. Skip our OWN gate comment (same author → filter by
+        // marker) and comments on non-gated issues.
+        const key = `${repo}#${number}`;
+        const cfg = repos[repo];
+        const prior = getIssue(key);
+        const commentBody: string = payload.comment?.body ?? "";
+        if (!cfg || !prior || prior.status !== "awaiting-human") {
+          // not a gated issue we own — ignore silently
+        } else if (commentBody.includes(SUNDAY_MARKER)) {
+          console.log(`  · skip ${key} — our own gate comment`);
+        } else if (!prior.sessionId) {
+          console.log(`  · skip ${key} — awaiting-human but no session to resume`);
+        } else {
+          console.log(`  ✓ RESUME ${key}`);
+          const sessionId = prior.sessionId;
+          scheduler.enqueue({
+            key,
+            run: () => runAdmitted(repo, cfg, String(number), { sessionId, reply: commentBody }),
           });
         }
       }

@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type IssueStatus = "in-flight" | "done" | "failed";
+export type IssueStatus = "in-flight" | "done" | "failed" | "awaiting-human";
 
 export interface IssueState {
   status: IssueStatus;
