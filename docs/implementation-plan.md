@@ -111,20 +111,34 @@ Goal: labelling an issue drives it automatically, with concurrency, state, the g
    it composes the prompt, `run()`s the sandbox, and (on commits) pushes + opens the PR. This is
    the one place the per-issue action lives; the CLI and the listener must not drift.
 4. **The listener process** — a single async **serializing loop**: admission (trigger
-   `ready-for-agent` + `auto-dev`; never auto-dev parents/trackers), **double-launch guard**
+   `ready-for-agent` + `auto-dev`; **skip any `spec`-labelled issue** — a spec is a manifest, never
+   implemented; post a one-line nudge "label the tickets"), **double-launch guard**
    (`agent-working` claim label + in-flight set), **global concurrency cap** (`MAX_CONCURRENCY`,
    default 3 — one shared quota), and `.scratch` **JSON state** (in-flight / `session_id` /
    branch / last-seen comment id, keyed by `(repo, issue#)`, temp-then-rename). **Single active
    instance** across ALL machines — the in-flight set is per-process and the `agent-working` label
    is only best-effort cross-instance (no atomic label CAS); run exactly one active listener, a
    second machine is a cold standby (see Accepted risks).
-5. **Human gate:** an `issue_comment` reply → TS `run({ resumeSession })` on the captured session
-   → clears `awaiting-human`. (The agent *signals* the gate; TS posts the comment + applies the
-   label — see doc corrections.)
-6. **Dependency DAG + stacking:** *A* starts once blocker *B*'s draft PR is open, branches from
-   *B*'s head, PR targets *B*'s branch. **On *B* merge, TS drives** `git rebase --onto main
-   <B-ref> A`, retargets *A*'s PR base to `main`, cascades up — summoning an agent **only** on a
+5. **Human gate + the signal contract:** the agent emits ONE structured result via Sandcastle
+   `Output.object` — `<sunday-result>{ signal:"ready"|"draft"|"gate"|"fail", summary, question? }`
+   (requires `maxIterations===1`); `runIssue` reads `result.output` and branches: ready → PR ·
+   draft → draft PR · **gate → no PR, post `question` + `awaiting-human`, keep `session_id`** ·
+   fail → WIP + draft PR + `agent-failed`. Replaces the crude `commits.length` check. The gate
+   round-trip: an `issue_comment` reply on an `awaiting-human` issue → TS `run({ resumeSession })`
+   with the comment → clears `awaiting-human`. (TS posts every comment + applies every label — see
+   doc corrections.)
+6. **Dependency DAG + stacking (ticket-as-unit "waves"):** the **ticket** is the unit — Sunday
+   admits any ticket whose blockers are satisfied; waves emerge from each ticket's own blocking
+   edges (native sub-issue/blocking links, or a "Blocked by" text fallback), **not** from reading a
+   spec. `runIssue` gains a **`baseBranch` param** (default `main`; a stacked ticket bases on its
+   blocker's branch) — the knob that turns waves on. *A* starts once blocker *B*'s draft PR is open,
+   branches from *B*'s head, PR targets *B*'s branch. **On *B* merge, TS drives** `git rebase --onto
+   main <B-ref> A`, retargets *A*'s PR base to `main`, cascades up — summoning an agent **only** on a
    genuine source conflict (bounded 2 attempts, then the gate). Rebase-only, never merge.
+   **Undeclared file overlap** between concurrent tickets is **not** pre-checked (Sunday has no
+   upfront plan/touchpoints, unlike dev-loop's Gate 1) — a real collision falls to the same
+   agent-rebase path; `MAX_CONCURRENCY` is the lever. *(Deferred convenience: `auto-dev` on a spec
+   bulk-labels its unblocked child tickets — pure labelling, execution stays ticket-as-unit.)*
 7. **Reconcile-on-restart:** re-derive all pending work from GitHub (new issues, missed gate
    replies, missed PR-merge restacks, orphaned `agent-working`). GitHub is the truth → an outage
    is a delay, not a loss. The `.scratch` state is the "save data" — it carries the `session_id`
@@ -151,6 +165,11 @@ Draws entirely on `findings-issue8-operability.md`.
    `secret_token` header **+ `chat_id` allowlist**.
 5. `.env` keys: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`,
    `TELEGRAM_WEBHOOK_URL`. New infra dep: `cloudflared` (free tier — cost-flagged).
+6. **Concurrent-flow observability:** the root fix is **per-flow log separation** — each `runIssue`
+   streams to `.scratch/<repo>/<issue>/run.log`; the listener stdout drops to terse one-line-per-
+   event summaries (feasible as early as M2). Viewer: ship the **cheap `sunday status` + `tail -f`**
+   first; a bespoke `ink` `sunday watch` TUI (FleetView-style select) is **deferred** until
+   concurrency climbs past ~3.
 
 **Verify M3:** each failure class routes correctly (capture the raw stdout excerpt + result
 `subtype` on the first real quota hit / 403 / context-limit / refusal and tighten parsers); a
@@ -178,10 +197,18 @@ service (`--url http://listener:<port>/` over the compose network, `GH_TOKEN` in
 Layered last: the pipeline works; now tune cost and smooth onboarding. Per #11, the matrix's
 numbers are **tuned from real production data**, so this deliberately follows M1–M4.
 
-1. **Per-phase matrix** (`config/roster.*`): the listener generates injected
+1. **Per-phase matrix + Sunday's discipline** (`config/roster.*`): the listener generates injected
    `.claude/agents/<phase>.md` (model + effort) per run; `.env` `MODEL`/`MODEL_EFFORT` is the
    global fallback. Starting values: Plan opus/max · Implement opus/xhigh · Review sonnet/high ·
-   Debug opus/xhigh · Sign-off sonnet/medium (model switching is `$0` on the Max token).
+   Debug opus/xhigh · Sign-off sonnet/medium (model switching is `$0` on the Max token). The same
+   injection carries **Sunday's default discipline as a FLOOR** — the full roster (`code-writer`→
+   `/tdd`, `reviewer`→`/code-review-mp`, `debugger`→`/diagnosing-bugs`, + `architecture-engineer`),
+   each phase a **fresh context** (keeps every phase under the "smart zone" threshold). **Precedence
+   by presence:** a child's own *present* setup overrides the floor (likely via native project>user
+   precedence — inject at the sandbox's user level); a bare child gets Sunday's default. **B1 — the
+   sandbox agent self-orchestrates** the sequential phases (1 container; work stays fresh;
+   orchestrator growth caught by the §2 handoff). Escalate to host-driven phases only if the token
+   report shows the orchestrator itself hitting the threshold.
 2. **Handoff-at-threshold:** TS reads the orchestrator session's `ctx = input + cacheRead +
    cacheCreation` at **resume points** — `<120K` → `run({resumeSession})`; `≥120K` → an
    **agent-written** handoff doc (bounded resume-one-turn → `.scratch/<repo>/handoff/<issue>-<n>.md`)
@@ -215,9 +242,13 @@ The following were written under a superseded design and are corrected as part o
 - **`sandbox-prompt.md` — I/O ownership (§4/§5, and consistently §2.6/§6/§7/intro).** The sandbox
   is **credential-free**: the agent **commits locally and emits a structured result**; the **host
   pushes, opens the PR, posts comments, and applies labels**. "Push to origin" / "open the PR" /
-  "post a comment + apply the label" as *agent* actions are removed. (The precise agent→TS
-  structured-output contract — how the agent signals ready/draft/gate/fail — is itself a build
-  task in M2.)
+  "post a comment + apply the label" as *agent* actions are removed. The agent→TS contract is now
+  **resolved** (grill 2026-07-18, `.scratch/wayfinder/findings-grill-m2m5-2026-07-18.md`): §4 emits
+  `<sunday-result>{signal,summary,question?}` via `Output.object` — see M2 step 5.
+- **`sandbox-prompt.md` §1/§2 — discipline is Sunday's floor.** The repo binds the WHAT (its
+  `CLAUDE.md`/ADRs/domain — conventions); Sunday injects the HOW (the roster + `/tdd` ·
+  `/code-review-mp` · `/diagnosing-bugs`) as the default, overridden by a child's own *present*
+  setup — see M5.1. (Grill 2026-07-18.)
 
 ## Resolved open questions (from `architecture.md`)
 
