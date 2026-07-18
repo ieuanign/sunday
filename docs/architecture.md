@@ -51,8 +51,9 @@ Parents/trackers are never auto-dev'd — see *Dependency DAG*.
 | Event | Purpose |
 |---|---|
 | `issues` (labeled) | admission trigger |
-| `issue_comment` | the human gate (see below) |
-| `pull_request` (closed + merged) | triggers restack of dependents |
+| `issue_comment` | human gate · `@sunday` summon (issue) or PR-comment fix |
+| `pull_request_review_comment` | `@sunday` on an inline review comment → PR-comment fix |
+| `pull_request` (opened / closed) | stack dependents on open · restack on merge |
 
 ## Label state machine
 
@@ -100,7 +101,11 @@ agent quota (see *Auth*). Not per-repo. Set via `MAX_CONCURRENCY` in `.env`.
 
 The **issue comment thread is the gate.** When a run needs a human, the agent:
 
-1. posts its question plus a hidden marker — `<!-- sandcastle:awaiting … -->`,
+1. posts its question with a **dual sign** — a hidden marker `<!-- sunday:gate -->` (so the
+   listener skips its own comment on resume) plus a visible header (`🤖 Sunday · autonomous
+   agent`) so a human can tell the agent authored it (Sunday and you post under the same
+   account). The visible attribution also marks the PR body; a PR-comment feedback loop would
+   reuse the same helper.
 2. applies the `awaiting-human` label,
 3. exits.
 
@@ -164,18 +169,6 @@ API key). Configured in `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT`, and the auth v
 share one quota, which is why the concurrency cap is global.
 
 > A subscription-token automation path may warrant checking the agent vendor's current terms.
-
-## Open questions
-
-Carried from design; resolve before/while building:
-
-1. **Forwarding shape** — personal account (per-repo templated `--repo` forwarders) vs org
-   (one `--org` forwarder, `admin:org_hook` scope)?
-2. **Redis wiring** — confirm the exact auth/config a given child's test suite expects for
-   the in-sandbox redis.
-3. **Per-child `.sandcastle` resolution** — does the installed Sandcastle `run()` read
-   `cwd/.sandcastle`, or must the listener pass explicit `promptFile`/`imageName`? Verify
-   against the pinned version.
 
 ## Accepted risks
 

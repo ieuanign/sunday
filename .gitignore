@@ -5,7 +5,7 @@
 /teach/
 
 # .claude/ is private (personal settings + the "improve Sunday" recipe) EXCEPT the
-# shipped discipline floor: the roster + the 3 skills it preloads (findings-grill-
+# shipped discipline floor: the roster + the skills it preloads (findings-grill-
 # discipline-floor). Nested negation — order matters.
 /.claude/*
 !/.claude/agents/
@@ -14,6 +14,7 @@
 !/.claude/skills/tdd/
 !/.claude/skills/code-review-mp/
 !/.claude/skills/diagnosing-bugs/
+!/.claude/skills/implement/
 
 # Config secrets (the template .env.example stays tracked)
 /.env
