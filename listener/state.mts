@@ -13,6 +13,9 @@ export interface IssueState {
   branch?: string;
   prUrl?: string;
   sessionId?: string;
+  /** The ticket's base branch ("main" or a blocker's "feat/<n>"). Persisted so a
+   *  resume recovers the stacked base — a resume comment carries none of its own. */
+  baseBranch?: string;
 }
 
 export type State = Record<string, IssueState>;

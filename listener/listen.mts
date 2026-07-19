@@ -81,10 +81,13 @@ async function runAdmitted(
   issue: string,
   opts: { baseBranch?: string; resume?: { sessionId: string; reply: string } } = {},
 ): Promise<void> {
-  const { baseBranch, resume } = opts;
+  const { resume } = opts;
   const key = `${fullName}#${issue}`;
   const childDir = resolve(parentRoot, cfg.path);
-  setIssue(key, { status: "in-flight" });
+  // A resume carries no base of its own — recover the ticket's stacked base
+  // (persisted at admit/gate) so it doesn't silently fall back to main.
+  const baseBranch = opts.baseBranch ?? getIssue(key)?.baseBranch ?? "main";
+  setIssue(key, { status: "in-flight", baseBranch });
   sh("gh", ["issue", "edit", issue, "--add-label", "agent-working"], childDir);
   if (resume) {
     sh("gh", ["issue", "edit", issue, "--remove-label", "awaiting-human"], childDir);
@@ -105,6 +108,7 @@ async function runAdmitted(
       branch: outcome.branch,
       prUrl: outcome.prUrl,
       sessionId: outcome.sessionId,
+      baseBranch,
     });
   } catch (err) {
     setIssue(key, { status: "failed" });

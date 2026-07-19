@@ -11,10 +11,22 @@ import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, SUNDAY_MARKER } from "./helper.mts";
+import { sh, SUNDAY_MARKER, deleteLocalBranch } from "./helper.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
+
+/** Does a ref resolve in the child repo? (`rev-parse --verify` exits non-zero when
+ *  it doesn't; `sh` throws on that.) Used to detect a stacked base whose origin ref
+ *  vanished — the blocker merged+was deleted while the ticket was gated. */
+function refExists(childDir: string, ref: string): boolean {
+  try {
+    sh("git", ["rev-parse", "--verify", "--quiet", ref], childDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // The agent emits exactly one of these as its last output (see sandbox-prompt.md
 // §4). Sandcastle extracts it from stdout by the `<sunday-result>` tag literal,
@@ -115,16 +127,27 @@ export async function runIssue(
     );
   }
 
-  // Everything from here shares the composed prompt file; a `finally` removes it
-  // so `.scratch/prompt-*.md` never leaks (the local branch is a separate
-  // lifecycle — kept on a gate, since it's then the only copy).
+  // Everything from here shares the composed prompt file AND the local branch;
+  // a `finally` removes both — except a gated branch, which is then the only copy
+  // of its commits (never pushed) and is kept for resume.
+  let gated = false;
+  // Base every run on the fresh REMOTE ref, never a stale local: Sandcastle prefers
+  // an existing local branch, which may lag origin (or be absent once we delete it
+  // post-run) — origin/<base> is current after the fetch below (branch-lifecycle
+  // findings). The PR base stays the logical name (gh resolves it on the remote);
+  // only the worktree start-point + ahead-count use the ref.
+  let effectiveBase = baseBranch;
   try {
-    // Stacking (6b): the base ref must be current locally before Sandcastle
-    // branches feat/<issue> off it — baseBranch is consulted only when the target
-    // branch is new (findings §3). At the "main" default this is a no-op.
-    if (baseBranch !== "main") {
-      sh("git", ["fetch", "origin", baseBranch], childDir);
+    // Latest main + every feat/* remote ref, and prune dangling ones (get the
+    // newest base before Sandcastle branches feat/<issue> off it).
+    sh("git", ["fetch", "-p", "origin"], childDir);
+    // A stacked base whose origin ref is gone means the blocker merged+was deleted
+    // while this ticket was gated → it has landed; base on main instead.
+    if (effectiveBase !== "main" && !refExists(childDir, `origin/${effectiveBase}`)) {
+      console.log(`  ↪ ${fullName}#${issue}: base ${effectiveBase} gone (blocker landed) — basing on main`);
+      effectiveBase = "main";
     }
+    const stackBase = `origin/${effectiveBase}`;
 
     // Delegate to the sandbox (it decides; it has no credentials). maxRetries:1 —
     // one automatic re-emit if the agent's tag is missing/malformed.
@@ -137,7 +160,7 @@ export async function runIssue(
       sandbox: docker({ imageName: cfg.imageName }),
       cwd: childDir,
       promptFile,
-      branchStrategy: { type: "branch", branch, baseBranch },
+      branchStrategy: { type: "branch", branch, baseBranch: stackBase },
       logging: { type: "stdout" },
       ...(resume ? { resumeSession: resume.sessionId } : {}),
       output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
@@ -147,8 +170,9 @@ export async function runIssue(
     const { signal, summary, question } = result.output;
 
     // Gate: no PR. Post the question (marked, so resume can skip our own comment)
-    // and claim the issue for a human. The session lives on for resume.
+    // and claim the issue for a human. The session + local branch live on for resume.
     if (signal === "gate") {
+      gated = true;
       const ask = question ?? summary;
       sh("gh", ["issue", "comment", issue, "--body", sundayComment(ask)], childDir);
       sh("gh", ["issue", "edit", issue, "--add-label", "awaiting-human"], childDir);
@@ -157,9 +181,9 @@ export async function runIssue(
     }
 
     // ready/draft/fail all ship a PR — but only if the branch actually has commits
-    // ahead of main (robust across a resume, where prior commits sit on the branch
-    // and result.commits may be empty for this iteration).
-    const ahead = sh("git", ["rev-list", "--count", `${baseBranch}..${branch}`], childDir);
+    // ahead of its base (robust across a resume, where prior commits sit on the
+    // branch and result.commits may be empty for this iteration).
+    const ahead = sh("git", ["rev-list", "--count", `${stackBase}..${branch}`], childDir);
     if (ahead === "0") {
       console.log(`✋ ${fullName}#${issue}: signal ${signal} but no commits — nothing to ship.`);
       return { signal, branch, sessionId };
@@ -170,7 +194,7 @@ export async function runIssue(
     const prUrl = sh(
       "gh",
       [
-        "pr", "create", "--base", baseBranch, "--head", branch,
+        "pr", "create", "--base", effectiveBase, "--head", branch,
         ...(draft ? ["--draft"] : []),
         "--title", title,
         "--body",
@@ -187,5 +211,8 @@ export async function runIssue(
     return { signal, branch, prUrl, sessionId };
   } finally {
     rmSync(promptFile, { force: true });
+    // The local branch was pushed (a PR outcome) or is empty — origin holds any
+    // history, so drop it. A gated branch is the only copy of its commits → kept.
+    if (!gated) deleteLocalBranch(childDir, branch);
   }
 }

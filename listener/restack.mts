@@ -349,7 +349,9 @@ export function makeRestacker(enqueueStep: (item: WorkItem) => void) {
    *  blocker is still open are left to that blocker's cascade. */
   function reconcileRestacks(fullName: string, cfg: RepoConfig): void {
     const childDir = resolve(parentRoot, cfg.path);
-    sh("git", ["fetch", "origin"], childDir); // freshen origin/main + origin/feat/*
+    // Freshen origin/main + origin/feat/*; `-p` also prunes dangling origin/feat/*
+    // left by merged/deleted branches — the once-per-repo boot hygiene (findings §4).
+    sh("git", ["fetch", "-p", "origin"], childDir);
     let owed = 0;
     for (const p of openFeatPrs(childDir)) {
       const blockers = readBlockers(fullName, childDir, p.issue);

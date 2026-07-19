@@ -121,16 +121,20 @@ export async function runPrComments(fullName: string, cfg: RepoConfig, pr: strin
   // Freshen the PR head so the sandbox works on its current tip.
   sh("git", ["fetch", "origin", branch], childDir);
 
+  // Force fresh-from-origin: Sandcastle prefers an existing LOCAL branch over the
+  // baseBranch start-point, so a stale leftover (crash, or a restack that advanced
+  // origin) would be checked out instead of the PR head. Delete it up front — and
+  // again in `finally` — so this run can't work on the wrong tip regardless of
+  // history (branch-lifecycle findings). The strategy then bases on `origin/<n>`.
+  deleteLocalBranch(childDir, branch);
+
   const promptFile = resolve(
     parentRoot, ".scratch", `prompt-pr-${fullName.replaceAll("/", "-")}-${pr}.md`,
   );
   writeFileSync(promptFile, composePrompt(fullName, pr, issue, base, comments), "utf8");
 
-  // Everything below is torn down in `finally`: the prompt file and the local
-  // `feat/<n>` branch. Deleting the branch decouples the next run from a persisted
-  // local copy — Sandcastle rebuilds it fresh from `origin/<branch>` (baseBranch
-  // below), which is why the strategy bases on the PR head, not `baseRefName`
-  // (basing on `main` would branch off main and lose the PR's commits).
+  // The prompt file and the (recreated) local branch are both torn down in
+  // `finally` — the branch so the next run again rebuilds from origin.
   try {
     console.log(
       `▶ ${fullName} PR#${pr} → ${branch}: ${comments.length} @sunday comment(s) (model ${model}, image ${cfg.imageName})`,
