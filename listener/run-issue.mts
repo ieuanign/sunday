@@ -12,7 +12,9 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
 import { sh, deleteLocalBranch, runLogPath, sundayComment, SUNDAY_SIGN } from "./helper.mts";
+import { assembleFloor } from "./roster-inject.mts";
 import type { RepoConfig } from "#config/repos.mts";
+import { isEffort, EFFORTS, type Effort } from "#config/roster.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 
@@ -87,6 +89,16 @@ export async function runIssue(
   if (!model) {
     throw new Error("MODEL is unset — load .env first (node --env-file=.env …).");
   }
+  // Orchestrator effort (the .env global fallback; per-phase effort is the injected
+  // roster's job — M5.1b). Validate up front so a typo fails fast, not mid-run.
+  const rawEffort = process.env.MODEL_EFFORT?.trim();
+  let effort: Effort | undefined;
+  if (rawEffort) {
+    if (!isEffort(rawEffort)) {
+      throw new Error(`MODEL_EFFORT="${rawEffort}" invalid — one of ${EFFORTS.join(", ")}.`);
+    }
+    effort = rawEffort;
+  }
 
   const childDir = resolve(parentRoot, cfg.path);
   const branch = `feat/${issue}`;
@@ -117,9 +129,15 @@ export async function runIssue(
     );
   }
 
-  // Everything from here shares the composed prompt file AND the local branch;
-  // a `finally` removes both — except a gated branch, which is then the only copy
-  // of its commits (never pushed) and is kept for resume.
+  // Per-run discipline floor: the tracked sub-agents (with this run's roster
+  // model/effort) + the floor skills, mounted read-only at the sandbox user level
+  // (M5.1b). Regenerated each run (idempotent from config/roster.*); the `finally`
+  // removes it. A child's own project-level `.claude/` overrides by presence.
+  const floorRoot = resolve(parentRoot, ".scratch", fullName, issue, "claude");
+
+  // Everything from here shares the composed prompt file, the floor dir, AND the
+  // local branch; a `finally` removes them — except a gated branch, which is then
+  // the only copy of its commits (never pushed) and is kept for resume.
   let gated = false;
   // Base every run on the fresh REMOTE ref, never a stale local: Sandcastle prefers
   // an existing local branch, which may lag origin (or be absent once we delete it
@@ -143,6 +161,13 @@ export async function runIssue(
     // concurrent runs don't interleave on the shared stdout (M3.6). `tail -f` it.
     const logPath = runLogPath(fullName, issue);
 
+    // Assemble + mount the discipline floor at the sandbox user level: the tracked
+    // sub-agents carry this run's per-phase model/effort from config/roster.*, and
+    // the floor skills ride along. Mounted as a SINGLE rw ~/.claude (not two ro
+    // subdirs — see Floor: that breaks session capture). A child's project-level
+    // `.claude/` still wins by presence (project>user precedence).
+    const { dir: claudeDir } = assembleFloor(floorRoot);
+
     // Delegate to the sandbox (it decides; it has no credentials). maxRetries:1 —
     // one automatic re-emit if the agent's tag is missing/malformed.
     console.log(
@@ -150,8 +175,11 @@ export async function runIssue(
         `${resume ? ", resume" : ""})  → ${logPath}`,
     );
     const result = await run({
-      agent: claudeCode(model),
-      sandbox: docker({ imageName: cfg.imageName }),
+      agent: claudeCode(model, effort ? { effort } : undefined),
+      sandbox: docker({
+        imageName: cfg.imageName,
+        mounts: [{ hostPath: claudeDir, sandboxPath: "~/.claude", readonly: false }],
+      }),
       cwd: childDir,
       promptFile,
       branchStrategy: { type: "branch", branch, baseBranch: stackBase },
@@ -206,6 +234,7 @@ export async function runIssue(
     return { signal, branch, prUrl, sessionId };
   } finally {
     rmSync(promptFile, { force: true });
+    rmSync(floorRoot, { recursive: true, force: true }); // per-run floor — regenerated each run
     // The local branch was pushed (a PR outcome) or is empty — origin holds any
     // history, so drop it. A gated branch is the only copy of its commits → kept.
     if (!gated) deleteLocalBranch(childDir, branch);

@@ -43,8 +43,8 @@ the depth; this section sets only the sequence and who owns each phase.
 3. **Review** — the **reviewer**: against the repo's standards and what the issue actually asked
    for.
 4. **Debug (only on red)** — the **debugger**. Skip this phase entirely when everything is green.
-5. **Sign off** — the **architecture-engineer**'s conformance check: the plan is satisfied, tests
-   are green, no scope crept in, the repo's rules are honoured.
+5. **Sign off** — the **sign-off** agent: a final conformance check that the plan is satisfied, tests
+   are green, no scope crept in, and the repo's rules are honoured (a fresh sub-agent, not the plan's).
 6. **Hand off** — commit your work locally; emit the outcome the host needs (§4). You do not open
    the PR.
 
