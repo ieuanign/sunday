@@ -37,6 +37,26 @@ export function isSummon(body: string): boolean {
   return !body.includes(SUNDAY_MARKER) && SUNDAY_MENTION.test(body);
 }
 
+/** Local `feat/*` branches in the child checkout (the branches Sandcastle's branch
+ *  strategy leaves behind). Used by the terminal-PR cleanup + reconcile sweep. */
+export function localFeatBranches(childDir: string): string[] {
+  const out = sh("git", ["branch", "--format=%(refname:short)", "--list", "feat/*"], childDir);
+  return out ? out.split("\n") : [];
+}
+
+/** Delete a local branch once it's no longer the only copy of its commits (a
+ *  terminal PR means origin has the history). Best-effort: a branch checked out in
+ *  a worktree, or already gone, just logs. Never touches origin. */
+export function deleteLocalBranch(childDir: string, branch: string): void {
+  try {
+    if (!sh("git", ["branch", "--list", branch], childDir)) return; // already gone
+    sh("git", ["branch", "-D", branch], childDir);
+    console.log(`  🧹 deleted local ${branch}`);
+  } catch (err) {
+    console.log(`  · could not delete local ${branch}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Route a created comment. Our own comments (marker) are skipped. On a PR, an
  *  @sunday mention drives the PR-comment fix flow (`summonPr`, keyed by PR
  *  number). On an issue, a gate resume (any reply on an `awaiting-human` issue)
@@ -77,8 +97,9 @@ export function handleComment(opts: {
 
 /** @sunday summon (option 1): apply any missing trigger labels; the resulting
  *  `labeled` event runs the normal admission path. Labels stay the source of
- *  truth — @sunday is just a shortcut to applying them. */
-function summon(fullName: string, cfg: RepoConfig, issue: string, labels: string[]): void {
+ *  truth — @sunday is just a shortcut to applying them. Exported so reconcile can
+ *  replay a summon missed while the listener was down. */
+export function summon(fullName: string, cfg: RepoConfig, issue: string, labels: string[]): void {
   const key = `${fullName}#${issue}`;
   const missing = cfg.triggerLabels.filter((label) => !labels.includes(label));
   if (missing.length === 0) {

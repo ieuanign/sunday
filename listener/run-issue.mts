@@ -5,7 +5,7 @@
 // DECIDES (plan → test → implement → commit → emit a signal); this host does
 // ALL I/O (push, PR, comment, label) from that signal.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
@@ -115,70 +115,77 @@ export async function runIssue(
     );
   }
 
-  // Stacking (6b): the base ref must be current locally before Sandcastle
-  // branches feat/<issue> off it — baseBranch is consulted only when the target
-  // branch is new (findings §3). At the "main" default this is a no-op.
-  if (baseBranch !== "main") {
-    sh("git", ["fetch", "origin", baseBranch], childDir);
+  // Everything from here shares the composed prompt file; a `finally` removes it
+  // so `.scratch/prompt-*.md` never leaks (the local branch is a separate
+  // lifecycle — kept on a gate, since it's then the only copy).
+  try {
+    // Stacking (6b): the base ref must be current locally before Sandcastle
+    // branches feat/<issue> off it — baseBranch is consulted only when the target
+    // branch is new (findings §3). At the "main" default this is a no-op.
+    if (baseBranch !== "main") {
+      sh("git", ["fetch", "origin", baseBranch], childDir);
+    }
+
+    // Delegate to the sandbox (it decides; it has no credentials). maxRetries:1 —
+    // one automatic re-emit if the agent's tag is missing/malformed.
+    console.log(
+      `▶ ${fullName}#${issue} → ${branch}  (model ${model}, image ${cfg.imageName}` +
+        `${resume ? ", resume" : ""})`,
+    );
+    const result = await run({
+      agent: claudeCode(model),
+      sandbox: docker({ imageName: cfg.imageName }),
+      cwd: childDir,
+      promptFile,
+      branchStrategy: { type: "branch", branch, baseBranch },
+      logging: { type: "stdout" },
+      ...(resume ? { resumeSession: resume.sessionId } : {}),
+      output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
+    });
+
+    const sessionId = result.iterations.at(-1)?.sessionId;
+    const { signal, summary, question } = result.output;
+
+    // Gate: no PR. Post the question (marked, so resume can skip our own comment)
+    // and claim the issue for a human. The session lives on for resume.
+    if (signal === "gate") {
+      const ask = question ?? summary;
+      sh("gh", ["issue", "comment", issue, "--body", sundayComment(ask)], childDir);
+      sh("gh", ["issue", "edit", issue, "--add-label", "awaiting-human"], childDir);
+      console.log(`⛔ ${fullName}#${issue}: gate — asked the human, awaiting-human.`);
+      return { signal, branch, sessionId, question: ask };
+    }
+
+    // ready/draft/fail all ship a PR — but only if the branch actually has commits
+    // ahead of main (robust across a resume, where prior commits sit on the branch
+    // and result.commits may be empty for this iteration).
+    const ahead = sh("git", ["rev-list", "--count", `${baseBranch}..${branch}`], childDir);
+    if (ahead === "0") {
+      console.log(`✋ ${fullName}#${issue}: signal ${signal} but no commits — nothing to ship.`);
+      return { signal, branch, sessionId };
+    }
+
+    sh("git", ["push", "origin", branch], childDir);
+    const draft = signal !== "ready";
+    const prUrl = sh(
+      "gh",
+      [
+        "pr", "create", "--base", baseBranch, "--head", branch,
+        ...(draft ? ["--draft"] : []),
+        "--title", title,
+        "--body",
+        `${signal === "fail" ? summary : `${summary}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
+      ],
+      childDir,
+    );
+    if (signal === "fail") {
+      sh("gh", ["issue", "edit", issue, "--add-label", "agent-failed"], childDir);
+    }
+    console.log(
+      `${signal === "ready" ? "✅" : "📝"} ${fullName}#${issue}: ${signal} — ${draft ? "draft " : ""}PR ${prUrl}`,
+    );
+    return { signal, branch, prUrl, sessionId };
+  } finally {
+    rmSync(promptFile, { force: true });
   }
-
-  // Delegate to the sandbox (it decides; it has no credentials). maxRetries:1 —
-  // one automatic re-emit if the agent's tag is missing/malformed.
-  console.log(
-    `▶ ${fullName}#${issue} → ${branch}  (model ${model}, image ${cfg.imageName}` +
-      `${resume ? ", resume" : ""})`,
-  );
-  const result = await run({
-    agent: claudeCode(model),
-    sandbox: docker({ imageName: cfg.imageName }),
-    cwd: childDir,
-    promptFile,
-    branchStrategy: { type: "branch", branch, baseBranch },
-    logging: { type: "stdout" },
-    ...(resume ? { resumeSession: resume.sessionId } : {}),
-    output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
-  });
-
-  const sessionId = result.iterations.at(-1)?.sessionId;
-  const { signal, summary, question } = result.output;
-
-  // Gate: no PR. Post the question (marked, so resume can skip our own comment)
-  // and claim the issue for a human. The session lives on for resume.
-  if (signal === "gate") {
-    const ask = question ?? summary;
-    sh("gh", ["issue", "comment", issue, "--body", sundayComment(ask)], childDir);
-    sh("gh", ["issue", "edit", issue, "--add-label", "awaiting-human"], childDir);
-    console.log(`⛔ ${fullName}#${issue}: gate — asked the human, awaiting-human.`);
-    return { signal, branch, sessionId, question: ask };
-  }
-
-  // ready/draft/fail all ship a PR — but only if the branch actually has commits
-  // ahead of main (robust across a resume, where prior commits sit on the branch
-  // and result.commits may be empty for this iteration).
-  const ahead = sh("git", ["rev-list", "--count", `${baseBranch}..${branch}`], childDir);
-  if (ahead === "0") {
-    console.log(`✋ ${fullName}#${issue}: signal ${signal} but no commits — nothing to ship.`);
-    return { signal, branch, sessionId };
-  }
-
-  sh("git", ["push", "origin", branch], childDir);
-  const draft = signal !== "ready";
-  const prUrl = sh(
-    "gh",
-    [
-      "pr", "create", "--base", baseBranch, "--head", branch,
-      ...(draft ? ["--draft"] : []),
-      "--title", title,
-      "--body",
-      `${signal === "fail" ? summary : `${summary}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
-    ],
-    childDir,
-  );
-  if (signal === "fail") {
-    sh("gh", ["issue", "edit", issue, "--add-label", "agent-failed"], childDir);
-  }
-  console.log(
-    `${signal === "ready" ? "✅" : "📝"} ${fullName}#${issue}: ${signal} — ${draft ? "draft " : ""}PR ${prUrl}`,
-  );
-  return { signal, branch, prUrl, sessionId };
 }

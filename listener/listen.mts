@@ -19,7 +19,8 @@ import { runIssue } from "./run-issue.mts";
 import { runPrComments } from "./run-pr-comments.mts";
 import { resolveBase } from "./dag.mts";
 import { makeRestacker } from "./restack.mts";
-import { sh, handleComment, isSummon } from "./helper.mts";
+import { reconcile } from "./reconcile.mts";
+import { sh, handleComment, isSummon, summon, deleteLocalBranch } from "./helper.mts";
 import { getIssue, setIssue, type IssueStatus } from "./state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -29,7 +30,8 @@ const repos = loadRepos(); // fail fast on a malformed routing table
 const scheduler = createScheduler(maxConcurrency);
 // Restack driver bound to the UNCAPPED restack lane (6c). Seeds per-branch steps
 // on a blocker's merge; the cascade drains through the same lane.
-const { restackOnMerge } = makeRestacker(scheduler.enqueueRestack);
+// `reconcileRestacks` re-derives missed merges on boot (step 7).
+const { restackOnMerge, reconcileRestacks } = makeRestacker(scheduler.enqueueRestack);
 
 // Tickets that passed label admission but whose blockers aren't satisfied yet
 // (6b). Re-evaluated when a `pull_request` event lands (a blocker may have just
@@ -165,6 +167,16 @@ function enqueuePrComments(fullName: string, cfg: RepoConfig, pr: string): void 
   scheduler.enqueue({ key, branch: headRefName, run: () => runPrComments(fullName, cfg, pr) });
 }
 
+/** Resume a gated session with a human reply (shared by the live comment handler
+ *  and reconcile's missed-reply recovery — same enqueue, no drift). */
+function resumeGate(fullName: string, cfg: RepoConfig, issue: string, sessionId: string, reply: string): void {
+  scheduler.enqueue({
+    key: `${fullName}#${issue}`,
+    branch: `feat/${issue}`,
+    run: () => runAdmitted(fullName, cfg, issue, { resume: { sessionId, reply } }),
+  });
+}
+
 const server = createServer((req, res) => {
   if (req.method === "GET") {
     res.writeHead(200).end("sunday listener up\n");
@@ -221,12 +233,7 @@ const server = createServer((req, res) => {
             body: payload.comment?.body ?? "",
             labels,
             onPr: Boolean(payload.issue?.pull_request),
-            resume: (sessionId, reply) =>
-              scheduler.enqueue({
-                key: `${repo}#${issue}`,
-                branch: `feat/${issue}`,
-                run: () => runAdmitted(repo, cfg, issue, { resume: { sessionId, reply } }),
-              }),
+            resume: (sessionId, reply) => resumeGate(repo, cfg, issue, sessionId, reply),
             summonPr: (pr) => enqueuePrComments(repo, cfg, pr),
           });
         }
@@ -248,17 +255,22 @@ const server = createServer((req, res) => {
         const cfg = repos[repo];
         const pr = payload.pull_request;
         const headRef: string = pr?.head?.ref ?? "";
-        if (cfg && rawAction === "closed" && pr?.merged && headRef.startsWith("feat/")) {
-          // Seed the restack lane off the handler's critical path (a fetch + gh
-          // scan); the per-branch steps then drain through the uncapped lane.
-          const mergedIssue = headRef.slice("feat/".length);
-          const sha: string = pr.head.sha;
-          console.log(`  ✓ RESTACK seed ${repo}#${mergedIssue}`);
-          Promise.resolve()
-            .then(() => restackOnMerge(repo, cfg, mergedIssue, sha))
-            .catch((err: unknown) =>
-              console.log(`✗ restack seed ${repo}#${mergedIssue}: ${err instanceof Error ? err.message : String(err)}`),
-            );
+        if (cfg && rawAction === "closed" && headRef.startsWith("feat/")) {
+          // Terminal PR (merged or closed): origin holds the history, so the local
+          // branch is no longer the only copy — drop it (else they accumulate).
+          deleteLocalBranch(resolve(parentRoot, cfg.path), headRef);
+          if (pr?.merged) {
+            // Seed the restack lane off the handler's critical path (a fetch + gh
+            // scan); the per-branch steps then drain through the uncapped lane.
+            const mergedIssue = headRef.slice("feat/".length);
+            const sha: string = pr.head.sha;
+            console.log(`  ✓ RESTACK seed ${repo}#${mergedIssue}`);
+            Promise.resolve()
+              .then(() => restackOnMerge(repo, cfg, mergedIssue, sha))
+              .catch((err: unknown) =>
+                console.log(`✗ restack seed ${repo}#${mergedIssue}: ${err instanceof Error ? err.message : String(err)}`),
+              );
+          }
         }
         reevaluateDeferred(repo);
       }
@@ -279,4 +291,22 @@ server.listen(port, () => {
         "will fail; only clean host rebases work. Start with `node --env-file=.env …`.",
     );
   }
+  // Step 7: re-derive pending work from GitHub. Deferred to a microtask so the
+  // server is already accepting before reconcile's (blocking) gh reads run; it
+  // drives the SAME callbacks the webhook path uses, so recovery can't drift.
+  Promise.resolve()
+    .then(() =>
+      reconcile({
+        repos,
+        admitIssue,
+        admitOrDefer,
+        summon,
+        resumeGate,
+        enqueuePrComments,
+        reconcileRestacks,
+      }),
+    )
+    .catch((err: unknown) =>
+      console.log(`✗ reconcile: ${err instanceof Error ? err.message : String(err)}`),
+    );
 });

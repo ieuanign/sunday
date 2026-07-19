@@ -7,13 +7,13 @@
 // emits per-comment replies. This host pushes (if it committed) and posts each
 // reply — inline comments thread, conversation comments are quoted.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, isSummon } from "./helper.mts";
+import { sh, isSummon, deleteLocalBranch } from "./helper.mts";
 import { sundayComment } from "./run-issue.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
@@ -118,8 +118,7 @@ export async function runPrComments(fullName: string, cfg: RepoConfig, pr: strin
     return;
   }
 
-  // Freshen the branch so the sandbox works on the PR's current head (base ref is
-  // ignored — the branch already exists — but diffing needs it current too).
+  // Freshen the PR head so the sandbox works on its current tip.
   sh("git", ["fetch", "origin", branch], childDir);
 
   const promptFile = resolve(
@@ -127,34 +126,44 @@ export async function runPrComments(fullName: string, cfg: RepoConfig, pr: strin
   );
   writeFileSync(promptFile, composePrompt(fullName, pr, issue, base, comments), "utf8");
 
-  console.log(
-    `▶ ${fullName} PR#${pr} → ${branch}: ${comments.length} @sunday comment(s) (model ${model}, image ${cfg.imageName})`,
-  );
-  const result = await run({
-    agent: claudeCode(model),
-    sandbox: docker({ imageName: cfg.imageName }),
-    cwd: childDir,
-    promptFile,
-    branchStrategy: { type: "branch", branch, baseBranch: base },
-    logging: { type: "stdout" },
-    output: Output.object({ tag: SIGNAL_TAG, schema: prResultSchema, maxRetries: 1 }),
-  });
+  // Everything below is torn down in `finally`: the prompt file and the local
+  // `feat/<n>` branch. Deleting the branch decouples the next run from a persisted
+  // local copy — Sandcastle rebuilds it fresh from `origin/<branch>` (baseBranch
+  // below), which is why the strategy bases on the PR head, not `baseRefName`
+  // (basing on `main` would branch off main and lose the PR's commits).
+  try {
+    console.log(
+      `▶ ${fullName} PR#${pr} → ${branch}: ${comments.length} @sunday comment(s) (model ${model}, image ${cfg.imageName})`,
+    );
+    const result = await run({
+      agent: claudeCode(model),
+      sandbox: docker({ imageName: cfg.imageName }),
+      cwd: childDir,
+      promptFile,
+      branchStrategy: { type: "branch", branch, baseBranch: `origin/${branch}` },
+      logging: { type: "stdout" },
+      output: Output.object({ tag: SIGNAL_TAG, schema: prResultSchema, maxRetries: 1 }),
+    });
 
-  const { committed, summary, replies } = result.output;
-  if (committed) {
-    sh("git", ["push", "origin", branch], childDir);
-  }
-
-  const byId = new Map(comments.map((c) => [c.id, c]));
-  for (const r of replies) {
-    const c = byId.get(r.comment);
-    if (!c) {
-      console.log(`  · ${fullName} PR#${pr}: reply to unknown comment ${r.comment} — skipped`);
-      continue;
+    const { committed, summary, replies } = result.output;
+    if (committed) {
+      sh("git", ["push", "origin", branch], childDir);
     }
-    postReply(fullName, childDir, pr, c, r.body);
+
+    const byId = new Map(comments.map((c) => [c.id, c]));
+    for (const r of replies) {
+      const c = byId.get(r.comment);
+      if (!c) {
+        console.log(`  · ${fullName} PR#${pr}: reply to unknown comment ${r.comment} — skipped`);
+        continue;
+      }
+      postReply(fullName, childDir, pr, c, r.body);
+    }
+    console.log(
+      `💬 ${fullName} PR#${pr}: ${committed ? "pushed + " : ""}replied to ${replies.length} comment(s) — ${summary}`,
+    );
+  } finally {
+    rmSync(promptFile, { force: true });
+    deleteLocalBranch(childDir, branch);
   }
-  console.log(
-    `💬 ${fullName} PR#${pr}: ${committed ? "pushed + " : ""}replied to ${replies.length} comment(s) — ${summary}`,
-  );
 }

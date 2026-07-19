@@ -24,7 +24,7 @@ import { resolve } from "node:path";
 
 import { sh } from "./helper.mts";
 import { sundayComment } from "./run-issue.mts";
-import { readBlockers } from "./dag.mts";
+import { readBlockers, type Blocker } from "./dag.mts";
 import { runAgentInSandbox } from "./sandbox-agent.mts";
 import type { WorkItem } from "./scheduler.mts";
 import type { RepoConfig } from "#config/repos.mts";
@@ -78,23 +78,67 @@ interface Dependent {
   issue: string;
 }
 
-/** Open PRs stacked on `blockerIssue`: their issue lists it as a blocker
- *  (forward edge). Only `feat/<n>` heads are ours; others are ignored. */
-function dependents(fullName: string, childDir: string, blockerIssue: string): Dependent[] {
+/** Every open PR whose head is one of ours (`feat/<n>`). The shared scan behind
+ *  both dependent discovery (6c) and the reconcile restack sweep (step 7). */
+function openFeatPrs(childDir: string): Dependent[] {
   const prs = JSON.parse(
     sh("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName", "--limit", "100"], childDir),
   ) as { number: number; headRefName: string }[];
+  return prs
+    .filter((p) => p.headRefName.startsWith("feat/"))
+    .map((p) => ({ pr: String(p.number), branch: p.headRefName, issue: p.headRefName.slice("feat/".length) }));
+}
+
+/** Open PRs stacked on `blockerIssue`: their issue lists it as a blocker
+ *  (forward edge). Only `feat/<n>` heads are ours; others are ignored. */
+function dependents(fullName: string, childDir: string, blockerIssue: string): Dependent[] {
   const target = Number(blockerIssue);
-  const out: Dependent[] = [];
-  for (const p of prs) {
-    if (!p.headRefName.startsWith("feat/")) continue;
-    const issue = p.headRefName.slice("feat/".length);
-    const blockers = readBlockers(fullName, childDir, issue);
-    if (blockers.some((b) => b.number === target)) {
-      out.push({ pr: String(p.number), branch: p.headRefName, issue });
-    }
+  return openFeatPrs(childDir).filter((p) =>
+    readBlockers(fullName, childDir, p.issue).some((b) => b.number === target),
+  );
+}
+
+/** Is a dependent still owed a restack onto main? Only a single now-closed blocker
+ *  can leave one — that's the sole case `decideBase` stacks (N>1 or an open blocker
+ *  never stacks). It's outstanding until `origin/main` is in the branch's ancestry
+ *  (an already-rebased branch has it; a still-stacked one doesn't). `mainIsAncestor`
+ *  is lazy so the git check is skipped when the blocker precondition already fails.
+ *  Pure + injected — unit-tested with synthetic blockers. */
+export function restackOwed(blockers: Blocker[], mainIsAncestor: () => boolean): boolean {
+  return blockers.length === 1 && blockers[0].state === "closed" && !mainIsAncestor();
+}
+
+/** Is `maybeAncestor` an ancestor of `ref`? `git merge-base --is-ancestor` exits
+ *  0 (true) / 1 (false); `sh` throws on the non-zero, so false is the catch. */
+function isAncestor(childDir: string, maybeAncestor: string, ref: string): boolean {
+  try {
+    sh("git", ["merge-base", "--is-ancestor", maybeAncestor, ref], childDir);
+    return true;
+  } catch {
+    return false;
   }
-  return out;
+}
+
+/** The fork point for restacking a dependent of merged blocker `blockerIssue`:
+ *  the blocker's merged-PR head commit (`upstream..dependent` = the dependent's
+ *  OWN commits). On the live path this is the merge payload's `head.sha`; on
+ *  reconcile we recover it from GitHub — `gh pr view` keeps `headRefOid` after the
+ *  branch is deleted, and `fetch refs/pull/<n>/head` makes the object present so a
+ *  later `rebase --onto` can reach it. Returns null (→ skip; can't rebase safely)
+ *  if the blocker never merged via a `feat/<n>` PR, or the object is unreachable. */
+function mergedBlockerTip(childDir: string, blockerIssue: number): string | null {
+  const prs = JSON.parse(
+    sh("gh", ["pr", "list", "--head", `feat/${blockerIssue}`, "--state", "merged", "--json", "number,headRefOid", "--limit", "5"], childDir),
+  ) as { number: number; headRefOid: string }[];
+  if (prs.length === 0) return null;
+  const { number, headRefOid } = prs[0];
+  const present = () => {
+    try { sh("git", ["cat-file", "-e", `${headRefOid}^{commit}`], childDir); return true; } catch { return false; }
+  };
+  if (!present()) {
+    try { sh("git", ["fetch", "origin", `refs/pull/${number}/head`], childDir); } catch { /* unreachable → null below */ }
+  }
+  return present() ? headRefOid : null;
 }
 
 /** Rebase `branch`'s own commits (`upstream..branch`) onto `ontoRef` in an
@@ -294,5 +338,36 @@ export function makeRestacker(enqueueStep: (item: WorkItem) => void) {
     }
   }
 
-  return { restackOnMerge };
+  /** Restart recovery (step 7): the restack queue + branch locks are in-memory
+   *  and lost on restart, so re-derive any restack a merge fired while we were
+   *  down. A dependent is owed a restack iff its PR is open, it has exactly one
+   *  (now-closed) blocker — the only case `decideBase` stacks — and `origin/main`
+   *  isn't yet an ancestor of its head (an already-rebased branch has main in its
+   *  ancestry; a still-stacked one does not). Enqueues the SAME `Step` the live
+   *  path uses, so the cascade + conflict fix + gate all apply; dedup by key means
+   *  it's harmless if the live merge handler also seeded it. Deeper nodes whose
+   *  blocker is still open are left to that blocker's cascade. */
+  function reconcileRestacks(fullName: string, cfg: RepoConfig): void {
+    const childDir = resolve(parentRoot, cfg.path);
+    sh("git", ["fetch", "origin"], childDir); // freshen origin/main + origin/feat/*
+    let owed = 0;
+    for (const p of openFeatPrs(childDir)) {
+      const blockers = readBlockers(fullName, childDir, p.issue);
+      if (!restackOwed(blockers, () => isAncestor(childDir, "origin/main", `origin/${p.branch}`))) continue;
+      const upstream = mergedBlockerTip(childDir, blockers[0].number);
+      if (!upstream) {
+        console.log(`  · reconcile restack ${p.branch}: blocker #${blockers[0].number} has no recoverable merged tip — skipping`);
+        continue;
+      }
+      console.log(`  ⟲ reconcile restack ${p.branch} → main (blocker #${blockers[0].number})`);
+      enqueue(fullName, cfg, childDir, {
+        branch: p.branch, onto: "origin/main", upstream,
+        retargetToMain: true, pr: p.pr, issue: p.issue,
+      });
+      owed++;
+    }
+    if (owed) console.log(`⟲ reconcile: seeded ${owed} missed restack(s) for ${fullName}`);
+  }
+
+  return { restackOnMerge, reconcileRestacks };
 }
