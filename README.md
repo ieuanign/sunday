@@ -10,14 +10,16 @@ Sandcastle automation that runs coding agents in Docker sandboxes. Each hosted r
 owns its own rules — its `CLAUDE.md`, ADRs, and context. Sunday injects a baseline
 discipline into every run and otherwise defers to each repo.
 
-> **Status: pipeline implemented (M1–M4), live-hardening in progress.** The listener,
+> **Status: pipeline implemented (M1–M5), live-hardening in progress.** The listener,
 > per-repo routing, the event loop, the human gate, dependency stacking, crash recovery,
 > the operability layer (failure taxonomy, quota pause/resume, notifier, per-flow logs,
-> `sunday status`, and optional Telegram control), and process supervision are **built and
-> smoke-verified**. A few paths are still owed an end-to-end live run (a real quota pause; a
-> Telegram command round-trip; a supervised kill → restart → reconcile). The resource/cost
-> matrix (M5) is next. See [`docs/architecture.md`](docs/architecture.md),
-> [`docs/operability.md`](docs/operability.md), and [`docs/supervision.md`](docs/supervision.md).
+> `sunday status`, and optional Telegram control), process supervision, and resource
+> management (per-phase model/effort matrix + discipline-floor injection, context-threshold
+> handoff, and a cost-weighted token report) are **built and smoke-verified**. A few paths are
+> still owed an end-to-end live run (a real quota pause; a Telegram round-trip; a supervised
+> kill → restart → reconcile; a forced ≥120K handoff). See [`docs/architecture.md`](docs/architecture.md),
+> [`docs/operability.md`](docs/operability.md), [`docs/supervision.md`](docs/supervision.md), and
+> [`docs/resource-management.md`](docs/resource-management.md).
 
 ## Architecture
 
@@ -53,20 +55,24 @@ Public (tracked) layout:
 │   ├── architecture.md    the pipeline design
 │   ├── operability.md     failure handling, notifier, status, Telegram control (M3)
 │   ├── supervision.md     running the stack under process supervision (M4)
+│   ├── resource-management.md  per-phase matrix, handoff-at-threshold, token report (M5)
 │   └── sandbox-prompt.md  the baseline injected into every sandbox run
 ├── .claude/               tracked slice of the discipline floor:
-│   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger)
+│   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger, sign-off)
 │   └── skills/            roster skills (tdd, code-review-mp, diagnosing-bugs)
 ├── listener/              the Node webhook listener + orchestration (listen, scheduler,
-│                          run-issue, restack, reconcile, classify, notify, telegram, status)
+│                          run-issue, restack, reconcile, classify, notify, telegram, status, token-report)
 ├── config/                per-repo routing (repos.json — gitignored; repos.example.json tracked)
+│                          + roster.json — the per-phase model/effort matrix (tracked)
 ├── scripts/               dev helpers (gen-workspace.sh, webhook-forward.sh)
 └── repos/                 child repo clones — gitignored, each its own repo
     └── <child>/           own origin, own .sandcastle/, own rules
 
 At runtime the listener writes gitignored operability artifacts under `.scratch/`:
 per-flow logs (`.scratch/<repo>/<issue>/run.log`), the event log
-(`.scratch/operability/events.jsonl`), and the pause state (`.scratch/operability/pause.json`).
+(`.scratch/operability/events.jsonl`), the pause state (`.scratch/operability/pause.json`),
+token reports (`.scratch/<repo>/token-report/`), and threshold-handoff notes
+(`.scratch/<repo>/handoff/`).
 ```
 
 Child repositories live under `repos/` as independent clones — each with its own `origin`,
@@ -104,6 +110,9 @@ records everything durably, and can be watched and steered. Detail + failure-cla
 | **Status snapshot** | Pipeline state, issues by status, and recent events in one view | `npm run status` |
 | **Telegram control** *(optional)* | Phone notifications + `/status` `/pause` `/resume` `/resume-at` over polling ($0, no public endpoint) | set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` |
 | **Supervision** *(M4)* | Runs the listener + webhook forwarders as auto-restarting supervised processes — kill the listener → restart → reconcile recovers | `devbox services up` (see [`docs/supervision.md`](docs/supervision.md)) |
+| **Per-phase matrix** *(M5)* | Each run injects the discipline floor (agents + skills) at the sandbox user level; per-phase model/effort from the matrix, child's own `.claude/` overrides | edit `config/roster.json`; `.env` `MODEL`/`MODEL_EFFORT` is the fallback |
+| **Handoff-at-threshold** *(M5)* | A gate-resumed session ≥120K context hands off to a fresh one via an agent-written note instead of resuming the bloated session | automatic; `HANDOFF_CTX_THRESHOLD` (`.env`) |
+| **Token report** *(M5)* | Per-phase, cost-weighted token accounting on every run (no USD) — surfaces the real offender, not the raw-token-heaviest | `.scratch/<repo>/token-report/` (see [`docs/resource-management.md`](docs/resource-management.md)) |
 
 ## Documentation
 
@@ -113,6 +122,8 @@ records everything durably, and can be watched and steered. Detail + failure-cla
   log, `sunday status`, and the optional Telegram control channel.
 - [`docs/supervision.md`](docs/supervision.md) — running the listener + forwarders under
   process supervision (`devbox services up`), the singleton rule, and restart recovery.
+- [`docs/resource-management.md`](docs/resource-management.md) — the per-phase model/effort
+  matrix + discipline-floor injection, context-threshold handoff, and the token report.
 - [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) — the baseline discipline injected into
   every sandbox run.
 

@@ -1,10 +1,11 @@
 # Implementation plan — the Sunday pipeline
 
-> **Status: build-ready plan (design phase).** This is the ordered, dependency-aware build
-> sequence for the pipeline, synthesised from a resolved design + a verified spike. It is the
-> hand-off to the execution build; nothing here is built yet. It is deliberately **generic** —
-> concrete per-child specifics (image recipe, service wiring) live in each child's own
-> `.sandcastle/` and are not part of this template.
+> **Status: BUILT — M1–M5 implemented on `feat/init`** (M5.4 onboarding tool is the one
+> deferred/separate piece). This was the ordered, dependency-aware build sequence, synthesised
+> from a resolved design + a verified spike; it now records what was built. Live-hardening runs
+> (a real quota pause, a forced ≥120K handoff, per-phase model/effort in a real session log)
+> remain owed. It is deliberately **generic** — concrete per-child specifics (image recipe,
+> service wiring) live in each child's own `.sandcastle/` and are not part of this template.
 
 ## What this builds
 
@@ -201,6 +202,12 @@ service (`--url http://listener:<port>/` over the compose network, `GH_TOKEN` in
 
 ### M5 — Resource management + onboarding polish
 
+> **BUILT** (M5.1–M5.3 on `feat/init`): the per-phase matrix + discipline-floor injection, the
+> ctx-threshold handoff, and the cost-weighted token report. Operator guide:
+> [`resource-management.md`](resource-management.md). **M5.4 (onboarding tool) is deferred/separate.**
+> The floor is injected as a **single rw `~/.claude` mount** (two subdir mounts break session
+> capture) and Sign-off is its **own** sub-agent — see the operator guide + the design notes below.
+
 Layered last: the pipeline works; now tune cost and smooth onboarding. Per #11, the matrix's
 numbers are **tuned from real production data**, so this deliberately follows M1–M4.
 
@@ -216,11 +223,23 @@ numbers are **tuned from real production data**, so this deliberately follows M1
    sandbox agent self-orchestrates** the sequential phases (1 container; work stays fresh;
    orchestrator growth caught by the §2 handoff). Escalate to host-driven phases only if the token
    report shows the orchestrator itself hitting the threshold.
-2. **Handoff-at-threshold:** TS reads the orchestrator session's `ctx = input + cacheRead +
-   cacheCreation` at **resume points** — `<120K` → `run({resumeSession})`; `≥120K` → an
-   **agent-written** handoff doc (bounded resume-one-turn → `.scratch/<repo>/handoff/<issue>-<n>.md`)
-   → fresh `run()`. On summarize-turn error → notify (M3) + halt. Clean up handoff files on
-   terminal push. Redirect the handoff skill's OS-temp write to `.scratch/<repo>/handoff/`.
+2. **Handoff-at-threshold** *(design locked — grilled 2026-07-19)*: TS reads the orchestrator
+   session's `ctx = input + cacheRead + cacheCreation` from the prior `RunResult`'s last iteration
+   `usage`, **at the one resume point that exists — the gate reply** (a quota pause restarts fresh,
+   not resumed, so it needs no check). `<120K` → `run({resumeSession})`; `≥120K` → a **bounded
+   resume-one-turn** that emits a handoff doc as **tagged output** (`Output.string({tag:
+   "sunday-handoff"})`) — NOT a file written in the credential-free box; TS writes
+   `.scratch/<repo>/handoff/<issue>-<n>.md` from that output, then starts a **fresh** `run()` (no
+   `resumeSession`) seeded with `[handoff doc] + [Sunday continue lead-in] + [the human's reply] +
+   [finish-reminder]`. The bounded turn's instructions **reuse the `/handoff` skill's own text**
+   (read at run time, "save to OS temp" swapped for "emit as tagged output"). **Failure split:** a
+   handoff turn that *throws* a classifiable error (quota/auth/transient) routes through the existing
+   classify+act (pause/backoff, retried later); one that *returns no usable doc* is a distinct
+   `summarize-failed` event (clear message) → the issue goes **`agent-failed`** (a relabel retries
+   fresh — never `awaiting-human`, which would re-resume the bloated session in a loop). Clean up
+   handoff files on terminal push. Threshold = `HANDOFF_CTX_THRESHOLD` (default 120K, `.env`
+   override). *(Separate tiny fix: redirect the `/handoff` skill's own OS-temp write to
+   `.scratch/<repo>/handoff/` — orthogonal to the sandbox mechanism.)*
 3. **Cost-weighted token report** (free, host-side on run completion): per-phase raw 4 fields +
    `ctxTokens` + `cacheHitRatio` + flags; one normalized weighted **sort key**
    (`input×1 + cacheCreation×1.25 + cacheRead×0.1 + output×5`); **no USD**. Store

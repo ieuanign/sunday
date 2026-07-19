@@ -151,6 +151,27 @@ handoff to a human, retried by relabelling.
   gate replies, missed PR-merge restacks, orphaned `agent-working`. Because GitHub is the
   truth, an outage is a *delay, not a loss*; total host loss is recoverable.
 
+## Resource management
+
+*(The M5 layer — design; build order in [`implementation-plan.md`](implementation-plan.md) §M5.)*
+
+- **Per-phase model/effort matrix.** Each run injects `.claude/agents/<phase>.md` sub-agent
+  definitions (model + effort frontmatter) from `config/roster.*`, mounted **read-only at the
+  sandbox user level** (`~/.claude/agents/`). A child's own **project-level** `.claude/agents/`
+  overrides them (project > user precedence) — so Sunday's roster is a **floor**, not an override.
+  `.env` `MODEL`/`MODEL_EFFORT` is the global fallback (and the orchestrator's own effort).
+- **Handoff-at-threshold.** The orchestrator session only grows across **repeated gate cycles** on
+  one issue (the sole session-resuming path; a quota pause restarts fresh). At a gate reply, if the
+  prior run's context (`input + cacheRead + cacheCreation`) is `≥ 120K`, TS does one bounded turn
+  that **emits** a handoff note as tagged output (never a file — the box is credential-free), writes
+  it host-side, and starts a **fresh** session seeded with the note + the human's reply. A handoff
+  turn that throws a transient/quota error is retried like any run; one that produces no usable note
+  fails the issue as `agent-failed` (a relabel retries fresh — it never re-resumes the bloated
+  session). Handoff notes live under `.scratch/<repo>/handoff/` and are cleared when the PR opens.
+- **Cost-weighted token report.** On run completion, a host-side (free, no-USD) report records
+  per-phase token classes, peak context/zone, and a weighted sort key that surfaces the real
+  offender (output is the priciest class). Stored under `.scratch/<repo>/token-report/`.
+
 ## Multi-repo layout
 
 ```
