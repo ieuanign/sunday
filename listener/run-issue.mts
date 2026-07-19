@@ -23,6 +23,8 @@ import {
   HANDOFF_TAG,
 } from "./helper.mts";
 import { assembleFloor } from "./roster-inject.mts";
+import { emitReport } from "./token-report.mts";
+import { sendTelegram } from "./telegram.mts";
 import type { RepoConfig } from "#config/repos.mts";
 import { isEffort, EFFORTS, type Effort } from "#config/roster.mts";
 
@@ -237,6 +239,10 @@ export async function runIssue(
         );
       }
       writeFileSync(handoffDocPath(fullName, issue, seq), note, "utf8");
+      // M5.3: the handoff turn is the one token-costing bit of M5.2 — report the
+      // retired session's consumption too (keyed distinctly), so it isn't invisible.
+      const ho = handoff.iterations.at(-1);
+      if (ho?.sessionFilePath && ho.sessionId) emitReport(fullName, ho.sessionFilePath, `${ho.sessionId}-handoff${seq}`);
       // Fresh-run prompt: the note + a Sunday continue lead-in + the human's reply +
       // the finish-reminder (carries the §4 tag literal). No resumeSession below.
       writeFileSync(
@@ -272,6 +278,9 @@ export async function runIssue(
     const ctxTokens = last?.usage
       ? last.usage.inputTokens + last.usage.cacheReadInputTokens + last.usage.cacheCreationInputTokens
       : undefined;
+    // M5.3: on completion, emit the cost-weighted per-phase token report (host-side,
+    // free, never throws) from the captured session + its sub-agent files.
+    if (last?.sessionFilePath && sessionId) emitReport(fullName, last.sessionFilePath, sessionId);
     const { signal, summary, question } = result.output;
 
     // Gate: no PR. Post the question (marked, so resume can skip our own comment)
@@ -313,6 +322,12 @@ export async function runIssue(
     console.log(
       `${signal === "ready" ? "✅" : "📝"} ${fullName}#${issue}: ${signal} — ${draft ? "draft " : ""}PR ${prUrl}`,
     );
+    // Sentry-like Telegram floor: a PR opening is an important milestone worth the
+    // phone alert (failures already notify; routine chatter — token reports — do NOT).
+    // Fire-and-forget, no-ops when Telegram is unconfigured; never breaks the run.
+    void sendTelegram(
+      `${signal === "ready" ? "✅" : "📝"} ${fullName}#${issue}: ${signal} — ${draft ? "draft " : ""}PR ${prUrl}`,
+    ).catch(() => {});
     // Terminal push — the issue's handoff notes are spent (M5.2 D6).
     cleanupHandoffs(fullName, issue);
     return { signal, branch, prUrl, sessionId, ctxTokens, handoffSeq: outHandoffSeq };
