@@ -13,7 +13,7 @@ import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, isSummon, deleteLocalBranch } from "./helper.mts";
+import { sh, isSummon, deleteLocalBranch, runLogPath } from "./helper.mts";
 import { sundayComment } from "./run-issue.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
@@ -136,8 +136,11 @@ export async function runPrComments(fullName: string, cfg: RepoConfig, pr: strin
   // The prompt file and the (recreated) local branch are both torn down in
   // `finally` — the branch so the next run again rebuilds from origin.
   try {
+    // Per-flow log (M3.6): keyed `pr-<n>` so a PR-comment run doesn't collide with
+    // the issue run's `<issue>/run.log`. `tail -f` it.
+    const logPath = runLogPath(fullName, `pr-${pr}`);
     console.log(
-      `▶ ${fullName} PR#${pr} → ${branch}: ${comments.length} @sunday comment(s) (model ${model}, image ${cfg.imageName})`,
+      `▶ ${fullName} PR#${pr} → ${branch}: ${comments.length} @sunday comment(s) (model ${model}, image ${cfg.imageName})  → ${logPath}`,
     );
     const result = await run({
       agent: claudeCode(model),
@@ -145,7 +148,7 @@ export async function runPrComments(fullName: string, cfg: RepoConfig, pr: strin
       cwd: childDir,
       promptFile,
       branchStrategy: { type: "branch", branch, baseBranch: `origin/${branch}` },
-      logging: { type: "stdout" },
+      logging: { type: "file", path: logPath },
       output: Output.object({ tag: SIGNAL_TAG, schema: prResultSchema, maxRetries: 1 }),
     });
 

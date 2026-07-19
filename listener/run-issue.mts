@@ -11,7 +11,7 @@ import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, SUNDAY_MARKER, deleteLocalBranch } from "./helper.mts";
+import { sh, SUNDAY_MARKER, deleteLocalBranch, runLogPath } from "./helper.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -149,11 +149,15 @@ export async function runIssue(
     }
     const stackBase = `origin/${effectiveBase}`;
 
+    // Per-flow log: this run's full agent output streams to its own file so
+    // concurrent runs don't interleave on the shared stdout (M3.6). `tail -f` it.
+    const logPath = runLogPath(fullName, issue);
+
     // Delegate to the sandbox (it decides; it has no credentials). maxRetries:1 —
     // one automatic re-emit if the agent's tag is missing/malformed.
     console.log(
       `▶ ${fullName}#${issue} → ${branch}  (model ${model}, image ${cfg.imageName}` +
-        `${resume ? ", resume" : ""})`,
+        `${resume ? ", resume" : ""})  → ${logPath}`,
     );
     const result = await run({
       agent: claudeCode(model),
@@ -161,7 +165,7 @@ export async function runIssue(
       cwd: childDir,
       promptFile,
       branchStrategy: { type: "branch", branch, baseBranch: stackBase },
-      logging: { type: "stdout" },
+      logging: { type: "file", path: logPath },
       ...(resume ? { resumeSession: resume.sessionId } : {}),
       output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
     });

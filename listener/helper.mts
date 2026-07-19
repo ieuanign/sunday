@@ -2,6 +2,7 @@
 // listener): shelling out, the comment marker, and comment routing.
 
 import { execFileSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
@@ -43,6 +44,19 @@ const SUNDAY_SPEC_MARKER = "<!-- sunday:spec-nudge -->";
  *  (marker). Used for inline review comments, which route outside handleComment. */
 export function isSummon(body: string): boolean {
   return !body.includes(SUNDAY_MARKER) && SUNDAY_MENTION.test(body);
+}
+
+/** Per-flow run-log path: `.scratch/<repo>/<flow>/run.log` (flow = the issue number
+ *  for an issue run, or `pr-<n>` for a PR-comment run). Ensures the directory
+ *  exists and returns the absolute path. One place so both run paths write the same
+ *  layout — no drift. Sandcastle streams the agent's full output here
+ *  (`logging:{type:"file"}`) instead of the shared stdout, so concurrent runs no
+ *  longer interleave; the listener stdout stays a terse one-line-per-event summary.
+ *  Under gitignored `.scratch/`. */
+export function runLogPath(fullName: string, flow: string): string {
+  const dir = resolve(parentRoot, ".scratch", fullName, flow);
+  mkdirSync(dir, { recursive: true });
+  return resolve(dir, "run.log");
 }
 
 /** Local `feat/*` branches in the child checkout (the branches Sandcastle's branch
