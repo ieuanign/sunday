@@ -10,10 +10,13 @@ Sandcastle automation that runs coding agents in Docker sandboxes. Each hosted r
 owns its own rules — its `CLAUDE.md`, ADRs, and context. Sunday injects a baseline
 discipline into every run and otherwise defers to each repo.
 
-> **Status: design phase.** Nothing is built yet. This repository currently holds the
-> design and the docs. The listener, config, and Sandcastle wiring described below are
-> planned, and the load-bearing Sandcastle assumptions are still unverified. See
-> [`docs/architecture.md`](docs/architecture.md).
+> **Status: pipeline implemented (M1–M3), live-hardening in progress.** The listener,
+> per-repo routing, the event loop, the human gate, dependency stacking, crash recovery,
+> and the operability layer (failure taxonomy, quota pause/resume, notifier, per-flow
+> logs, `sunday status`, and optional Telegram control) are **built and smoke-verified**.
+> A few paths are still owed an end-to-end live run (a real quota pause; a Telegram
+> command round-trip). Supervision (M4) and the resource/cost matrix (M5) are next. See
+> [`docs/architecture.md`](docs/architecture.md) and [`docs/operability.md`](docs/operability.md).
 
 ## Architecture
 
@@ -46,15 +49,21 @@ Public (tracked) layout:
 ├── .env.example           config template (copy to .env)
 ├── docs/
 │   ├── architecture.md    the pipeline design
+│   ├── operability.md     failure handling, notifier, status, Telegram control (M3)
 │   └── sandbox-prompt.md  the baseline injected into every sandbox run
 ├── .claude/               tracked slice of the discipline floor:
 │   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger)
 │   └── skills/            roster skills (tdd, code-review-mp, diagnosing-bugs)
-├── listener/              (planned) the Node webhook listener
-├── config/                (planned) per-repo routing
+├── listener/              the Node webhook listener + orchestration (listen, scheduler,
+│                          run-issue, restack, reconcile, classify, notify, telegram, status)
+├── config/                per-repo routing (repos.json — gitignored; repos.example.json tracked)
 ├── scripts/               dev helpers (e.g. gen-workspace.sh)
 └── repos/                 child repo clones — gitignored, each its own repo
     └── <child>/           own origin, own .sandcastle/, own rules
+
+At runtime the listener writes gitignored operability artifacts under `.scratch/`:
+per-flow logs (`.scratch/<repo>/<issue>/run.log`), the event log
+(`.scratch/operability/events.jsonl`), and the pause state (`.scratch/operability/pause.json`).
 ```
 
 Child repositories live under `repos/` as independent clones — each with its own `origin`,
@@ -75,10 +84,29 @@ tracked/ignored status. Give each child its own editor root so decorations follo
 - **JetBrains:** add each child under *Settings → Version Control → Directory Mappings*.
 - **Any editor:** open the child in its own window, or check `git -C repos/<child> status --ignored`.
 
+## Operability
+
+The listener classifies every failure off the run result, reacts oppositely per class,
+records everything durably, and can be watched and steered. Detail + failure-class table:
+[`docs/operability.md`](docs/operability.md).
+
+| Feature | What it does | How to use / configure |
+| --- | --- | --- |
+| **Failure taxonomy** | Classifies each run failure — quota · auth (403) · transient · run-level · unknown — off the run-result *shape*, not exit codes | automatic |
+| **Quota pause/resume** | A quota wall pauses **both** lanes and auto-resumes at reset + 5 min; no parseable reset → holds for a human `/resume-at` | automatic; durable across restarts |
+| **403 halt** | Aborts every in-flight run and halts; a human re-auths, reconcile re-admits on the next boot | automatic |
+| **Transient backoff** | Bounded exponential backoff on 429 / network / 5xx, then the `agent-failed` path | automatic |
+| **Per-flow logs** | Each run streams to its own file instead of a shared, interleaved stdout | `tail -f .scratch/<repo>/<issue>/run.log` |
+| **Durable event log** | Every P1/P2/P3 event is appended (written first, synchronously) as the source of truth | `.scratch/operability/events.jsonl` |
+| **Status snapshot** | Pipeline state, issues by status, and recent events in one view | `npm run status` |
+| **Telegram control** *(optional)* | Phone notifications + `/status` `/pause` `/resume` `/resume-at` over polling ($0, no public endpoint) | set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` |
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — the pipeline design: shape, trigger
   labels, state machine, dependency stacking, concurrency, and crash recovery.
+- [`docs/operability.md`](docs/operability.md) — failure handling, the notifier + event
+  log, `sunday status`, and the optional Telegram control channel.
 - [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) — the baseline discipline injected into
   every sandbox run.
 
@@ -96,12 +124,19 @@ Two things are installed manually; everything else is declared in `devbox.json`:
 Then:
 
 ```bash
-devbox shell          # enter the provisioned environment
-cp .env.example .env  # fill in your agent auth + webhook secret
+devbox shell          # enter the provisioned env; its init hook also installs the gh webhook
+                      #   extension (cli/gh-webhook) — gh ships no built-in `webhook` command
+gh auth login         # gh drives the webhook forwarder, PRs, labels, comments
+cp .env.example .env  # agent auth + webhook secret (+ optional Telegram keys)
 ```
 
 > Devbox provisions the **parent host** toolchain only. Each child sandbox gets its
 > dependencies from its own `.sandcastle/Dockerfile`, not from here.
+
+**Optional — Telegram control.** For phone notifications + remote `/pause` `/resume`
+`/status`, set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env`. It's off by default
+(no keys → no-op), uses polling ($0, no public endpoint), and needs no extra install.
+Setup steps are in [`docs/operability.md`](docs/operability.md).
 
 ### Choosing an agent
 
@@ -134,6 +169,10 @@ repo documents — but the tailored rubric and label vocabulary won't be present
   keep it in `.env`.
 - **Sandbox isolation** — each run executes in a Docker sandbox as a **non-root** user;
   agents never run directly on the host.
+- **Telegram control** *(if enabled)* — a `chat_id` allowlist is the sole authz and **fails
+  closed**: no allowlist → the poller refuses to start, and any update from another chat is
+  dropped. Polling means there is no inbound public endpoint to forge. `TELEGRAM_BOT_TOKEN`
+  lives in `.env` (gitignored) — treat it as a secret; it can drive the pipeline.
 - **The private recipe** — the individual tooling used to improve Sunday itself (`CLAUDE.md`,
   `docs/agents/`, and most of `.claude/`) is gitignored and never published. The exception is the
   shipped discipline floor — `.claude/agents/` and the `tdd`/`code-review-mp`/`diagnosing-bugs`
