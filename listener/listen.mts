@@ -33,6 +33,8 @@ import { getIssue, setIssue, type IssueStatus } from "./state.mts";
 import { classify } from "./classify.mts";
 import { notify } from "./notify.mts";
 import { readPauseState, writePauseState, clearPauseState, rearmAction } from "./pause-state.mts";
+import { startTelegramPolling } from "./telegram.mts";
+import { buildStatus, formatStatus } from "./status.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 const port = Number(process.env.LISTENER_PORT ?? 8787);
@@ -456,6 +458,31 @@ server.listen(port, () => {
   // Re-arm a persisted quota pause / 403 halt BEFORE reconcile, so any work it
   // re-derives is held (both lanes) rather than run into the same wall (M3.2).
   rearmPause();
+  // Optional Telegram control channel (M3.4). No-op unless TELEGRAM_BOT_TOKEN is
+  // set. Commands drive the SAME pause/resume/pause-state seams the act layer uses
+  // — one source of truth. /status merges the live scheduler snapshot onto the
+  // durable buildStatus() view.
+  startTelegramPolling({
+    pause: (reason) => {
+      scheduler.pause(reason);
+      writePauseState({ reason, since: Date.now() });
+    },
+    resume: () => resumePipeline(),
+    resumeAt: (at) => {
+      const reason = "manual /resume-at";
+      scheduler.pause(reason);
+      writePauseState({ reason, since: Date.now(), resumeAt: at });
+      scheduleResume(at);
+    },
+    status: () => {
+      const snap = scheduler.snapshot();
+      return (
+        `${formatStatus(buildStatus())}\n` +
+        `Live: in-flight ${snap.regularInFlight.length + snap.restackInFlight.length}, ` +
+        `queued ${snap.regularQueued.length + snap.restackQueued.length}${snap.paused ? " · PAUSED" : ""}`
+      );
+    },
+  });
   // Step 7: re-derive pending work from GitHub. Deferred to a microtask so the
   // server is already accepting before reconcile's (blocking) gh reads run; it
   // drives the SAME callbacks the webhook path uses, so recovery can't drift.
