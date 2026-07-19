@@ -26,6 +26,7 @@ import {
   SUNDAY_MARKER,
 } from "./helper.mts";
 import { getIssue, readState, type IssueStatus } from "./state.mts";
+import { issueHasLivePr } from "./dag.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -70,16 +71,24 @@ export type IssueAction = "admit" | "summon" | "skip";
  *  claim as a duplicate — an `in-flight` state here is an orphaned crash and
  *  re-admits (restarting from scratch; the session was never persisted). `done`
  *  is finished and `awaiting-human` is the gate pass's job, so both skip. `failed`
- *  and fresh re-admit. A non-admissible issue short only its trigger labels but
- *  carrying a human @sunday is a missed summon. */
+ *  and fresh re-admit — UNLESS `hasLivePr()`: an issue already fronted by an
+ *  open/merged `feat/<n>` PR has been (or is being) worked, so a fresh run would
+ *  duplicate it and then fail at `gh pr create`. That check makes reconcile trust
+ *  GitHub over the disposable state (which may be lost on restart) — evaluated
+ *  lazily, only after the state check, so its `gh` read is skipped when possible.
+ *  A non-admissible issue short only its trigger labels but carrying a human
+ *  @sunday is a missed summon. */
 export function issueAction(
   admitted: boolean,
   missingTriggersOnly: boolean,
   prior: { status: IssueStatus } | undefined,
   hasSunday: boolean,
+  hasLivePr: () => boolean,
 ): IssueAction {
   if (admitted) {
-    return prior && (prior.status === "done" || prior.status === "awaiting-human") ? "skip" : "admit";
+    if (prior && (prior.status === "done" || prior.status === "awaiting-human")) return "skip";
+    if (hasLivePr()) return "skip";
+    return "admit";
   }
   if (missingTriggersOnly && hasSunday) return "summon";
   return "skip";
@@ -153,7 +162,7 @@ function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, de
       !decision.admit && (decision.reason ?? "").startsWith("missing trigger label");
     const hasSunday = missingTriggersOnly && hasHumanSunday(fullName, childDir, issue);
 
-    switch (issueAction(decision.admit, missingTriggersOnly, prior, hasSunday)) {
+    switch (issueAction(decision.admit, missingTriggersOnly, prior, hasSunday, () => issueHasLivePr(childDir, issue))) {
       case "admit":
         deps.admitOrDefer(fullName, cfg, issue);
         break;

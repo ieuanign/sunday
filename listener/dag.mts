@@ -102,6 +102,26 @@ export function resolveBase(fullName: string, childDir: string, issue: string): 
   return decideBase(blockers, (blocker) => hasOpenPr(childDir, blocker));
 }
 
+/** A "live" PR is open or merged — its issue is in-progress or landed. A
+ *  closed-unmerged PR (abandoned) is NOT live, so it doesn't block a fresh re-run.
+ *  Pure over the PR states — unit-tested. */
+export function hasLivePr(prStates: string[]): boolean {
+  return prStates.some((s) => {
+    const t = s.toLowerCase();
+    return t === "open" || t === "merged";
+  });
+}
+
+/** Does `issue`'s `feat/<issue>` branch already have a live (open/merged) PR?
+ *  GitHub is the truth for "already worked", robust to a lost in-memory/JSON state
+ *  on restart — the reconcile re-admit guard. */
+export function issueHasLivePr(childDir: string, issue: string): boolean {
+  const prs = JSON.parse(
+    sh("gh", ["pr", "list", "--head", `feat/${issue}`, "--state", "all", "--json", "state", "--limit", "10"], childDir),
+  ) as { state: string }[];
+  return hasLivePr(prs.map((p) => p.state));
+}
+
 /** Does the blocker's branch have an open PR? The gate for stacking. */
 function hasOpenPr(childDir: string, blocker: number): boolean {
   const out = sh(
