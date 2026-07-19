@@ -10,13 +10,14 @@ Sandcastle automation that runs coding agents in Docker sandboxes. Each hosted r
 owns its own rules — its `CLAUDE.md`, ADRs, and context. Sunday injects a baseline
 discipline into every run and otherwise defers to each repo.
 
-> **Status: pipeline implemented (M1–M3), live-hardening in progress.** The listener,
+> **Status: pipeline implemented (M1–M4), live-hardening in progress.** The listener,
 > per-repo routing, the event loop, the human gate, dependency stacking, crash recovery,
-> and the operability layer (failure taxonomy, quota pause/resume, notifier, per-flow
-> logs, `sunday status`, and optional Telegram control) are **built and smoke-verified**.
-> A few paths are still owed an end-to-end live run (a real quota pause; a Telegram
-> command round-trip). Supervision (M4) and the resource/cost matrix (M5) are next. See
-> [`docs/architecture.md`](docs/architecture.md) and [`docs/operability.md`](docs/operability.md).
+> the operability layer (failure taxonomy, quota pause/resume, notifier, per-flow logs,
+> `sunday status`, and optional Telegram control), and process supervision are **built and
+> smoke-verified**. A few paths are still owed an end-to-end live run (a real quota pause; a
+> Telegram command round-trip; a supervised kill → restart → reconcile). The resource/cost
+> matrix (M5) is next. See [`docs/architecture.md`](docs/architecture.md),
+> [`docs/operability.md`](docs/operability.md), and [`docs/supervision.md`](docs/supervision.md).
 
 ## Architecture
 
@@ -46,10 +47,12 @@ Public (tracked) layout:
 .
 ├── README.md              this file
 ├── devbox.json            host toolchain (node, gh, git, …)
+├── process-compose.yaml   supervised run stack (listener + webhook-forward) — `devbox services up`
 ├── .env.example           config template (copy to .env)
 ├── docs/
 │   ├── architecture.md    the pipeline design
 │   ├── operability.md     failure handling, notifier, status, Telegram control (M3)
+│   ├── supervision.md     running the stack under process supervision (M4)
 │   └── sandbox-prompt.md  the baseline injected into every sandbox run
 ├── .claude/               tracked slice of the discipline floor:
 │   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger)
@@ -57,7 +60,7 @@ Public (tracked) layout:
 ├── listener/              the Node webhook listener + orchestration (listen, scheduler,
 │                          run-issue, restack, reconcile, classify, notify, telegram, status)
 ├── config/                per-repo routing (repos.json — gitignored; repos.example.json tracked)
-├── scripts/               dev helpers (e.g. gen-workspace.sh)
+├── scripts/               dev helpers (gen-workspace.sh, webhook-forward.sh)
 └── repos/                 child repo clones — gitignored, each its own repo
     └── <child>/           own origin, own .sandcastle/, own rules
 
@@ -100,6 +103,7 @@ records everything durably, and can be watched and steered. Detail + failure-cla
 | **Durable event log** | Every P1/P2/P3 event is appended (written first, synchronously) as the source of truth | `.scratch/operability/events.jsonl` |
 | **Status snapshot** | Pipeline state, issues by status, and recent events in one view | `npm run status` |
 | **Telegram control** *(optional)* | Phone notifications + `/status` `/pause` `/resume` `/resume-at` over polling ($0, no public endpoint) | set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` |
+| **Supervision** *(M4)* | Runs the listener + webhook forwarders as auto-restarting supervised processes — kill the listener → restart → reconcile recovers | `devbox services up` (see [`docs/supervision.md`](docs/supervision.md)) |
 
 ## Documentation
 
@@ -107,6 +111,8 @@ records everything durably, and can be watched and steered. Detail + failure-cla
   labels, state machine, dependency stacking, concurrency, and crash recovery.
 - [`docs/operability.md`](docs/operability.md) — failure handling, the notifier + event
   log, `sunday status`, and the optional Telegram control channel.
+- [`docs/supervision.md`](docs/supervision.md) — running the listener + forwarders under
+  process supervision (`devbox services up`), the singleton rule, and restart recovery.
 - [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) — the baseline discipline injected into
   every sandbox run.
 
@@ -160,6 +166,23 @@ conventions, and the coding-standards rubric the `reviewer` links. Run both setu
 
 Without them the roster still runs — the `reviewer` falls back to `CLAUDE.md` and whatever the
 repo documents — but the tailored rubric and label vocabulary won't be present.
+
+## Running the pipeline
+
+Once configured, run the whole stack — the listener plus a `gh webhook forward` per repo —
+under devbox's built-in process supervisor, which restarts the listener if it ever exits:
+
+```bash
+devbox services up            # foreground — listener + webhook forwarders + a live TUI
+devbox services up -b          # background
+devbox services stop           # stop the stack
+```
+
+The listener is a **singleton**: restarted on death, never replicated (its serializing loop
+assumes one process). On each start it re-arms any pause and reconciles pending work from GitHub,
+so a crash-restart is a delay, not a loss. Full operator guide — startup ordering, watching a
+run, and the manual two-terminal invocation for debugging — is in
+[`docs/supervision.md`](docs/supervision.md).
 
 ## Security
 
