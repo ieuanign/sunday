@@ -22,11 +22,30 @@ export interface WorkItem {
   run: () => Promise<void>;
 }
 
+export interface SchedulerSnapshot {
+  paused: boolean;
+  pauseReason?: string;
+  /** Keys currently running in each lane, and keys waiting. */
+  regularInFlight: string[];
+  restackInFlight: string[];
+  regularQueued: string[];
+  restackQueued: string[];
+}
+
 export interface Scheduler {
   /** Enqueue onto the capped regular lane. */
   enqueue(item: WorkItem): void;
   /** Enqueue onto the uncapped restack lane. */
   enqueueRestack(item: WorkItem): void;
+  /** Stall BOTH lanes — stop STARTING new work; queued work is retained and
+   *  in-flight runs finish. Used by the quota pause and the 403 halt (M3.2).
+   *  Idempotent; a second pause just updates the reason. */
+  pause(reason: string): void;
+  /** Lift the pause and drain whatever was retained. */
+  resume(): void;
+  isPaused(): boolean;
+  /** A point-in-time view for `sunday status` / Telegram `/status` (M3.6). */
+  snapshot(): SchedulerSnapshot;
 }
 
 export function createScheduler(
@@ -38,6 +57,8 @@ export function createScheduler(
   const known = new Set<string>(); // dedup: keys queued OR in-flight
   const heldBranches = new Set<string>(); // the shared two-way per-branch lock
   const regularInFlight = new Set<string>(); // counts against the cap
+  let paused = false; // both-lanes gate (quota pause / 403 halt)
+  let pauseReason: string | undefined;
 
   function start(item: WorkItem, lane: "regular" | "restack"): void {
     heldBranches.add(item.branch);
@@ -63,6 +84,11 @@ export function createScheduler(
   }
 
   function pump(): void {
+    // Paused (quota / 403): stop STARTING new work in EITHER lane — a restack
+    // conflict-fix also spends the shared token, and the scheduler can't cheaply
+    // tell a pure host-rebase from an agent rebase, so both lanes stall. Queued
+    // work stays put; in-flight runs finish; resume() drains it.
+    if (paused) return;
     // Restack lane first (uncapped) so a restack's branch claim is visible to the
     // regular scan below. Keep (return true) any item whose branch is busy.
     restack = restack.filter((item) => {
@@ -94,6 +120,33 @@ export function createScheduler(
     },
     enqueueRestack(item) {
       enqueueInto(restack, item, "restack");
+    },
+    pause(reason) {
+      pauseReason = reason;
+      if (paused) return;
+      paused = true;
+      log(`⏸ scheduler paused — ${reason}`);
+    },
+    resume() {
+      if (!paused) return;
+      paused = false;
+      pauseReason = undefined;
+      log("▶ scheduler resumed");
+      pump();
+    },
+    isPaused: () => paused,
+    snapshot() {
+      // in-flight = known minus what's still queued in either lane.
+      const queued = new Set([...regular, ...restack].map((i) => i.key));
+      const inFlight = [...known].filter((k) => !queued.has(k));
+      return {
+        paused,
+        pauseReason,
+        regularInFlight: inFlight.filter((k) => regularInFlight.has(k)),
+        restackInFlight: inFlight.filter((k) => !regularInFlight.has(k)),
+        regularQueued: regular.map((i) => i.key),
+        restackQueued: restack.map((i) => i.key),
+      };
     },
   };
 }

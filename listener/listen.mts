@@ -30,12 +30,25 @@ import {
   SPEC_LABEL,
 } from "./helper.mts";
 import { getIssue, setIssue, type IssueStatus } from "./state.mts";
+import { classify } from "./classify.mts";
+import { notify } from "./notify.mts";
+import { readPauseState, writePauseState, clearPauseState, rearmAction } from "./pause-state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 const port = Number(process.env.LISTENER_PORT ?? 8787);
 const maxConcurrency = Number(process.env.MAX_CONCURRENCY ?? 3);
 const repos = loadRepos(); // fail fast on a malformed routing table
 const scheduler = createScheduler(maxConcurrency);
+
+// Act layer (M3.2). The abort registry lets a 403 halt cancel every in-flight
+// issue run; the retry map bounds transient (429/network) backoff before giving
+// up. Both in-memory — a restart re-derives work from GitHub, and the durable
+// pause-state re-arms a quota pause / 403 halt (rearmPause on boot).
+const inFlightAborts = new Map<string, AbortController>();
+const transientRetries = new Map<string, number>();
+const RESUME_GRACE_MS = 5 * 60_000; // resume at quota reset + 5 min
+const MAX_TRANSIENT_RETRIES = 3;
+const BACKOFF_BASE_MS = 10_000;
 // Restack driver bound to the UNCAPPED restack lane (6c). Seeds per-branch steps
 // on a blocker's merge; the cascade drains through the same lane.
 // `reconcileRestacks` re-derives missed merges on boot (step 7).
@@ -107,8 +120,11 @@ async function runAdmitted(
   if (resume) {
     sh("gh", ["issue", "edit", issue, "--remove-label", "awaiting-human"], childDir);
   }
+  // Register an abort handle so a 403 halt can cancel this run mid-flight (M3.2).
+  const ac = new AbortController();
+  inFlightAborts.set(key, ac);
   try {
-    const outcome = await runIssue(fullName, cfg, issue, { baseBranch, resume });
+    const outcome = await runIssue(fullName, cfg, issue, { baseBranch, resume, signal: ac.signal });
     // gate → keep the session open for a human; fail (or ready/draft that shipped
     // nothing) → failed; ready/draft with a PR → done. runIssue already posted the
     // gate comment + `awaiting-human` label.
@@ -125,11 +141,135 @@ async function runAdmitted(
       sessionId: outcome.sessionId,
       baseBranch,
     });
+    transientRetries.delete(key); // a clean finish clears the backoff counter
   } catch (err) {
     setIssue(key, { status: "failed" });
-    throw err; // let the scheduler log it
+    // A run WE aborted (403 halt) already had its taxonomy acted on — don't
+    // re-classify it as a fresh failure (that would re-halt, re-notify).
+    if (ac.signal.aborted) {
+      console.log(`  ✂ ${key} aborted — ${String(ac.signal.reason instanceof Error ? ac.signal.reason.message : ac.signal.reason)}`);
+      return;
+    }
+    // Classify the failure off the RunResult/error shape and act oppositely per
+    // class (quota→pause, 403→abort+halt, transient→backoff, run-failed→flag,
+    // unknown→halt). notify() writes the durable event first.
+    actOnFailure(classify({ error: err }), { fullName, cfg, childDir, issue, key });
   } finally {
+    inFlightAborts.delete(key);
     sh("gh", ["issue", "edit", issue, "--remove-label", "agent-working"], childDir);
+  }
+}
+
+interface FailureCtx {
+  fullName: string;
+  cfg: RepoConfig;
+  childDir: string;
+  issue: string;
+  key: string;
+}
+
+/** React to a classified run failure. Pauses/halts the whole pipeline for quota
+ *  and auth; backs off + retries a transient; flags a run-level failure on its
+ *  issue; halts on the fail-safe unknown. The event is already durably logged by
+ *  notify(); the acts here add the pipeline-control side effects. */
+function actOnFailure(event: ReturnType<typeof classify>, ctx: FailureCtx): void {
+  const { fullName, cfg, childDir, issue, key } = ctx;
+  switch (event.class) {
+    case "quota": {
+      const resumeAt = event.resetAt !== undefined ? event.resetAt + RESUME_GRACE_MS : undefined;
+      scheduler.pause(event.summary);
+      writePauseState({ reason: event.summary, since: Date.now(), ...(resumeAt !== undefined ? { resumeAt } : {}) });
+      if (resumeAt !== undefined) {
+        notify(event); // pipeline-global — auto-resumes, no human needed
+        scheduleResume(resumeAt);
+      } else {
+        // No parseable reset → the human must /resume-at. Home the notice to this
+        // issue + awaiting-human so it's actionable.
+        notify(event, { fullName, childDir, issue, label: "awaiting-human" });
+      }
+      break;
+    }
+    case "auth":
+      // 403 → cancel every in-flight run and halt; a human re-auths, reconcile
+      // re-admits on the next boot.
+      scheduler.pause(event.summary);
+      writePauseState({ reason: event.summary, since: Date.now() });
+      notify(event);
+      abortAllInFlight("403 auth failure — halting");
+      break;
+    case "transient": {
+      const n = (transientRetries.get(key) ?? 0) + 1;
+      if (n <= MAX_TRANSIENT_RETRIES) {
+        transientRetries.set(key, n);
+        const delay = event.retryAfterMs ?? BACKOFF_BASE_MS * 2 ** (n - 1);
+        notify(event); // auto-recovers — logged, not homed to the issue
+        console.log(`  ↻ ${key} transient — retry ${n}/${MAX_TRANSIENT_RETRIES} in ${Math.round(delay / 1000)}s`);
+        setTimeout(() => {
+          scheduler.enqueue({ key, branch: `feat/${issue}`, run: () => runAdmitted(fullName, cfg, issue) });
+        }, delay);
+      } else {
+        transientRetries.delete(key);
+        notify({ ...event, summary: `${event.summary} — gave up after ${MAX_TRANSIENT_RETRIES} retries` }, { fullName, childDir, issue, label: "agent-failed" });
+      }
+      break;
+    }
+    case "run-failed":
+      // The agent ran but produced nothing shippable (bad output / dirty). No PR
+      // to open — flag the issue for a human.
+      notify(event, { fullName, childDir, issue, label: "agent-failed" });
+      break;
+    case "unknown":
+      // Fail-safe: halt so a human looks; the raw excerpt is in events.jsonl.
+      scheduler.pause(event.summary);
+      writePauseState({ reason: event.summary, since: Date.now() });
+      notify(event, { fullName, childDir, issue });
+      break;
+  }
+}
+
+/** Abort a quota pause's clock or a manual resume: clear the durable state and let
+ *  both lanes drain. */
+function resumePipeline(): void {
+  clearPauseState();
+  scheduler.resume();
+}
+
+/** Schedule the auto-resume of a quota pause at `resumeAt` (reset + grace). */
+function scheduleResume(resumeAt: number): void {
+  const delay = Math.max(0, resumeAt - Date.now());
+  setTimeout(resumePipeline, delay);
+  console.log(`  ⏰ auto-resume scheduled for ${new Date(resumeAt).toISOString()}`);
+}
+
+/** Cancel every in-flight issue run (403 halt). Each run() rejects with this
+ *  reason; runAdmitted sees `signal.aborted` and skips re-classifying it. */
+function abortAllInFlight(reason: string): void {
+  for (const [key, ac] of inFlightAborts) {
+    ac.abort(new Error(reason));
+    console.log(`  ✂ aborting in-flight ${key}`);
+  }
+}
+
+/** On boot, re-arm a persisted pause (M3.2): a quota pause whose reset has passed
+ *  resumes now; a future one re-schedules; a 403 halt / no-timestamp quota stays
+ *  paused for a human. Runs before reconcile so re-derived work is held, not run. */
+function rearmPause(): void {
+  const ps = readPauseState();
+  if (!ps) return;
+  switch (rearmAction(ps, Date.now())) {
+    case "resume":
+      console.log(`⟲ pause elapsed (${ps.reason}) — resuming`);
+      resumePipeline();
+      break;
+    case "reschedule":
+      scheduler.pause(ps.reason);
+      scheduleResume(ps.resumeAt!);
+      console.log(`⟲ re-armed pause (${ps.reason}) until ${new Date(ps.resumeAt!).toISOString()}`);
+      break;
+    case "halt":
+      scheduler.pause(ps.reason);
+      console.log(`⟲ re-armed halt (${ps.reason}) — awaiting a human resume`);
+      break;
   }
 }
 
@@ -313,6 +453,9 @@ server.listen(port, () => {
         "will fail; only clean host rebases work. Start with `node --env-file=.env …`.",
     );
   }
+  // Re-arm a persisted quota pause / 403 halt BEFORE reconcile, so any work it
+  // re-derives is held (both lanes) rather than run into the same wall (M3.2).
+  rearmPause();
   // Step 7: re-derive pending work from GitHub. Deferred to a microtask so the
   // server is already accepting before reconcile's (blocking) gh reads run; it
   // drives the SAME callbacks the webhook path uses, so recovery can't drift.

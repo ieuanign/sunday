@@ -64,6 +64,9 @@ export interface RunOpts {
   baseBranch?: string;
   /** Resume a gated session with a human reply instead of a fresh run. */
   resume?: { sessionId: string; reply: string };
+  /** Cancels the in-sandbox run when aborted — the 403 halt fires this on every
+   *  in-flight run (M3.2). run() rejects with the abort reason. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -79,7 +82,7 @@ export async function runIssue(
   issue: string,
   opts: RunOpts = {},
 ): Promise<RunOutcome> {
-  const { baseBranch = "main", resume } = opts;
+  const { baseBranch = "main", resume, signal: abortSignal } = opts;
   const model = process.env.MODEL;
   if (!model) {
     throw new Error("MODEL is unset — load .env first (node --env-file=.env …).");
@@ -153,6 +156,7 @@ export async function runIssue(
       promptFile,
       branchStrategy: { type: "branch", branch, baseBranch: stackBase },
       logging: { type: "file", path: logPath },
+      ...(abortSignal ? { signal: abortSignal } : {}),
       ...(resume ? { resumeSession: resume.sessionId } : {}),
       output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
     });
