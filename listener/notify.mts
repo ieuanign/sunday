@@ -19,6 +19,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { sh, sundayComment } from "./helper.mts";
+import { sendTelegram } from "./telegram.mts";
 import type { OpEvent, Severity } from "./classify.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -56,7 +57,7 @@ export function notify(event: OpEvent, ctx: NotifyContext = {}): void {
   console.log(`${SEV_ICON[event.severity]} ${event.severity} ${event.class}: ${event.summary}${where}`);
 
   if (ctx.fullName && ctx.childDir && ctx.issue) ghSink(event, ctx);
-  telegramSink(record);
+  telegramSink(event, where);
 }
 
 /** Append one JSON line to events.jsonl. The one sink that must not silently fail —
@@ -81,12 +82,13 @@ function ghSink(event: OpEvent, ctx: NotifyContext): void {
   }
 }
 
-/** Telegram sink — INERT until PR2. No-op when the token is unset (the common case
- *  and the whole optional-layer point). PR2 fills the Bot API `sendMessage` here. */
-function telegramSink(_record: Record<string, unknown>): void {
+/** Telegram sink — pushes a one-line notice to the configured chat. No-op when the
+ *  token is unset (the common case, and the whole optional-layer point). Fire-and-
+ *  forget: a send failure degrades, never blocks — the durable log already has it. */
+function telegramSink(event: OpEvent, where: string): void {
   if (!process.env.TELEGRAM_BOT_TOKEN) return; // optional; not configured
-  // PR2: fetch(`https://api.telegram.org/bot${token}/sendMessage`, …). Until then,
-  // no-op even when a token IS set — the durable log already has the event.
+  sendTelegram(`${SEV_ICON[event.severity]} ${event.severity} ${event.class}: ${event.summary}${where}`)
+    .catch((err) => degraded("telegram", err));
 }
 
 /** Record that a sink degraded — straight to the log, bypassing the sinks (so a
