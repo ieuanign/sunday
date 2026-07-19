@@ -18,6 +18,7 @@ import { createScheduler } from "./scheduler.mts";
 import { runIssue } from "./run-issue.mts";
 import { runPrComments } from "./run-pr-comments.mts";
 import { resolveBase } from "./dag.mts";
+import { makeRestacker } from "./restack.mts";
 import { sh, handleComment, isSummon } from "./helper.mts";
 import { getIssue, setIssue, type IssueStatus } from "./state.mts";
 
@@ -26,6 +27,9 @@ const port = Number(process.env.LISTENER_PORT ?? 8787);
 const maxConcurrency = Number(process.env.MAX_CONCURRENCY ?? 3);
 const repos = loadRepos(); // fail fast on a malformed routing table
 const scheduler = createScheduler(maxConcurrency);
+// Restack driver bound to the UNCAPPED restack lane (6c). Seeds per-branch steps
+// on a blocker's merge; the cascade drains through the same lane.
+const { restackOnMerge } = makeRestacker(scheduler.enqueueRestack);
 
 // Tickets that passed label admission but whose blockers aren't satisfied yet
 // (6b). Re-evaluated when a `pull_request` event lands (a blocker may have just
@@ -125,6 +129,7 @@ function admitOrDefer(fullName: string, cfg: RepoConfig, issue: string): void {
   console.log(`  ✓ ADMIT ${key}${stacked}`);
   scheduler.enqueue({
     key,
+    branch: `feat/${issue}`,
     run: () => runAdmitted(fullName, cfg, issue, { baseBranch: base.baseBranch }),
   });
 }
@@ -147,11 +152,17 @@ function reevaluateDeferred(repo: string): void {
 }
 
 /** Enqueue the @sunday-on-a-PR feedback run (keyed by PR so repeated mentions on
- *  the same PR dedup). Both conversation and inline review comments land here. */
+ *  the same PR dedup). Both conversation and inline review comments land here. The
+ *  PR's head branch is resolved up front so the run takes the shared per-branch
+ *  lock (a restack must not touch this branch while the fix runs, and vice versa). */
 function enqueuePrComments(fullName: string, cfg: RepoConfig, pr: string): void {
   const key = `${fullName}#pr${pr}`;
-  console.log(`  ✓ PR-COMMENTS ${key}`);
-  scheduler.enqueue({ key, run: () => runPrComments(fullName, cfg, pr) });
+  const childDir = resolve(parentRoot, cfg.path);
+  const { headRefName } = JSON.parse(
+    sh("gh", ["pr", "view", pr, "--json", "headRefName"], childDir),
+  ) as { headRefName: string };
+  console.log(`  ✓ PR-COMMENTS ${key} (branch ${headRefName})`);
+  scheduler.enqueue({ key, branch: headRefName, run: () => runPrComments(fullName, cfg, pr) });
 }
 
 const server = createServer((req, res) => {
@@ -213,6 +224,7 @@ const server = createServer((req, res) => {
             resume: (sessionId, reply) =>
               scheduler.enqueue({
                 key: `${repo}#${issue}`,
+                branch: `feat/${issue}`,
                 run: () => runAdmitted(repo, cfg, issue, { resume: { sessionId, reply } }),
               }),
             summonPr: (pr) => enqueuePrComments(repo, cfg, pr),
@@ -229,6 +241,25 @@ const server = createServer((req, res) => {
       } else if (event === "pull_request" && PR_REEVAL_ACTIONS.has(rawAction)) {
         // A blocker's PR just opened/reopened/merged → deferred dependents may
         // now be admissible. Re-check them (forward edge; see reevaluateDeferred).
+        //
+        // A MERGE additionally restacks already-stacked dependents (6c): they
+        // were admitted+stacked in 6b, so they're NOT in the deferred set —
+        // reevaluateDeferred alone would miss them.
+        const cfg = repos[repo];
+        const pr = payload.pull_request;
+        const headRef: string = pr?.head?.ref ?? "";
+        if (cfg && rawAction === "closed" && pr?.merged && headRef.startsWith("feat/")) {
+          // Seed the restack lane off the handler's critical path (a fetch + gh
+          // scan); the per-branch steps then drain through the uncapped lane.
+          const mergedIssue = headRef.slice("feat/".length);
+          const sha: string = pr.head.sha;
+          console.log(`  ✓ RESTACK seed ${repo}#${mergedIssue}`);
+          Promise.resolve()
+            .then(() => restackOnMerge(repo, cfg, mergedIssue, sha))
+            .catch((err: unknown) =>
+              console.log(`✗ restack seed ${repo}#${mergedIssue}: ${err instanceof Error ? err.message : String(err)}`),
+            );
+        }
         reevaluateDeferred(repo);
       }
     } catch {

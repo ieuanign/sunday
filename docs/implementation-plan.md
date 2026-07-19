@@ -132,18 +132,25 @@ Goal: labelling an issue drives it automatically, with concurrency, state, the g
    edges (native sub-issue/blocking links, or a "Blocked by" text fallback), **not** from reading a
    spec. `runIssue` gains a **`baseBranch` param** (default `main`; a stacked ticket bases on its
    blocker's branch) — the knob that turns waves on. *A* starts once blocker *B*'s draft PR is open,
-   branches from *B*'s head, PR targets *B*'s branch. **On *B* merge, TS drives** `git rebase --onto
-   main <B-ref> A`, retargets *A*'s PR base to `main`, cascades up — summoning an agent **only** on a
-   genuine source conflict (bounded 2 attempts, then the gate). Rebase-only, never merge.
+   branches from *B*'s head, PR targets *B*'s branch. **On *B* merge, TS drives** the restack: for
+   each stacked dependent, `git rebase --onto main <B-ref> A` (pure host git), retarget *A*'s PR base
+   to `main`, force-push, cascade parent-before-child. Rebase-only, never merge. A genuine source
+   conflict summons the agent **in the child sandbox** (direct headless `claude -p` on a worktree,
+   credential-free of GitHub, `/implement`→resolve→verify); the rewrite returns via the shared
+   worktree and **the host force-pushes** it (Sandcastle's add-only sync-out can't do a rewrite, so
+   it's bypassed). Can't reach green → **gate on the PR** (`awaiting-human`), one attempt, no retry.
+   Restack runs in a **separate uncapped lane** (a per-branch-step queue), serialized against regular
+   runs by a **two-way per-branch lock**, not by `MAX_CONCURRENCY`.
    **Undeclared file overlap** between concurrent tickets is **not** pre-checked (Sunday has no
    upfront plan/touchpoints, unlike dev-loop's Gate 1) — a real collision falls to the same
-   agent-rebase path; `MAX_CONCURRENCY` is the lever. *(Deferred convenience: `auto-dev` on a spec
+   conflict-resolution path; the regular-run `MAX_CONCURRENCY` is the lever. *(Deferred convenience: `auto-dev` on a spec
    bulk-labels its unblocked child tickets — pure labelling, execution stays ticket-as-unit.)*
 7. **Reconcile-on-restart:** re-derive all pending work from GitHub (new issues, missed gate
    replies, missed PR-merge restacks, orphaned `agent-working`). GitHub is the truth → an outage
-   is a delay, not a loss. The `.scratch` state is the "save data" — it carries the `session_id`
-   that lets a run **resume** rather than restart; lose it and work is still re-derived from GitHub,
-   but in-flight sessions restart from scratch.
+   is a delay, not a loss. The **restack queue + per-branch locks are in-memory only** and re-derived
+   here from GitHub (open-PR base/DAG scan) — never persisted. The `.scratch` state is the "save
+   data" — it carries the `session_id` that lets a run **resume** rather than restart; lose it and
+   work is still re-derived from GitHub, but in-flight sessions restart from scratch.
 
 **Verify M2:** label a real issue → automatic end-to-end run; a gate round-trip resumes; a
 stacked pair opens correctly; merging *B* restacks *A*.

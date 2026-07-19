@@ -84,18 +84,33 @@ to the child repo's own rules. The full prompt is [`sandbox-prompt.md`](sandbox-
   parents are trackers, never auto-dev'd.
 - **Stacking:** issue *A* starts once blocker *B*'s **draft PR is open**; *A* branches from
   *B*'s head and its PR targets *B*'s branch.
-- **On *B* merge:** the **listener (TS) drives** `git rebase --onto main <B-ref> A`, retargets
-  *A*'s PR base to `main`, and cascades up the chain — summoning an agent **only** on a genuine
-  source conflict (regenerable artifacts like lockfiles are regenerated, never agent-merged).
+- **On *B* merge:** the **listener (TS) drives** the restack — for each stacked dependent it
+  runs `git rebase --onto main <B-ref> A` (pure host git), retargets *A*'s PR base to `main`,
+  force-pushes, and cascades up the chain (parent before child). Clean rebases never involve an
+  agent.
 - **Global invariant: rebase only, never merge.** History stays linear; PR merges are
   squash/rebase.
-- **Rebase conflicts:** the agent resolves them; if it cannot (within the fix bound), it
-  stops and opens the human gate.
+- **Rebase conflicts:** a genuine source conflict summons the agent **in the child sandbox** —
+  a direct headless `claude -p` on a worktree, credential-free of GitHub, driven by `/implement`
+  so it resolves → tests → verifies. The rewrite returns via the shared worktree and **the host
+  force-pushes** it (Sandcastle's add-only sync-out is bypassed — it can't represent a rewrite).
+  Green → force-push; can't reach green → **gate on the PR** (`awaiting-human`), one attempt, no
+  auto-retry, a human rebases by hand. Regenerable artifacts (lockfiles) are regenerated, never
+  agent-merged.
 
 ## Concurrency
 
-**Global cap (default 3)** — a semaphore across *all* repos, because every run shares one
-agent quota (see *Auth*). Not per-repo. Set via `MAX_CONCURRENCY` in `.env`.
+**Two lanes.** Regular runs (issue + PR-comment) share a **global cap (default 3)** — a semaphore
+across *all* repos, because every run shares one agent quota (see *Auth*). Not per-repo. Set via
+`MAX_CONCURRENCY` in `.env`.
+
+**Restack work runs in a separate, *uncapped* lane** — a queue of per-branch steps walked
+parent-before-child. Uncapped because a restack unblocks a stuck merge and conflicts are rare
+(concurrent fresh sessions are fine on the Max plan).
+
+**One shared, two-way per-branch lock** spans both lanes: neither lane touches a branch while the
+other is on it. A restack step waits on a busy branch; a regular run whose branch has a restack in
+flight is skipped and retried when it frees. Draining is event-driven — the moment any run finishes.
 
 ## Human gate
 
