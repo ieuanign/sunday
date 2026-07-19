@@ -16,6 +16,12 @@ export interface IssueState {
   /** The ticket's base branch ("main" or a blocker's "feat/<n>"). Persisted so a
    *  resume recovers the stacked base — a resume comment carries none of its own. */
   baseBranch?: string;
+  /** Orchestrator context (input+cacheRead+cacheCreation) at the end of the last run
+   *  (M5.2). Read at the next gate resume to decide resume-vs-handoff. */
+  ctxTokens?: number;
+  /** How many threshold handoffs this issue has done (M5.2) — the `<n>` in its
+   *  handoff doc filenames. Absent = none yet. */
+  handoffSeq?: number;
 }
 
 export type State = Record<string, IssueState>;

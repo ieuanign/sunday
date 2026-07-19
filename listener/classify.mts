@@ -19,8 +19,10 @@
  *  auth: 403 / bad credential → abort in-flight + halt, a human re-auths.
  *  transient: 429 / network / 5xx → bounded backoff, then agent-failed.
  *  run-failed: the agent ran but produced a bad/failed outcome → agent-failed path.
+ *  summarize-failed: a ≥threshold session's handoff turn produced no usable note
+ *    (M5.2) → the issue fails as agent-failed; the bloated session is NOT reused.
  *  unknown: unrecognized → fail-safe halt + capture (never silently dropped). */
-export type OpClass = "quota" | "auth" | "transient" | "run-failed" | "unknown";
+export type OpClass = "quota" | "auth" | "transient" | "run-failed" | "summarize-failed" | "unknown";
 
 /** P1 halts the pipeline (auth/unknown); P2 pauses recoverably (quota); P3 is a
  *  single-run or auto-recovering issue (transient/run-failed). */
@@ -115,6 +117,18 @@ function classifyError(error: unknown): OpEvent {
   const msg = messageOf(error);
   const raw = excerpt(msg);
   const lower = msg.toLowerCase();
+
+  // M5.2: a handoff turn that produced no usable note. run-issue throws this with a
+  // clear, issue-specific message; act oppositely to a normal run failure only in
+  // wording — it still routes to the issue-level agent-failed path (D4b).
+  if (/^SUMMARIZE_FAILED:/.test(msg)) {
+    return {
+      class: "summarize-failed",
+      severity: "P2",
+      summary: msg.replace(/^SUMMARIZE_FAILED:\s*/, ""),
+      excerpt: raw,
+    };
+  }
 
   if (isStructuredOutputError(error)) {
     return {

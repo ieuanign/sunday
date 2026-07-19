@@ -2,7 +2,7 @@
 // listener): shelling out, the comment marker, and comment routing.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
@@ -70,6 +70,50 @@ export function runLogPath(fullName: string, flow: string): string {
   const dir = resolve(parentRoot, ".scratch", fullName, flow);
   mkdirSync(dir, { recursive: true });
   return resolve(dir, "run.log");
+}
+
+/** The tag the handoff turn emits its note inside (M5.2). One place, shared by the
+ *  instructions builder and run-issue's Output.string extractor. */
+export const HANDOFF_TAG = "sunday-handoff";
+
+/** The bounded handoff-turn prompt: the real `/handoff` skill's OWN instructions,
+ *  read at runtime with the frontmatter stripped and its "save to OS temp" line
+ *  swapped for "emit as tagged output" — identical summary quality, no box-file
+ *  problem, no dependence on skill-invocation in headless (M5.2 D3). */
+export function handoffInstructions(): string {
+  const skill = readFileSync(resolve(parentRoot, ".claude/skills/handoff/SKILL.md"), "utf8");
+  const body = skill.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+  const adapted = body.replace(
+    /Save to the temporary directory of the user's OS[^\n]*/i,
+    `Do NOT write any file — you are in a credential-free sandbox. Emit the entire handoff document inside a single \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` tag.`,
+  );
+  return (
+    `You are compacting THIS session into a handoff document for a fresh agent that will ` +
+    `continue and finish the work. Do only this — write no code, touch no files, make no commits.\n\n` +
+    `${adapted}\n\n` +
+    `Emit the document as your only output, inside one \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` tag.`
+  );
+}
+
+/** Per-issue handoff doc path `.scratch/<repo>/handoff/<issue>-<n>.md` (M5.2). Ensures
+ *  the dir exists. */
+export function handoffDocPath(fullName: string, issue: string, seq: number): string {
+  const dir = resolve(parentRoot, ".scratch", fullName, "handoff");
+  mkdirSync(dir, { recursive: true });
+  return resolve(dir, `${issue}-${seq}.md`);
+}
+
+/** Drop an issue's spent handoff docs (`<issue>-*.md`) once the run reaches its
+ *  terminal push — the retired sessions' notes are done (M5.2 D6). Best-effort. */
+export function cleanupHandoffs(fullName: string, issue: string): void {
+  const dir = resolve(parentRoot, ".scratch", fullName, "handoff");
+  try {
+    for (const f of readdirSync(dir)) {
+      if (f.startsWith(`${issue}-`) && f.endsWith(".md")) rmSync(resolve(dir, f), { force: true });
+    }
+  } catch {
+    /* no handoff dir — nothing to clean */
+  }
 }
 
 /** Local `feat/*` branches in the child checkout (the branches Sandcastle's branch

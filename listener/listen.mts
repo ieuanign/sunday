@@ -114,9 +114,15 @@ async function runAdmitted(
   const { resume } = opts;
   const key = `${fullName}#${issue}`;
   const childDir = resolve(parentRoot, cfg.path);
+  const prior = getIssue(key);
   // A resume carries no base of its own — recover the ticket's stacked base
   // (persisted at admit/gate) so it doesn't silently fall back to main.
-  const baseBranch = opts.baseBranch ?? getIssue(key)?.baseBranch ?? "main";
+  const baseBranch = opts.baseBranch ?? prior?.baseBranch ?? "main";
+  // A resume also carries the prior session's ctx + handoff count (M5.2) so runIssue
+  // can decide resume-vs-handoff at the threshold.
+  const resumeWithCtx = resume
+    ? { ...resume, ctxTokens: prior?.ctxTokens, handoffSeq: prior?.handoffSeq }
+    : undefined;
   setIssue(key, { status: "in-flight", baseBranch });
   sh("gh", ["issue", "edit", issue, "--add-label", "agent-working"], childDir);
   if (resume) {
@@ -126,7 +132,7 @@ async function runAdmitted(
   const ac = new AbortController();
   inFlightAborts.set(key, ac);
   try {
-    const outcome = await runIssue(fullName, cfg, issue, { baseBranch, resume, signal: ac.signal });
+    const outcome = await runIssue(fullName, cfg, issue, { baseBranch, resume: resumeWithCtx, signal: ac.signal });
     // gate → keep the session open for a human; fail (or ready/draft that shipped
     // nothing) → failed; ready/draft with a PR → done. runIssue already posted the
     // gate comment + `awaiting-human` label.
@@ -142,6 +148,10 @@ async function runAdmitted(
       prUrl: outcome.prUrl,
       sessionId: outcome.sessionId,
       baseBranch,
+      // Persist ctx (drives the next resume's threshold) + the handoff count, but only
+      // when present — never overwrite a good prior value with undefined (M5.2).
+      ...(outcome.ctxTokens !== undefined ? { ctxTokens: outcome.ctxTokens } : {}),
+      ...(outcome.handoffSeq !== undefined ? { handoffSeq: outcome.handoffSeq } : {}),
     });
     transientRetries.delete(key); // a clean finish clears the backoff counter
   } catch (err) {
@@ -218,6 +228,12 @@ function actOnFailure(event: ReturnType<typeof classify>, ctx: FailureCtx): void
     case "run-failed":
       // The agent ran but produced nothing shippable (bad output / dirty). No PR
       // to open — flag the issue for a human.
+      notify(event, { fullName, childDir, issue, label: "agent-failed" });
+      break;
+    case "summarize-failed":
+      // M5.2 D4b: an oversized session's handoff turn produced no usable note. Fail
+      // the issue as agent-failed (a relabel retries FRESH) — never awaiting-human,
+      // which would re-resume the bloated session in a loop. The message is specific.
       notify(event, { fullName, childDir, issue, label: "agent-failed" });
       break;
     case "unknown":
