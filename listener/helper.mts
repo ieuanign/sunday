@@ -27,6 +27,19 @@ export function sh(file: string, args: string[], cwd?: string): string {
 // can't distinguish them). Machine-only — invisible when rendered.
 export const SUNDAY_MARKER = "<!-- sunday:gate -->";
 
+// Human-visible attribution. Same account posts for both Sunday and the human, so
+// the hidden SUNDAY_MARKER (for the listener) is paired with this line (for people
+// reading the thread) — you can tell at a glance who authored a comment/PR.
+export const SUNDAY_SIGN = "🤖 **Sunday** · autonomous agent";
+
+/** Compose a comment WE author: hidden marker (top) + visible attribution + the
+ *  content. Every comment Sunday posts goes through here — the issue gate, PR
+ *  replies, operability notices — so all carry the same dual sign. Lives here (a
+ *  leaf) so every module can share it without an import cycle. */
+export function sundayComment(body: string): string {
+  return `${SUNDAY_MARKER}\n${SUNDAY_SIGN}\n\n${body}`;
+}
+
 // The summon keyword. A human writes it to hand work to Sunday; case-insensitive,
 // `\b` so `@sundays` doesn't match. (Our own comments carry the marker, not
 // `@sunday`, so this never matches them — but the marker check runs first.)

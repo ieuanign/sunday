@@ -13,8 +13,7 @@ import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, isSummon, deleteLocalBranch, runLogPath } from "./helper.mts";
-import { sundayComment } from "./run-issue.mts";
+import { sh, isSummon, deleteLocalBranch, runLogPath, sundayComment } from "./helper.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");

@@ -11,7 +11,7 @@ import { run, claudeCode, Output } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
-import { sh, SUNDAY_MARKER, deleteLocalBranch, runLogPath } from "./helper.mts";
+import { sh, deleteLocalBranch, runLogPath, sundayComment, SUNDAY_SIGN } from "./helper.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -38,19 +38,6 @@ const resultSchema = z.object({
   question: z.string().optional(),
 });
 export type RunSignal = z.infer<typeof resultSchema>["signal"];
-
-// Human-visible attribution. Same account posts for both Sunday and the human,
-// so the hidden SUNDAY_MARKER (for the listener, from helper.mts) is paired with
-// this line (for people reading the thread) — you can tell at a glance who
-// authored a comment/PR.
-export const SUNDAY_SIGN = "🤖 **Sunday** · autonomous agent";
-
-/** Compose a comment WE author: hidden marker (top) + visible attribution + the
- *  content. Every comment Sunday posts goes through here — the issue gate today,
- *  PR comments once that path exists — so both carry the same dual sign. */
-export function sundayComment(body: string): string {
-  return `${SUNDAY_MARKER}\n${SUNDAY_SIGN}\n\n${body}`;
-}
 
 // Appended to a resume prompt: the human reply carries no tag, but Output.object
 // requires the tag literal in the resolved prompt, and the agent needs reminding

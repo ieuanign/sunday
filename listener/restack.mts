@@ -22,8 +22,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { sh } from "./helper.mts";
-import { sundayComment } from "./run-issue.mts";
+import { sh, sundayComment } from "./helper.mts";
 import { readBlockers, type Blocker } from "./dag.mts";
 import { runAgentInSandbox } from "./sandbox-agent.mts";
 import type { WorkItem } from "./scheduler.mts";
