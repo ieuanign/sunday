@@ -273,4 +273,10 @@ server.listen(port, () => {
   console.log(
     `listener up on http://localhost:${port} — routing ${Object.keys(repos).length} repo(s), cap ${maxConcurrency}`,
   );
+  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    console.warn(
+      "⚠ CLAUDE_CODE_OAUTH_TOKEN unset — every agent run (issues, PR fixes, conflict rebases) " +
+        "will fail; only clean host rebases work. Start with `node --env-file=.env …`.",
+    );
+  }
 });

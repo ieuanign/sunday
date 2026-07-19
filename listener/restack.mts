@@ -25,14 +25,18 @@ import { resolve } from "node:path";
 import { sh } from "./helper.mts";
 import { sundayComment } from "./run-issue.mts";
 import { readBlockers } from "./dag.mts";
+import { runAgentInSandbox } from "./sandbox-agent.mts";
 import type { WorkItem } from "./scheduler.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 
-/** The ephemeral worktree path for a branch's rebase (stable per branch). */
-function worktreePath(branch: string): string {
-  return resolve(parentRoot, ".scratch", "restack", branch.replaceAll("/", "-"));
+/** The ephemeral worktree path for a branch's rebase — INSIDE childDir so a single
+ *  docker bind-mount (`-v childDir:childDir`) covers both it and its `.git` link
+ *  (the in-sandbox conflict fix needs that; the host clean rebase is happy here
+ *  too). Stable per branch. */
+function worktreePath(childDir: string, branch: string): string {
+  return resolve(childDir, ".sunday", "restack", branch.replaceAll("/", "-"));
 }
 
 function isRegisteredWorktree(childDir: string, wt: string): boolean {
@@ -41,21 +45,25 @@ function isRegisteredWorktree(childDir: string, wt: string): boolean {
     .includes(`worktree ${wt}`);
 }
 
-/** Run `body` in a fresh detached worktree at `wt` (checked out at `ref`), always
- *  torn down afterward. The scheduler's two-way per-branch lock already guarantees
- *  no concurrent work on this branch, so this only guards against a STALE worktree
- *  a crashed run left at the path: prune vanished entries, reclaim a leftover, then
- *  add fresh. `--detach` never checks out the branch itself, so it can't collide
- *  with a Sandcastle worktree that has it checked out. */
-function withWorktree<T>(childDir: string, wt: string, ref: string, body: () => T): T {
+/** Run `body` in a fresh worktree created with `addArgs` — `--detach <wt>
+ *  origin/<b>` for a host clean rebase, or `-f -B <b> <wt> origin/<b>` to check
+ *  the branch out for the in-sandbox fix — always torn down afterward. The
+ *  scheduler's two-way per-branch lock guarantees no concurrent work on this
+ *  branch, so this only reclaims a STALE worktree a crashed run left at the path. */
+async function withWorktree<T>(
+  childDir: string,
+  wt: string,
+  addArgs: string[],
+  body: () => T | Promise<T>,
+): Promise<T> {
   sh("git", ["worktree", "prune"], childDir); // drop entries for vanished dirs
   if (existsSync(wt) || isRegisteredWorktree(childDir, wt)) {
     try { sh("git", ["worktree", "remove", "--force", wt], childDir); } catch { /* */ }
     rmSync(wt, { recursive: true, force: true });
   }
   try {
-    sh("git", ["worktree", "add", "--detach", wt, ref], childDir);
-    return body();
+    sh("git", ["worktree", "add", ...addArgs], childDir);
+    return await body();
   } finally {
     try { sh("git", ["worktree", "remove", "--force", wt], childDir); } catch { /* next prune */ }
   }
@@ -95,39 +103,115 @@ function dependents(fullName: string, childDir: string, blockerIssue: string): D
  *  `upstream` is passed straight to `git rebase --onto` — its `<upstream>..HEAD`
  *  set-semantics already exclude shared history, so a merge-base is unneeded
  *  even if the parent advanced after the child forked. */
-export function hostRebase(
+export async function hostRebase(
   childDir: string,
   branch: string,
   ontoRef: string,
   upstream: string,
-): "clean" | "conflict" {
-  return withWorktree(childDir, worktreePath(branch), `origin/${branch}`, () => {
-    const wt = worktreePath(branch);
+): Promise<"clean" | "conflict"> {
+  const wt = worktreePath(childDir, branch);
+  return withWorktree(childDir, wt, ["--detach", wt, `origin/${branch}`], () => {
     try {
       sh("git", ["rebase", "--onto", ontoRef, upstream], wt);
     } catch {
       // Non-zero exit = a genuine source conflict; leave nothing half-applied.
       sh("git", ["rebase", "--abort"], wt);
-      return "conflict";
+      return "conflict" as const;
     }
     // Lease uses origin/<branch> (the worktree's base) — safe against a concurrent
     // push, still a force since we rewrote history.
     sh("git", ["push", "--force-with-lease", "origin", `HEAD:${branch}`], wt);
-    return "clean";
+    return "clean" as const;
   });
 }
 
-/** A restack couldn't rebase cleanly — stop and open the human gate ON THE PR
- *  (the dependent's issue is already done; the stuck thing is a branch rebase a
- *  human fixes on the PR). Slice 2 will attempt an in-sandbox `claude -p` fix
- *  before falling through to this gate. */
+/** The in-sandbox conflict-fix prompt: `/implement` rebases `branch` onto `onto`,
+ *  dropping its old base at `upstream` (the fork point), resolving by judgment and
+ *  verifying green; gate if genuinely stuck; never push (Sunday does). No git
+ *  mechanics are spelled out — the agent handles rebase-vs-`--onto` and the
+ *  resolution itself. */
+function conflictPrompt(step: Step): string {
+  return [
+    `This working tree is checked out at the tip of branch \`${step.branch}\`. A branch it was ` +
+      `stacked on has moved, so \`${step.branch}\` must be rebased onto \`${step.onto}\`, keeping ` +
+      `only its own commits (those after \`${step.upstream}\`).`,
+    ``,
+    `Use \`/implement\` to do it: run the rebase (you decide plain \`rebase\` vs \`rebase --onto\`), ` +
+      `resolve any conflicts using your judgment about what each side intended, and confirm the ` +
+      `result builds and its tests pass.`,
+    ``,
+    `If — and only if — you genuinely cannot tell how to resolve a conflict, or cannot get the ` +
+      `result to green, abort the rebase and gate instead of guessing.`,
+    ``,
+    `Do not push and do not open a PR — Sunday does that automatically once you finish.`,
+    ``,
+    `Finish by printing exactly one line and nothing after it:`,
+    `<sunday-result>{"signal":"resolved","summary":"..."}</sunday-result>`,
+    `or`,
+    `<sunday-result>{"signal":"gate","summary":"why you could not resolve"}</sunday-result>`,
+  ].join("\n");
+}
+
+/** In-sandbox conflict fix (uncapped lane; the step already holds the branch
+ *  lock). Rebase the PR's authoritative tip (`origin/<branch>`, DETACHED — no local
+ *  branch created or reset), letting `claude -p` resolve + verify via `/implement`,
+ *  then trust the GIT ground truth before force-pushing HEAD back: rebase finished,
+ *  HEAD sits on the target, and it carries only this branch's OWN commits
+ *  (`≤ ownCommits` — guards a plain `rebase` that pulled in the base's commits too).
+ *  Returns "resolved" (pushed) or "gate" (the caller opens the human gate). */
+async function agentFix(
+  cfg: RepoConfig,
+  childDir: string,
+  step: Step,
+  ownCommits: number,
+): Promise<"resolved" | "gate"> {
+  const model = process.env.MODEL;
+  if (!model) throw new Error("MODEL unset — load the parent .env (node --env-file=.env …).");
+  const wt = worktreePath(childDir, step.branch);
+  // Detached at origin/<branch> — the PR's tip. We rebase that content and push
+  // HEAD back; no local branch is touched (origin is the source of truth).
+  return withWorktree(childDir, wt, ["--detach", wt, `origin/${step.branch}`], async () => {
+    console.log(`↻ restack ${step.branch}: conflict — summoning in-sandbox claude -p…`);
+    const res = await runAgentInSandbox({
+      childDir, imageName: cfg.imageName, worktree: wt, prompt: conflictPrompt(step), model,
+    });
+    const rebaseDir = sh("git", ["rev-parse", "--git-path", "rebase-merge"], wt);
+    const rebasing = existsSync(resolve(wt, rebaseDir)) || existsSync(rebaseDir);
+    const onTarget = (() => {
+      try {
+        return sh("git", ["merge-base", step.onto, "HEAD"], wt) === sh("git", ["rev-parse", step.onto], wt);
+      } catch {
+        return false;
+      }
+    })();
+    // Commit-count guard: a correct `--onto` replays only this branch's own commits
+    // (≤ ownCommits; some may drop as empty). More than that means the agent replayed
+    // the base's commits too (a plain `rebase`) — reject even though HEAD is on target.
+    const got = onTarget ? Number(sh("git", ["rev-list", "--count", `${step.onto}..HEAD`], wt)) : -1;
+    const countOk = got >= 1 && got <= ownCommits;
+    if (res.signal !== "resolved" || res.errored || rebasing || !onTarget || !countOk) {
+      console.log(
+        `⛔ restack ${step.branch}: agent did not cleanly resolve ` +
+          `(signal=${res.signal}, errored=${res.errored}, rebasing=${rebasing}, onTarget=${onTarget}, commits=${got}/${ownCommits}).`,
+      );
+      return "gate";
+    }
+    sh("git", ["push", "--force-with-lease", "origin", `HEAD:${step.branch}`], wt);
+    console.log(`✅ restack ${step.branch}: agent resolved the conflict — pushed (${got} commit(s) on ${step.onto}).`);
+    return "resolved";
+  });
+}
+
+/** A restack couldn't be resolved (host rebase conflicted AND the in-sandbox fix
+ *  gave up) — open the human gate ON THE PR (the dependent's issue is already done;
+ *  the stuck thing is a branch rebase a human fixes on the PR). */
 function gateConflict(childDir: string, d: Dependent, ontoRef: string): void {
   const body =
-    `Restacking \`${d.branch}\` onto \`${ontoRef.replace(/^origin\//, "")}\` hit a source ` +
-    `conflict I won't auto-resolve. Rebase this branch by hand, then push — the PR will catch up.`;
+    `Restacking \`${d.branch}\` onto \`${ontoRef.replace(/^origin\//, "")}\` hit a source conflict ` +
+    `I couldn't resolve (even in-sandbox). Rebase this branch by hand, then push — the PR will catch up.`;
   sh("gh", ["pr", "comment", d.pr, "--body", sundayComment(body)], childDir);
   sh("gh", ["pr", "edit", d.pr, "--add-label", "awaiting-human"], childDir);
-  console.log(`⛔ restack ${d.branch}: conflict — opened the gate on PR #${d.pr}.`);
+  console.log(`⛔ restack ${d.branch}: unresolved conflict — opened the gate on PR #${d.pr}.`);
 }
 
 /** One branch's restack: rebase `step.branch`'s own commits (`upstream..branch`)
@@ -161,13 +245,19 @@ export function makeRestacker(enqueueStep: (item: WorkItem) => void) {
 
   async function runStep(fullName: string, cfg: RepoConfig, childDir: string, step: Step): Promise<void> {
     // Capture the pre-rebase tip BEFORE rebasing: it's the fork point for this
-    // branch's OWN dependents (their rebase upstream).
+    // branch's OWN dependents (their rebase upstream). Its `upstream..oldHead`
+    // count is this branch's own-commit count — the ceiling the fix is checked against.
     const oldHead = sh("git", ["rev-parse", `origin/${step.branch}`], childDir);
+    const ownCommits = Number(sh("git", ["rev-list", "--count", `${step.upstream}..${oldHead}`], childDir));
     const d: Dependent = { pr: step.pr, branch: step.branch, issue: step.issue };
 
-    if (hostRebase(childDir, step.branch, step.onto, step.upstream) === "conflict") {
-      gateConflict(childDir, d, step.onto); // slice 2: try an in-sandbox fix first
-      return; // don't cascade past an unrebased branch
+    // Host clean rebase first (fast, free, no agent). On a genuine conflict,
+    // summon the in-sandbox claude -p fix; if it can't reach green either, gate.
+    if ((await hostRebase(childDir, step.branch, step.onto, step.upstream)) === "conflict") {
+      if ((await agentFix(cfg, childDir, step, ownCommits)) === "gate") {
+        gateConflict(childDir, d, step.onto);
+        return; // don't cascade past an unresolved branch
+      }
     }
     if (step.retargetToMain) {
       sh("gh", ["pr", "edit", step.pr, "--base", "main"], childDir);
