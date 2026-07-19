@@ -1,7 +1,7 @@
 # Implementation plan — the Sunday pipeline
 
-> **Status: BUILT — M1–M5 implemented on `feat/init`** (M5.4 onboarding tool is the one
-> deferred/separate piece). This was the ordered, dependency-aware build sequence, synthesised
+> **Status: BUILT — M1–M5 implemented on `feat/init`** (including M5.4, the `repo:init`
+> onboarding tool). This was the ordered, dependency-aware build sequence, synthesised
 > from a resolved design + a verified spike; it now records what was built. Live-hardening runs
 > (a real quota pause, a forced ≥120K handoff, per-phase model/effort in a real session log)
 > remain owed. It is deliberately **generic** — concrete per-child specifics (image recipe,
@@ -202,11 +202,11 @@ service (`--url http://listener:<port>/` over the compose network, `GH_TOKEN` in
 
 ### M5 — Resource management + onboarding polish
 
-> **BUILT** (M5.1–M5.3 on `feat/init`): the per-phase matrix + discipline-floor injection, the
-> ctx-threshold handoff, and the cost-weighted token report. Operator guide:
-> [`resource-management.md`](resource-management.md). **M5.4 (onboarding tool) is deferred/separate.**
-> The floor is injected as a **single rw `~/.claude` mount** (two subdir mounts break session
-> capture) and Sign-off is its **own** sub-agent — see the operator guide + the design notes below.
+> **BUILT** (M5.1–M5.4 on `feat/init`): the per-phase matrix + discipline-floor injection, the
+> ctx-threshold handoff, the cost-weighted token report, and the `repo:init` onboarding tool.
+> Operator guide: [`resource-management.md`](resource-management.md). The floor is injected as a
+> **single rw `~/.claude` mount** (two subdir mounts break session capture) and Sign-off is its
+> **own** sub-agent — see the operator guide + the design notes below.
 
 Layered last: the pipeline works; now tune cost and smooth onboarding. Per #11, the matrix's
 numbers are **tuned from real production data**, so this deliberately follows M1–M4.
@@ -247,9 +247,12 @@ numbers are **tuned from real production data**, so this deliberately follows M1
    ⚠️ **Per-phase attribution is unverified** — `iterations[]` are the orchestrator's turns, not
    sub-agents; parse `sessionFilePath` JSONL to attribute by phase, and **verify granularity on
    the first real run** (the "~5× per phase" figure is an assumption).
-4. **Onboarding:** the reference child is already onboarded (private guide). Automating future
-   onboarding (`npm run repo:init <git-url>` wrapping `sandcastle init` + `gen-workspace` + config +
-   labels) is tracked separately as the onboard-a-child tool.
+4. **Onboarding — BUILT:** `npm run repo:init <git-url> [name] [-- --dry-run]`
+   (`scripts/repo-init.sh`) automates the generic parts — clone into `repos/<name>`, scaffold
+   `.sandcastle/` (Dockerfile template + `.gitignore` + blank `.env`), add the gitignored
+   `config/repos.json` entry (additive), seed the pipeline labels, and regenerate the editor
+   workspace. Child-specific bits (a Dockerfile `FROM` the child's dev image, the image build, any
+   test sidecar) are printed as next-steps. Idempotent; `--dry-run` touches nothing.
 
 **Verify M5:** a run emits per-phase model/effort from the matrix; a forced ≥120K session hands
 off cleanly; a token report lands with correct per-phase attribution (or the fallback + the flag).

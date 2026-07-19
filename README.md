@@ -178,6 +178,20 @@ conventions, and the coding-standards rubric the `reviewer` links. Run both setu
 Without them the roster still runs — the `reviewer` falls back to `CLAUDE.md` and whatever the
 repo documents — but the tailored rubric and label vocabulary won't be present.
 
+## Onboarding a repo
+
+Add a child repo to Sunday with:
+
+```bash
+npm run repo:init <git-url> [name]        # add "-- --dry-run" to preview, touching nothing
+```
+
+This clones it into `repos/<name>`, scaffolds `.sandcastle/` (a Dockerfile template + `.gitignore`
++ blank `.env`), adds its routing entry to the gitignored `config/repos.json` (additive — it never
+clobbers an existing child), seeds the pipeline labels on its tracker, and regenerates the editor
+workspace. It then prints the child-specific next-steps you own: editing the Dockerfile to base on
+the child's own dev image, building the sandbox image, and wiring any per-run test sidecar.
+
 ## Running the pipeline
 
 Once configured, run the whole stack — the listener plus a `gh webhook forward` per repo —
