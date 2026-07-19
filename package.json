@@ -9,7 +9,8 @@
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "status": "node listener/status.mts"
+    "status": "node listener/status.mts",
+    "repo:init": "bash scripts/repo-init.sh"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "0.12.0",
