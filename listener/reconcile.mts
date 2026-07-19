@@ -23,6 +23,7 @@ import {
   isSummon,
   localFeatBranches,
   deleteLocalBranch,
+  nudgeSpecIfActivated,
   SUNDAY_MARKER,
 } from "./helper.mts";
 import { getIssue, readState, type IssueStatus } from "./state.mts";
@@ -158,6 +159,9 @@ function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, de
 
     const decision = deps.admitIssue(fullName, labels, deps.repos);
     const prior = getIssue(key);
+    // admitIssue skips a spec; nudge once if it was mis-labelled for the agent
+    // (same helper as the live path — no drift). No-op on non-spec / bare specs.
+    if (!decision.admit) nudgeSpecIfActivated(fullName, cfg, issue, labels, childDir);
     const missingTriggersOnly =
       !decision.admit && (decision.reason ?? "").startsWith("missing trigger label");
     const hasSunday = missingTriggersOnly && hasHumanSunday(fullName, childDir, issue);

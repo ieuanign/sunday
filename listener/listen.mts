@@ -20,7 +20,15 @@ import { runPrComments } from "./run-pr-comments.mts";
 import { resolveBase } from "./dag.mts";
 import { makeRestacker } from "./restack.mts";
 import { reconcile } from "./reconcile.mts";
-import { sh, handleComment, isSummon, summon, deleteLocalBranch } from "./helper.mts";
+import {
+  sh,
+  handleComment,
+  isSummon,
+  summon,
+  deleteLocalBranch,
+  nudgeSpecIfActivated,
+  SPEC_LABEL,
+} from "./helper.mts";
 import { getIssue, setIssue, type IssueStatus } from "./state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
@@ -62,6 +70,13 @@ export function admitIssue(
   const present = new Set(labels);
   if (present.has("agent-working")) {
     return { admit: false, reason: "already claimed (agent-working)" };
+  }
+  // A spec is a manifest, never implemented — reject it BEFORE the trigger check
+  // so a spec is skipped whatever its labels (and reconcile never routes it to the
+  // @sunday-summon branch, which would relabel then run it). The human-facing
+  // nudge is the caller's job (nudgeSpecIfActivated) — this stays pure.
+  if (present.has(SPEC_LABEL)) {
+    return { admit: false, reason: "spec issue — a manifest, not implementable" };
   }
   const missing = cfg.triggerLabels.filter((label) => !present.has(label));
   if (missing.length > 0) {
@@ -217,6 +232,9 @@ const server = createServer((req, res) => {
         const prior = getIssue(key);
         if (!decision.admit) {
           console.log(`  · skip — ${decision.reason}`);
+          // A spec mis-labelled for the agent gets a one-time nudge (no-op otherwise).
+          const cfg = repos[repo];
+          if (cfg) nudgeSpecIfActivated(repo, cfg, String(number), labels, resolve(parentRoot, cfg.path));
         } else if (prior && prior.status !== "failed") {
           // already in-flight / done / awaiting-human — don't re-run
           // (a `failed` issue may retry on a re-label).

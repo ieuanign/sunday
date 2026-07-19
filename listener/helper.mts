@@ -31,6 +31,14 @@ export const SUNDAY_MARKER = "<!-- sunday:gate -->";
 // `@sunday`, so this never matches them — but the marker check runs first.)
 const SUNDAY_MENTION = /@sunday\b/i;
 
+// A `spec` issue is a manifest (the shape of a feature), never a unit of work —
+// its child tickets are what get implemented. Admission always skips it; when it
+// also carries the trigger labels (a human mis-labelled the manifest for the
+// agent) we nudge once. Separate marker so the nudge is idempotent independent of
+// the gate marker.
+export const SPEC_LABEL = "spec";
+const SUNDAY_SPEC_MARKER = "<!-- sunday:spec-nudge -->";
+
 /** A human summoning Sunday: mentions @sunday and isn't one of our own comments
  *  (marker). Used for inline review comments, which route outside handleComment. */
 export function isSummon(body: string): boolean {
@@ -93,6 +101,44 @@ export function handleComment(opts: {
   } else if (SUNDAY_MENTION.test(body)) {
     summon(fullName, cfg, issue, labels);
   }
+}
+
+/** A spec issue that ALSO carries all trigger labels — i.e. a manifest a human
+ *  labelled for the agent by mistake. Pure so both admission paths (live + reconcile)
+ *  decide identically and a smoke can drive it. A bare spec (no triggers) isn't
+ *  "activated" and is left alone — nudging every backlog spec on each boot would spam. */
+export function isActivatedSpec(labels: string[], triggerLabels: string[]): boolean {
+  return labels.includes(SPEC_LABEL) && triggerLabels.every((l) => labels.includes(l));
+}
+
+/** Post the one-line "label the child tickets" nudge on an activated spec, once.
+ *  Idempotent via a hidden marker (re-checked cheaply, posted at most once per
+ *  issue). No-op unless the issue is an activated spec. Called from BOTH the live
+ *  admission skip and reconcile's issue scan — one helper so they can't drift.
+ *  admitIssue already rejects the spec, so this only handles the human-facing nudge. */
+export function nudgeSpecIfActivated(
+  fullName: string,
+  cfg: RepoConfig,
+  issue: string,
+  labels: string[],
+  childDir: string,
+): void {
+  if (!isActivatedSpec(labels, cfg.triggerLabels)) return;
+  const bodies = JSON.parse(
+    sh("gh", ["api", `repos/${fullName}/issues/${issue}/comments`, "--jq", "[.[] | .body]"], childDir),
+  ) as string[];
+  if (bodies.some((b) => b.includes(SUNDAY_SPEC_MARKER))) return; // already nudged
+  const tickets = cfg.triggerLabels.map((l) => `\`${l}\``).join(" + ");
+  sh(
+    "gh",
+    [
+      "issue", "comment", issue, "--body",
+      `${SUNDAY_SPEC_MARKER}\n🤖 **Sunday** — this looks like a spec (a manifest, not a unit of work), ` +
+        `so I won't implement it directly. Label the individual child tickets ${tickets} instead.`,
+    ],
+    childDir,
+  );
+  console.log(`  ✎ nudged spec ${fullName}#${issue} — label the child tickets`);
 }
 
 /** @sunday summon (option 1): apply any missing trigger labels; the resulting
