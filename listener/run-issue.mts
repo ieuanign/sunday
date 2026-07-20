@@ -20,6 +20,7 @@ import {
   handoffInstructions,
   handoffDocPath,
   cleanupHandoffs,
+  ensureSandboxIgnores,
   HANDOFF_TAG,
 } from "./helper.mts";
 import { assembleFloor } from "./roster-inject.mts";
@@ -180,6 +181,11 @@ export async function runIssue(
   // only the worktree start-point + ahead-count use the ref.
   let effectiveBase = baseBranch;
   try {
+    // Keep pipeline/floor scratch (an injected sub-agent's `.scratch/` plan dir)
+    // from dirtying the sandbox worktree — else Sandcastle preserves it and branch
+    // cleanup is blocked. Idempotent; covers children onboarded before this existed.
+    ensureSandboxIgnores(childDir);
+
     // Latest main + every feat/* remote ref, and prune dangling ones (get the
     // newest base before Sandcastle branches feat/<issue> off it).
     sh("git", ["fetch", "-p", "origin"], childDir);

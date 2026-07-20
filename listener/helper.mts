@@ -2,8 +2,8 @@
 // listener): shelling out, the comment marker, and comment routing.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
 import { getIssue } from "./state.mts";
@@ -93,6 +93,37 @@ export function handoffInstructions(): string {
     `${adapted}\n\n` +
     `Emit the document as your only output, inside one \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` tag.`
   );
+}
+
+/** Paths the pipeline/floor writes INTO a child's sandbox worktree that must not
+ *  dirty its git status — chiefly `.scratch/`, where the injected floor sub-agents
+ *  (e.g. architecture-engineer) drop their plan docs (cwd-relative inside the box).
+ *  A dirty worktree makes Sandcastle preserve it, which then blocks branch cleanup. */
+const SANDBOX_WORKTREE_IGNORES = [".scratch/"];
+
+/** Keep pipeline/floor scratch out of a child's worktree `git status`, idempotently,
+ *  via the child clone's LOCAL `.git/info/exclude` — per-clone, **never committed**
+ *  (so it never leaks into a PR and never touches the child's own tracked `.gitignore`),
+ *  and shared across all of the clone's worktrees. Runs before every run (self-heals
+ *  children onboarded before this existed) and at `repo:init`. Best-effort. */
+export function ensureSandboxIgnores(childDir: string): void {
+  const excludePath = resolve(childDir, ".git", "info", "exclude");
+  let current = "";
+  try {
+    current = readFileSync(excludePath, "utf8");
+  } catch {
+    /* fresh clone / no exclude yet */
+  }
+  const have = new Set(current.split("\n").map((l) => l.trim()));
+  const missing = SANDBOX_WORKTREE_IGNORES.filter((ig) => !have.has(ig));
+  if (missing.length === 0) return;
+  try {
+    mkdirSync(dirname(excludePath), { recursive: true });
+    const lead = current && !current.endsWith("\n") ? "\n" : "";
+    appendFileSync(excludePath, `${lead}# Sunday: keep pipeline/floor scratch out of the worktree\n${missing.join("\n")}\n`);
+  } catch (err) {
+    console.log(`  · could not update ${childDir}/.git/info/exclude: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Per-issue handoff doc path `.scratch/<repo>/handoff/<issue>-<n>.md` (M5.2). Ensures

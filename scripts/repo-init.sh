@@ -53,6 +53,20 @@ else
   run "gh repo clone '${full}' '${dir}'"
 fi
 
+# 1b. Keep pipeline/floor scratch (e.g. an injected sub-agent's .scratch/ plan dir)
+#     out of the child's worktree via the LOCAL .git/info/exclude — never committed,
+#     so it never leaks into a PR or touches the child's own tracked .gitignore.
+ex="${dir}/.git/info/exclude"
+if [ "$DRY" = 1 ]; then
+  say "  [dry] add .scratch/ to ${ex}"
+elif [ -d "${dir}/.git" ]; then
+  mkdir -p "$(dirname "$ex")"
+  grep -qxF '.scratch/' "$ex" 2>/dev/null || printf '# Sunday: keep pipeline/floor scratch out of the worktree\n.scratch/\n' >> "$ex"
+  say "· exclude: .scratch/ (local, not committed)"
+else
+  say "· exclude: skipped — ${dir}/.git not found (clone first)"
+fi
+
 # 2. Scaffold .sandcastle/ (Dockerfile TEMPLATE + .gitignore + blank .env). Never
 #    overwrite — a child may already carry its own tuned .sandcastle/.
 sc="${dir}/.sandcastle"
