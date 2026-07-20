@@ -41,7 +41,7 @@ GitHub issue (labelled)
 
 Two labels required (**AND**), fired on the second label:
 
-- **`ready-for-agents`** — the issue is spec-ready.
+- **`ready-for-agent`** — the issue is spec-ready.
 - **`auto-dev`** — automate it.
 
 Parents/trackers are never auto-dev'd — see *Dependency DAG*.
@@ -51,15 +51,16 @@ Parents/trackers are never auto-dev'd — see *Dependency DAG*.
 | Event | Purpose |
 |---|---|
 | `issues` (labeled) | admission trigger |
-| `issue_comment` | the human gate (see below) |
-| `pull_request` (closed + merged) | triggers restack of dependents |
+| `issue_comment` | human gate · `@sunday` summon (issue) or PR-comment fix |
+| `pull_request_review_comment` | `@sunday` on an inline review comment → PR-comment fix |
+| `pull_request` (opened / closed) | stack dependents on open · restack on merge |
 
 ## Label state machine
 
 GitHub labels are the **human-visible source of truth**.
 
 ```
-ready-for-agents + auto-dev   (admitted)
+ready-for-agent + auto-dev   (admitted)
         → agent-working
             ├── awaiting-human   gate: agent asked a question, resumes on reply
             ├── agent-failed     could not reach green: draft PR + diagnosis, manual retry
@@ -83,23 +84,43 @@ to the child repo's own rules. The full prompt is [`sandbox-prompt.md`](sandbox-
   parents are trackers, never auto-dev'd.
 - **Stacking:** issue *A* starts once blocker *B*'s **draft PR is open**; *A* branches from
   *B*'s head and its PR targets *B*'s branch.
-- **On *B* merge:** an agent runs `git rebase --onto main <B-ref> A`, retargets *A*'s PR base
-  to `main`, and cascades up the chain.
+- **On *B* merge:** the **listener (TS) drives** the restack — for each stacked dependent it
+  runs `git rebase --onto main <B-ref> A` (pure host git), retargets *A*'s PR base to `main`,
+  force-pushes, and cascades up the chain (parent before child). Clean rebases never involve an
+  agent.
 - **Global invariant: rebase only, never merge.** History stays linear; PR merges are
   squash/rebase.
-- **Rebase conflicts:** the agent resolves them; if it cannot (within the fix bound), it
-  stops and opens the human gate.
+- **Rebase conflicts:** a genuine source conflict summons the agent **in the child sandbox** —
+  a direct headless `claude -p` on a worktree, credential-free of GitHub, driven by `/implement`
+  so it resolves → tests → verifies. The rewrite returns via the shared worktree and **the host
+  force-pushes** it (Sandcastle's add-only sync-out is bypassed — it can't represent a rewrite).
+  Green → force-push; can't reach green → **gate on the PR** (`awaiting-human`), one attempt, no
+  auto-retry, a human rebases by hand. Regenerable artifacts (lockfiles) are regenerated, never
+  agent-merged.
 
 ## Concurrency
 
-**Global cap (default 3)** — a semaphore across *all* repos, because every run shares one
-agent quota (see *Auth*). Not per-repo. Set via `MAX_CONCURRENCY` in `.env`.
+**Two lanes.** Regular runs (issue + PR-comment) share a **global cap (default 3)** — a semaphore
+across *all* repos, because every run shares one agent quota (see *Auth*). Not per-repo. Set via
+`MAX_CONCURRENCY` in `.env`.
+
+**Restack work runs in a separate, *uncapped* lane** — a queue of per-branch steps walked
+parent-before-child. Uncapped because a restack unblocks a stuck merge and conflicts are rare
+(concurrent fresh sessions are fine on the Max plan).
+
+**One shared, two-way per-branch lock** spans both lanes: neither lane touches a branch while the
+other is on it. A restack step waits on a busy branch; a regular run whose branch has a restack in
+flight is skipped and retried when it frees. Draining is event-driven — the moment any run finishes.
 
 ## Human gate
 
 The **issue comment thread is the gate.** When a run needs a human, the agent:
 
-1. posts its question plus a hidden marker — `<!-- sandcastle:awaiting … -->`,
+1. posts its question with a **dual sign** — a hidden marker `<!-- sunday:gate -->` (so the
+   listener skips its own comment on resume) plus a visible header (`🤖 Sunday · autonomous
+   agent`) so a human can tell the agent authored it (Sunday and you post under the same
+   account). The visible attribution also marks the PR body; a PR-comment feedback loop would
+   reuse the same helper.
 2. applies the `awaiting-human` label,
 3. exits.
 
@@ -129,6 +150,27 @@ handoff to a human, retried by relabelling.
 - **Reconcile-on-restart:** re-derive *all* pending work from GitHub — new issues, missed
   gate replies, missed PR-merge restacks, orphaned `agent-working`. Because GitHub is the
   truth, an outage is a *delay, not a loss*; total host loss is recoverable.
+
+## Resource management
+
+*(The M5 layer — design; build order in [`implementation-plan.md`](implementation-plan.md) §M5.)*
+
+- **Per-phase model/effort matrix.** Each run injects `.claude/agents/<phase>.md` sub-agent
+  definitions (model + effort frontmatter) from `config/roster.*`, mounted **read-only at the
+  sandbox user level** (`~/.claude/agents/`). A child's own **project-level** `.claude/agents/`
+  overrides them (project > user precedence) — so Sunday's roster is a **floor**, not an override.
+  `.env` `MODEL`/`MODEL_EFFORT` is the global fallback (and the orchestrator's own effort).
+- **Handoff-at-threshold.** The orchestrator session only grows across **repeated gate cycles** on
+  one issue (the sole session-resuming path; a quota pause restarts fresh). At a gate reply, if the
+  prior run's context (`input + cacheRead + cacheCreation`) is `≥ 120K`, TS does one bounded turn
+  that **emits** a handoff note as tagged output (never a file — the box is credential-free), writes
+  it host-side, and starts a **fresh** session seeded with the note + the human's reply. A handoff
+  turn that throws a transient/quota error is retried like any run; one that produces no usable note
+  fails the issue as `agent-failed` (a relabel retries fresh — it never re-resumes the bloated
+  session). Handoff notes live under `.scratch/<repo>/handoff/` and are cleared when the PR opens.
+- **Cost-weighted token report.** On run completion, a host-side (free, no-USD) report records
+  per-phase token classes, peak context/zone, and a weighted sort key that surfaces the real
+  offender (output is the priciest class). Stored under `.scratch/<repo>/token-report/`.
 
 ## Multi-repo layout
 
@@ -163,18 +205,6 @@ API key). Configured in `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT`, and the auth v
 share one quota, which is why the concurrency cap is global.
 
 > A subscription-token automation path may warrant checking the agent vendor's current terms.
-
-## Open questions
-
-Carried from design; resolve before/while building:
-
-1. **Forwarding shape** — personal account (per-repo templated `--repo` forwarders) vs org
-   (one `--org` forwarder, `admin:org_hook` scope)?
-2. **Redis wiring** — confirm the exact auth/config a given child's test suite expects for
-   the in-sandbox redis.
-3. **Per-child `.sandcastle` resolution** — does the installed Sandcastle `run()` read
-   `cwd/.sandcastle`, or must the listener pass explicit `promptFile`/`imageName`? Verify
-   against the pinned version.
 
 ## Accepted risks
 

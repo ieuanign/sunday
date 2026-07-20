@@ -1,14 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
   "packages": [
-    "nodejs@22",
+    "nodejs@24",
     "gh@latest",
     "git@latest",
     "jq@latest"
   ],
   "shell": {
     "init_hook": [
-      "echo 'Sunday devbox ready. Docker (daemon) and your agent CLI (default: claude) are installed separately — see README.md.'"
+      "gh extension list 2>/dev/null | grep -q gh-webhook || gh extension install cli/gh-webhook 2>/dev/null || true",
+      "echo 'Sunday devbox ready. Docker (daemon) and your agent CLI (default: claude) are installed separately — see README.md.'",
+      "echo 'Run the pipeline supervised with: devbox services up  (see docs/supervision.md).'"
     ],
     "scripts": {}
   }

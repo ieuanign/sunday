@@ -1,0 +1,53 @@
+# Sunday supervision stack (M4) — run with `devbox services up`.
+#
+# Runs the pipeline as supervised HOST processes (not containers). The listener
+# spawns sandcastle Docker sandboxes on the host daemon directly, exactly as a
+# hand-run `node --env-file=.env listener/listen.mts` does — so there is no
+# docker-out-of-docker path translation to get right.
+#
+#   devbox services up            # foreground, both processes + a TUI
+#   devbox services up -b          # background
+#   devbox services attach         # re-attach to the running TUI / logs
+#   devbox services stop           # stop the stack
+#
+# Singleton rule: the listener's serializing loop + double-launch guard assume ONE
+# process. process-compose RESTARTS it on death but never replicates it — do not
+# add replicas.
+version: "0.5"
+
+processes:
+  # The singleton listener. On every (re)start it re-arms a persisted pause/halt
+  # then reconciles pending work from GitHub, so a crash-restart is a delay, not a
+  # loss. `restart: always` is the M4 self-heal.
+  listener:
+    command: "node --env-file=.env listener/listen.mts"
+    availability:
+      restart: "always"
+      backoff_seconds: 5
+    # The listener's GET endpoint 200s ("sunday listener up") once it's serving;
+    # dependents wait on this readiness. process-compose probes support http_get /
+    # exec (NOT k8s-style tcp_socket — that leaves a process forever un-Ready).
+    # Keep the port in sync with LISTENER_PORT (.env, default 8787) — probe ports
+    # are ints, so it can't read the env var here.
+    readiness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: http
+        path: "/"
+        port: 8787
+      initial_delay_seconds: 1
+      period_seconds: 5
+      timeout_seconds: 3
+      failure_threshold: 3
+
+  # Per-repo GitHub event relay. Starts only once the receiver is healthy. The
+  # command is a generic launcher that reads the (gitignored) routing table at
+  # runtime, so no child repo name lands in this tracked file (publish policy).
+  webhook-forward:
+    command: "scripts/webhook-forward.sh"
+    depends_on:
+      listener:
+        condition: process_healthy
+    availability:
+      restart: "always"
+      backoff_seconds: 5

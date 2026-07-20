@@ -1,0 +1,7 @@
+{
+  "plan":      { "agent": "architecture-engineer", "model": "opus",   "effort": "max" },
+  "implement": { "agent": "code-writer",           "model": "opus",   "effort": "xhigh" },
+  "review":    { "agent": "reviewer",              "model": "sonnet", "effort": "high" },
+  "debug":     { "agent": "debugger",              "model": "opus",   "effort": "xhigh" },
+  "signoff":   { "agent": "sign-off",              "model": "sonnet", "effort": "medium" }
+}

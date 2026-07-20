@@ -1,14 +1,41 @@
 # Private — the individual "improve Sunday" recipe (not published)
 /CLAUDE.md
-/.claude/
 /skills-lock.json
 /docs/agents/
+/teach/
+
+# .claude/ is private (personal settings + the "improve Sunday" recipe) EXCEPT the
+# shipped discipline floor: the roster + the skills it preloads (findings-grill-
+# discipline-floor). Nested negation — order matters.
+/.claude/*
+!/.claude/agents/
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/tdd/
+!/.claude/skills/code-review-mp/
+!/.claude/skills/diagnosing-bugs/
+!/.claude/skills/implement/
 
 # Config secrets (the template .env.example stays tracked)
 /.env
 
+# Real routing table — names private children (config/repos.example.json stays tracked)
+/config/repos.json
+
 # Child repo clones (each is its own independent repo)
 /repos/
 
+# Node deps (package-lock.json IS tracked — it locks the exact pins)
+/node_modules/
+
 # Scratch
 /.scratch/
+
+# Tests: track only the .mts smoke sources + runner. The hermetic smokes build and
+# clean their own temp dirs/fixtures (smoke-*-tmp/, smoke-floor/, operability/,
+# fixture-restack/) — ignore any a failed run leaves behind.
+/test/*
+!/test/*.mts
+
+# Editor — personal multi-root workspace (names the private child)
+/*.code-workspace

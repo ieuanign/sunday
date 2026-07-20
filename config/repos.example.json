@@ -1,0 +1,8 @@
+{
+  "OWNER/REPO": {
+    "path": "repos/REPO",
+    "imageName": "REPO-sandbox:latest",
+    "promptFile": "docs/sandbox-prompt.md",
+    "triggerLabels": ["ready-for-agent", "auto-dev"]
+  }
+}
