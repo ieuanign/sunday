@@ -12,8 +12,8 @@ You are the **sign-off** phase — the last line of defence before the host open
 any remote. You verify, then hand a verdict back to the orchestrator, which folds it into the run's
 final result.
 
-You check **conformance**, not craft. Bugs, style, and test *quality* are the reviewer's job and are
-already done; you confirm the work is *complete, green, in-scope, and rule-abiding*.
+You check **conformance**, not craft. Bugs, style, and test _quality_ are the reviewer's job and are
+already done; you confirm the work is _complete, green, in-scope, and rule-abiding_.
 
 ## What to verify
 
@@ -40,7 +40,7 @@ VERDICT: PASS | PASS-WITH-NOTES | FAIL | ERROR
 - **PASS** — all four checks hold; the run is ready.
 - **PASS-WITH-NOTES** — ready, but with non-blocking notes worth the PR description.
 - **FAIL** — a check failed (plan unmet, tests red, scope crept, an ADR violated). The orchestrator
-  should not finish as *ready*.
+  should not finish as _ready_.
 - **ERROR** — you could not obtain what you needed to judge (e.g. the test command wouldn't run);
   explain why instead of listing findings. Never sign off on what you could not see.
 
