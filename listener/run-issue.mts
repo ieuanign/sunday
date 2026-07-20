@@ -14,6 +14,7 @@ import { z } from "zod";
 import {
   sh,
   deleteLocalBranch,
+  removePreservedWorktree,
   runLogPath,
   sundayComment,
   SUNDAY_SIGN,
@@ -174,6 +175,9 @@ export async function runIssue(
   // local branch; a `finally` removes them — except a gated branch, which is then
   // the only copy of its commits (never pushed) and is kept for resume.
   let gated = false;
+  // Set from the run's result: a host path when Sandcastle preserved a dirty worktree.
+  // The `finally` force-removes it before deleting the branch (non-gated runs only).
+  let preservedWorktree: string | undefined;
   // Base every run on the fresh REMOTE ref, never a stale local: Sandcastle prefers
   // an existing local branch, which may lag origin (or be absent once we delete it
   // post-run) — origin/<base> is current after the fetch below (branch-lifecycle
@@ -278,6 +282,10 @@ export async function runIssue(
       output: Output.object({ tag: SIGNAL_TAG, schema: resultSchema, maxRetries: 1 }),
     });
 
+    // A dirty worktree (e.g. a tracked-file edit past the `.scratch` exclude) makes
+    // Sandcastle preserve it host-side; the `finally` backstop force-removes it.
+    preservedWorktree = result.preservedWorktreePath;
+
     const last = result.iterations.at(-1);
     const sessionId = last?.sessionId;
     // ctx = the last iteration's cumulative usage snapshot (M5.2 threshold input).
@@ -341,7 +349,13 @@ export async function runIssue(
     rmSync(promptFile, { force: true });
     rmSync(floorRoot, { recursive: true, force: true }); // per-run floor — regenerated each run
     // The local branch was pushed (a PR outcome) or is empty — origin holds any
-    // history, so drop it. A gated branch is the only copy of its commits → kept.
-    if (!gated) deleteLocalBranch(childDir, branch);
+    // history, so drop it. A gated branch is the only copy of its commits → kept
+    // (and its preserved worktree, if any, is the resume checkout — never touched).
+    if (!gated) {
+      // Backstop: if Sandcastle preserved a dirty worktree it still holds the branch,
+      // blocking the delete below — force-remove it first (see removePreservedWorktree).
+      if (preservedWorktree) removePreservedWorktree(childDir, preservedWorktree);
+      deleteLocalBranch(childDir, branch);
+    }
   }
 }

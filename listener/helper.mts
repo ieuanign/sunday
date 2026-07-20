@@ -167,6 +167,21 @@ export function deleteLocalBranch(childDir: string, branch: string): void {
   }
 }
 
+/** Backstop for the branch-cleanup: force-remove a worktree Sandcastle PRESERVED
+ *  because the run left it dirty. The `.scratch` exclude keeps the *systematic* dirt
+ *  out, but an agent that edits a TRACKED file still dirties the worktree → Sandcastle
+ *  preserves it (a host path under the child's `.sandcastle/worktrees/`) → it holds
+ *  `feat/<issue>` checked out → `deleteLocalBranch`'s `-D` is blocked. Remove it first
+ *  so cleanup is robust regardless of what the agent left. Best-effort. */
+export function removePreservedWorktree(childDir: string, worktreePath: string): void {
+  try {
+    sh("git", ["worktree", "remove", "--force", worktreePath], childDir);
+    console.log(`  🧹 removed preserved worktree ${worktreePath}`);
+  } catch (err) {
+    console.log(`  · could not remove preserved worktree ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Route a created comment. Our own comments (marker) are skipped. On a PR, an
  *  @sunday mention drives the PR-comment fix flow (`summonPr`, keyed by PR
  *  number). On an issue, a gate resume (any reply on an `awaiting-human` issue)
