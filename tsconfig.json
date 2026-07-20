@@ -5,5 +5,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["listener/**/*.mts", "config/**/*.mts"]
+  "include": ["listener/**/*.mts", "config/**/*.mts", "test/**/*.mts"]
 }

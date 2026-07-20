@@ -31,5 +31,11 @@
 # Scratch
 /.scratch/
 
+# Tests: track only the .mts smoke sources + runner. The hermetic smokes build and
+# clean their own temp dirs/fixtures (smoke-*-tmp/, smoke-floor/, operability/,
+# fixture-restack/) — ignore any a failed run leaves behind.
+/test/*
+!/test/*.mts
+
 # Editor — personal multi-root workspace (names the private child)
 /*.code-workspace
