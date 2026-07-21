@@ -19,7 +19,7 @@
 import { resolve } from "node:path";
 
 import {
-  sh,
+  shA,
   isSummon,
   localFeatBranches,
   deleteLocalBranch,
@@ -31,6 +31,12 @@ import { issueHasLivePr } from "./dag.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
+
+/** Yield to the event loop between reconcile work units so the readiness probe's
+ *  `GET /` is serviced during the sweep. The gh reads are now async (shA), but a
+ *  loop iteration can still run a burst of synchronous leaf work back-to-back; this
+ *  guarantees the health check gets a turn each iteration → no supervisor restart. */
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 // ── Pure decision helpers (unit-tested; no I/O) ──────────────────────────────
 
@@ -112,24 +118,24 @@ export interface ReconcileDeps {
 /** Re-derive and re-enqueue every outstanding piece of work from GitHub. Runs
  *  once on boot. Each pass is isolated so a failure in one repo/pass doesn't abort
  *  the rest — GitHub stays the truth, so the next restart tries again. */
-export function reconcile(deps: ReconcileDeps): void {
+export async function reconcile(deps: ReconcileDeps): Promise<void> {
   const names = Object.keys(deps.repos);
   console.log(`⟲ reconcile: re-deriving pending work from GitHub for ${names.length} repo(s)…`);
   for (const fullName of names) {
     const cfg = deps.repos[fullName];
     const childDir = resolve(parentRoot, cfg.path);
-    safe(`issues ${fullName}`, () => reconcileIssues(fullName, cfg, childDir, deps));
-    safe(`gates ${fullName}`, () => reconcileGates(fullName, cfg, childDir, deps));
-    safe(`pr-comments ${fullName}`, () => reconcilePrComments(fullName, cfg, childDir, deps));
-    safe(`restacks ${fullName}`, () => deps.reconcileRestacks(fullName, cfg));
-    safe(`branches ${fullName}`, () => reconcileBranches(fullName, childDir));
+    await safe(`issues ${fullName}`, () => reconcileIssues(fullName, cfg, childDir, deps));
+    await safe(`gates ${fullName}`, () => reconcileGates(fullName, cfg, childDir, deps));
+    await safe(`pr-comments ${fullName}`, () => reconcilePrComments(fullName, cfg, childDir, deps));
+    await safe(`restacks ${fullName}`, () => deps.reconcileRestacks(fullName, cfg));
+    await safe(`branches ${fullName}`, () => reconcileBranches(fullName, childDir));
   }
   console.log("⟲ reconcile: done.");
 }
 
-function safe(label: string, fn: () => void): void {
+async function safe(label: string, fn: () => void | Promise<void>): Promise<void> {
   try {
-    fn();
+    await fn();
   } catch (err) {
     console.log(`✗ reconcile ${label}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -138,12 +144,13 @@ function safe(label: string, fn: () => void): void {
 /** New labelled issues + orphaned `agent-working` + the deferred set + missed
  *  @sunday summons — all fall out of one open-issue scan run through the same
  *  admission the webhook path uses. */
-function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): void {
+async function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): Promise<void> {
   const issues = JSON.parse(
-    sh("gh", ["issue", "list", "--state", "open", "--json", "number,labels", "--limit", "200"], childDir),
+    await shA("gh", ["issue", "list", "--state", "open", "--json", "number,labels", "--limit", "200"], childDir),
   ) as { number: number; labels: { name: string }[] }[];
 
   for (const it of issues) {
+    await tick();
     const issue = String(it.number);
     const key = `${fullName}#${issue}`;
     let labels = it.labels.map((l) => l.name);
@@ -152,7 +159,7 @@ function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, de
     // is in-flight. Clear it (admission rejects the claim) so the issue can be
     // reconsidered; state below decides whether it actually re-runs.
     if (labels.includes("agent-working")) {
-      sh("gh", ["issue", "edit", issue, "--remove-label", "agent-working"], childDir);
+      await shA("gh", ["issue", "edit", issue, "--remove-label", "agent-working"], childDir);
       console.log(`  ⟲ reconcile: cleared orphaned agent-working on ${key}`);
       labels = labels.filter((l) => l !== "agent-working");
     }
@@ -164,7 +171,7 @@ function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, de
     if (!decision.admit) nudgeSpecIfActivated(fullName, cfg, issue, labels, childDir);
     const missingTriggersOnly =
       !decision.admit && (decision.reason ?? "").startsWith("missing trigger label");
-    const hasSunday = missingTriggersOnly && hasHumanSunday(fullName, childDir, issue);
+    const hasSunday = missingTriggersOnly && (await hasHumanSunday(fullName, childDir, issue));
 
     switch (issueAction(decision.admit, missingTriggersOnly, prior, hasSunday, () => issueHasLivePr(childDir, issue))) {
       case "admit":
@@ -181,9 +188,9 @@ function reconcileIssues(fullName: string, cfg: RepoConfig, childDir: string, de
 }
 
 /** Any open issue with a human @sunday comment (the missed-summon signal). */
-function hasHumanSunday(fullName: string, childDir: string, issue: string): boolean {
+async function hasHumanSunday(fullName: string, childDir: string, issue: string): Promise<boolean> {
   const bodies = JSON.parse(
-    sh("gh", ["api", `repos/${fullName}/issues/${issue}/comments`, "--jq", "[.[] | .body]"], childDir),
+    await shA("gh", ["api", `repos/${fullName}/issues/${issue}/comments`, "--jq", "[.[] | .body]"], childDir),
   ) as string[];
   return bodies.some((b) => isSummon(b));
 }
@@ -191,15 +198,16 @@ function hasHumanSunday(fullName: string, childDir: string, issue: string): bool
 /** Gated issues (`awaiting-human` + a `sessionId`) whose human replied while we
  *  were down → resume with that reply. The sessionId comes from the durable state
  *  save-data; the reply is re-read from GitHub. */
-function reconcileGates(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): void {
+async function reconcileGates(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): Promise<void> {
   for (const [key, s] of Object.entries(readState())) {
     if (s.status !== "awaiting-human" || !s.sessionId) continue;
     const hash = key.lastIndexOf("#");
     if (hash < 0) continue;
     const issue = key.slice(hash + 1);
     if (key.slice(0, hash) !== fullName || !/^\d+$/.test(issue)) continue; // this repo; issue keys only
+    await tick();
     const comments = JSON.parse(
-      sh("gh", ["api", `repos/${fullName}/issues/${issue}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
+      await shA("gh", ["api", `repos/${fullName}/issues/${issue}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
     ) as CommentRef[];
     const reply = pickResumeReply(comments, SUNDAY_MARKER);
     if (reply) {
@@ -212,18 +220,19 @@ function reconcileGates(fullName: string, cfg: RepoConfig, childDir: string, dep
 /** Open PRs with an @sunday mention we never answered → run the PR-comment fix.
  *  Checked per comment stream (conversation vs inline) so the monotonic-id compare
  *  stays within one id space and old, answered mentions never re-fire. */
-function reconcilePrComments(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): void {
+async function reconcilePrComments(fullName: string, cfg: RepoConfig, childDir: string, deps: ReconcileDeps): Promise<void> {
   const prs = JSON.parse(
-    sh("gh", ["pr", "list", "--state", "open", "--json", "number", "--limit", "100"], childDir),
+    await shA("gh", ["pr", "list", "--state", "open", "--json", "number", "--limit", "100"], childDir),
   ) as { number: number }[];
 
   for (const p of prs) {
+    await tick();
     const pr = String(p.number);
     const conv = JSON.parse(
-      sh("gh", ["api", `repos/${fullName}/issues/${pr}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
+      await shA("gh", ["api", `repos/${fullName}/issues/${pr}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
     ) as CommentRef[];
     const inline = JSON.parse(
-      sh("gh", ["api", `repos/${fullName}/pulls/${pr}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
+      await shA("gh", ["api", `repos/${fullName}/pulls/${pr}/comments`, "--jq", "[.[] | { id, body }]"], childDir),
     ) as CommentRef[];
     if (
       hasUnaddressedSunday(conv, SUNDAY_MARKER, isSummon) ||
@@ -239,12 +248,13 @@ function reconcilePrComments(fullName: string, cfg: RepoConfig, childDir: string
  *  terminal-branch cleanup a `pull_request.closed` fired while we were down. Keeps
  *  a branch with an open PR (active) or none yet (unpushed) and, critically, a
  *  gated branch (`awaiting-human` = the only copy of its commits; resume needs it). */
-function reconcileBranches(fullName: string, childDir: string): void {
+async function reconcileBranches(fullName: string, childDir: string): Promise<void> {
   for (const branch of localFeatBranches(childDir)) {
+    await tick();
     const issue = branch.slice("feat/".length);
     if (getIssue(`${fullName}#${issue}`)?.status === "awaiting-human") continue;
     const prs = JSON.parse(
-      sh("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "state", "--limit", "10"], childDir),
+      await shA("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "state", "--limit", "10"], childDir),
     ) as { state: string }[];
     if (prs.length === 0) continue; // never pushed a PR → could be pre-push work; keep
     if (prs.some((p) => p.state.toLowerCase() === "open")) continue; // active PR → keep

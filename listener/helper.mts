@@ -1,9 +1,10 @@
 // listener/helper.mts — shared plumbing for the TS host (M1 wrapper, M2
 // listener): shelling out, the comment marker, and comment routing.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import type { RepoConfig } from "#config/repos.mts";
 import { getIssue } from "./state.mts";
@@ -20,6 +21,19 @@ export function sh(file: string, args: string[], cwd?: string): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
   }).trim();
+}
+
+const execFileAsync = promisify(execFile);
+
+// Async twin of `sh` for the boot reconcile sweep: same contract (trimmed stdout,
+// throws on non-zero, `cwd` resolves against a child repo) but the gh/git
+// subprocess runs OFF the event loop. A synchronous `sh` chain there froze the
+// loop for the whole sweep, starving the listener's readiness probe (`GET /`) →
+// process-compose SIGKILL/restart loop. On failure the rejection carries the
+// command + stderr, so reconcile's `safe()` still surfaces gh/git errors.
+export async function shA(file: string, args: string[], cwd?: string): Promise<string> {
+  const { stdout } = await execFileAsync(file, args, { cwd, encoding: "utf8" });
+  return stdout.trim();
 }
 
 // Hidden marker on every comment WE post, so comment routing can tell our own

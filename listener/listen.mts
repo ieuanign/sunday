@@ -499,9 +499,10 @@ server.listen(port, () => {
       );
     },
   });
-  // Step 7: re-derive pending work from GitHub. Deferred to a microtask so the
-  // server is already accepting before reconcile's (blocking) gh reads run; it
-  // drives the SAME callbacks the webhook path uses, so recovery can't drift.
+  // Step 7: re-derive pending work from GitHub. reconcile's gh reads are async
+  // (shA) and it yields between work units, so the sweep runs WITHOUT starving the
+  // readiness probe's GET /; it drives the SAME callbacks the webhook path uses,
+  // so recovery can't drift.
   Promise.resolve()
     .then(() =>
       reconcile({
