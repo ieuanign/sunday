@@ -30,7 +30,8 @@ import {
   SPEC_LABEL,
 } from "./helper.mts";
 import { getIssue, setIssue, type IssueStatus } from "./state.mts";
-import { classify } from "./classify.mts";
+import { buildSandboxImages } from "./preflight.mts";
+import { classify, SETUP_SUMMARY } from "./classify.mts";
 import { notify } from "./notify.mts";
 import { readPauseState, writePauseState, clearPauseState, rearmAction } from "./pause-state.mts";
 import { startTelegramPolling } from "./telegram.mts";
@@ -39,7 +40,9 @@ import { buildStatus, formatStatus } from "./status.mts";
 const parentRoot = resolve(import.meta.dirname, "..");
 const port = Number(process.env.LISTENER_PORT ?? 8787);
 const maxConcurrency = Number(process.env.MAX_CONCURRENCY ?? 3);
-const repos = loadRepos(); // fail fast on a malformed routing table
+// `let`: the setup-halt watcher adopts a freshly re-read table on recovery (a
+// setup fix may BE a repos.json edit). Everything routes off this module var.
+let repos = loadRepos(); // fail fast on a malformed routing table
 const scheduler = createScheduler(maxConcurrency);
 
 // Act layer (M3.2). The abort registry lets a 403 halt cancel every in-flight
@@ -51,6 +54,7 @@ const transientRetries = new Map<string, number>();
 const RESUME_GRACE_MS = 5 * 60_000; // resume at quota reset + 5 min
 const MAX_TRANSIENT_RETRIES = 3;
 const BACKOFF_BASE_MS = 10_000;
+const SETUP_RECHECK_MS = 5 * 60_000; // setup-halt watcher: config + image recheck cadence
 // Restack driver bound to the UNCAPPED restack lane (6c). Seeds per-branch steps
 // on a blocker's merge; the cascade drains through the same lane.
 // `reconcileRestacks` re-derives missed merges on boot (step 7).
@@ -61,6 +65,13 @@ const { restackOnMerge, reconcileRestacks } = makeRestacker(scheduler.enqueueRes
 // opened a PR or merged). In-memory only — reconcile (step 7) re-derives this
 // from GitHub on restart. Keyed by `${fullName}#${issue}`.
 const deferred = new Map<string, { fullName: string; cfg: RepoConfig; issue: string }>();
+
+// Issues whose run died on a SETUP failure (the sandbox couldn't be created) —
+// the environment was at fault, not the issue, so the setup watcher re-admits
+// them on recovery. In-memory only: reconcile re-derives a labelled `failed`
+// issue on the next boot anyway (it skips only done/awaiting-human), and setup
+// failures never touch the trigger labels.
+const setupFailed = new Map<string, { fullName: string; issue: string }>();
 
 // Actions that should (re)consider an issue. NOT `unlabeled`/`edited` — those
 // fire when we ourselves add/remove `agent-working`, and admitting on them would
@@ -164,7 +175,7 @@ async function runAdmitted(
     }
     // Classify the failure off the RunResult/error shape and act oppositely per
     // class (quota→pause, 403→abort+halt, transient→backoff, run-failed→flag,
-    // unknown→halt). notify() writes the durable event first.
+    // setup/unknown→halt). notify() writes the durable event first.
     actOnFailure(classify({ error: err }), { fullName, cfg, childDir, issue, key });
   } finally {
     inFlightAborts.delete(key);
@@ -236,11 +247,18 @@ function actOnFailure(event: ReturnType<typeof classify>, ctx: FailureCtx): void
       // which would re-resume the bloated session in a loop. The message is specific.
       notify(event, { fullName, childDir, issue, label: "agent-failed" });
       break;
+    case "setup": // sandbox couldn't be created — same halt, actionable summary
     case "unknown":
       // Fail-safe: halt so a human looks; the raw excerpt is in events.jsonl.
       scheduler.pause(event.summary);
       writePauseState({ reason: event.summary, since: Date.now() });
       notify(event, { fullName, childDir, issue });
+      // A setup halt's cause is an edit out there (repos.json, a Dockerfile, the
+      // daemon) — watch for the fix and self-resume; unknown stays human-only.
+      if (event.class === "setup") {
+        setupFailed.set(key, { fullName, issue }); // re-admitted on recovery
+        watchSetupRecovery();
+      }
       break;
   }
 }
@@ -250,6 +268,57 @@ function actOnFailure(event: ReturnType<typeof classify>, ctx: FailureCtx): void
 function resumePipeline(): void {
   clearPauseState();
   scheduler.resume();
+}
+
+// ── Setup-halt recovery watcher ──
+// A setup halt's fix is an edit OUTSIDE the process: config/repos.json, a
+// child's .sandcastle/Dockerfile, or the docker daemon itself. While the halt is
+// armed, re-read repos.json fresh and re-run the image preflight on a timer
+// (build checks the Dockerfile placeholder too); when a recheck builds clean,
+// adopt the current table and resume. Stands down when the halt was resumed
+// manually or superseded by a different pause (quota) — never resumes those.
+
+const PREFLIGHT_HALT_REASON = "sandbox image preflight failed (see events.jsonl)";
+let setupWatchTimer: NodeJS.Timeout | undefined;
+let setupWatchLastError = ""; // dedupe the still-broken log — print only on change
+
+function isSetupHalt(reason: string): boolean {
+  return reason === SETUP_SUMMARY || reason === PREFLIGHT_HALT_REASON;
+}
+
+function watchSetupRecovery(): void {
+  if (setupWatchTimer) return; // one watcher; rechecks self-schedule
+  console.log(`  👀 setup watcher — rechecking repos.json + sandbox images every ${SETUP_RECHECK_MS / 1000}s`);
+  setupWatchTimer = setTimeout(() => void recheckSetup(), SETUP_RECHECK_MS);
+}
+
+async function recheckSetup(): Promise<void> {
+  setupWatchTimer = undefined;
+  const ps = readPauseState();
+  if (!ps || !isSetupHalt(ps.reason)) return; // resumed / superseded — stand down
+  try {
+    const fresh = loadRepos(); // re-READ — the fix may be a routing-table edit
+    await buildSandboxImages(fresh, parentRoot);
+    repos = fresh; // adopt the possibly-edited table for all future routing
+    setupWatchLastError = "";
+    // Re-admit the issues that died on the broken environment. Guarded on the
+    // durable state (still `failed`) and the current table (repo not removed);
+    // the scheduler's key-dedup absorbs a human re-label racing this.
+    for (const [key, { fullName, issue }] of setupFailed) {
+      const cfg = fresh[fullName];
+      if (cfg && getIssue(key)?.status === "failed") admitOrDefer(fullName, cfg, issue);
+    }
+    setupFailed.clear();
+    resumePipeline();
+    console.log(`  ✓ setup watcher: environment fixed — resumed (routing ${Object.keys(fresh).length} repo(s))`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (detail !== setupWatchLastError) {
+      setupWatchLastError = detail;
+      console.log(`  👀 setup watcher: still broken — ${detail} (rechecking every ${SETUP_RECHECK_MS / 1000}s, quiet until it changes)`);
+    }
+    setupWatchTimer = setTimeout(() => void recheckSetup(), SETUP_RECHECK_MS);
+  }
 }
 
 /** Schedule the auto-resume of a quota pause at `resumeAt` (reset + grace). */
@@ -287,6 +356,8 @@ function rearmPause(): void {
     case "halt":
       scheduler.pause(ps.reason);
       console.log(`⟲ re-armed halt (${ps.reason}) — awaiting a human resume`);
+      // A re-armed SETUP halt keeps self-healing across restarts.
+      if (isSetupHalt(ps.reason)) watchSetupRecovery();
       break;
   }
 }
@@ -499,11 +570,35 @@ server.listen(port, () => {
       );
     },
   });
+  // Sandbox-image preflight: (re)build every configured image BEFORE reconcile
+  // re-derives work — a missing image otherwise dies mid-run as a Provider
+  // create failure (setup halt), and a stale one as a mystery in-run toolchain
+  // failure (docker's cache makes an unchanged rebuild seconds). Async, after
+  // listen(): a sync build here would starve the readiness probe (see
+  // preflight.mts). The scheduler is held paused while builds run so an early
+  // webhook can't race a half-built image. A preflight failure becomes a
+  // durable setup halt, never a boot throw — under `restart: always` a throw
+  // would rebuild-loop forever.
+  const preflight = Promise.resolve()
+    .then(async () => {
+      scheduler.pause("sandbox image preflight — building");
+      await buildSandboxImages(repos, parentRoot);
+      // Lift OUR hold only — never a durable pause/halt armed meanwhile.
+      if (!readPauseState()) scheduler.resume();
+    })
+    .catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      scheduler.pause(PREFLIGHT_HALT_REASON);
+      writePauseState({ reason: PREFLIGHT_HALT_REASON, since: Date.now() });
+      notify({ class: "setup", severity: "P1", summary: PREFLIGHT_HALT_REASON, excerpt: detail });
+      console.log(`✗ preflight: ${detail}`);
+      watchSetupRecovery(); // self-resume once the environment is fixed
+    });
   // Step 7: re-derive pending work from GitHub. reconcile's gh reads are async
   // (shA) and it yields between work units, so the sweep runs WITHOUT starving the
   // readiness probe's GET /; it drives the SAME callbacks the webhook path uses,
   // so recovery can't drift.
-  Promise.resolve()
+  preflight
     .then(() =>
       reconcile({
         repos,

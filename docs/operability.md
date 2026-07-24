@@ -19,12 +19,43 @@ Every failed run is mapped to one class, which drives the response:
 | **auth (403)** | a 403 / invalid-credential error | Abort every in-flight run and **halt**; a human re-authenticates, and reconcile re-admits the work on the next boot. | P1 |
 | **transient** | 429 / network / 5xx (or a `retry-after`) | **Bounded exponential backoff** (honours `retry-after`), then, after 3 tries, the `agent-failed` path. | P3 |
 | **run-level** | the agent ran but produced nothing shippable (no valid result tag, a dirty worktree, an `error_*` result subtype) | Flag the issue `agent-failed`; no PR to open. | P3 |
+| **setup** | the sandbox couldn't be *created* — `Provider '…' create failed` / image not found locally (unbuilt image, docker daemon down) | **Halt + self-heal**: the setup watcher re-reads `config/repos.json` and re-runs the image preflight every 5 min, rebuilds once the fix lands, auto-resumes, and re-admits the issues that died on it (see below). | P1 |
 | **unknown** | anything unrecognised | **Fail-safe halt** — stop and notify, with the raw excerpt captured for inspection. Never silently dropped. | P1 |
 
 > The string patterns for quota/auth/transient are **provisional** until the first real occurrence.
 > The `unknown` fail-safe exists precisely to capture that first raw error in the event log so the
 > classifier can be tightened against reality — the shape-based checks (result tag, worktree,
 > abort) are already exact.
+
+## Setup failures (sandbox image preflight)
+
+On boot the listener **(re)builds every repo's sandbox image** in `config/repos.json` from the
+child's `.sandcastle/` (via `sandcastle docker build-image`, after the HTTP server is up — a
+build never blocks the readiness probe). Docker's layer cache makes an unchanged rebuild take
+seconds, and always building — rather than only when the image is missing — also picks up
+`.sandcastle/Dockerfile` edits and an updated local base image, which would otherwise drift
+into confusing in-run toolchain failures. A Dockerfile still carrying the scaffold placeholder
+(`FROM your-child-dev-image`) is refused with an actionable error rather than attempting a
+doomed build.
+
+When setup fails — at boot, or mid-run as a `Provider '…' create failed` — the pipeline halts
+(class `setup`, P1, notified once) and the **setup watcher** starts:
+
+- Every 5 min it re-reads `config/repos.json` **fresh** and re-runs the preflight: each repo's
+  `.sandcastle/Dockerfile` (present? placeholder?), docker reachability, the builds themselves.
+- **Your fix is an edit outside the process** — give the Dockerfile a real `FROM`, correct the
+  `repos.json` entry, or start the docker daemon. No restart needed.
+- Once a recheck builds clean, the watcher adopts the freshly-read routing table,
+  **re-admits the issues whose runs died on the broken environment** (setup failures keep all
+  trigger labels and never get `agent-failed` — the environment was at fault, not the issue),
+  and **auto-resumes** the pipeline. A manual `/resume` (or a restart, where reconcile
+  re-derives the work) also works; the watcher stands down if the halt is lifted or superseded
+  by a different pause.
+- It never spams: the halt is notified once (event log / issue comment / Telegram), and the
+  watcher logs to listener stdout only when the failure message *changes*.
+
+The raw excerpt is in `.scratch/operability/events.jsonl`; the halt reason in
+`.scratch/operability/pause.json`.
 
 ## Where things are recorded
 
@@ -39,8 +70,8 @@ All operability artifacts are gitignored, under `.scratch/`:
   own stdout stays a terse one-line-per-event summary.
 - **Pause state — `.scratch/operability/pause.json`.** Why the pipeline is paused and until when.
   Written temp-then-rename (no torn file on a crash). On boot the listener **re-arms** it: an
-  elapsed quota reset resumes immediately, a future one is re-scheduled, and a 403 halt / no-timestamp
-  quota stays paused for a human.
+  elapsed quota reset resumes immediately, a future one is re-scheduled, a 403 halt / no-timestamp
+  quota stays paused for a human, and a setup halt restarts its self-heal watcher.
 
 ## Status at a glance
 

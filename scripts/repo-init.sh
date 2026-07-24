@@ -127,9 +127,10 @@ cat <<NEXT
 
 Next steps (child-specific — your judgement):
   1. Edit ${sc}/Dockerfile — base it on ${name}'s own dev image (see the onboarding recipe).
-  2. Build the sandbox image:
+     The listener's boot preflight (re)builds every configured image automatically (and its
+     setup watcher picks the edit up while halted) — to build by hand instead:
        docker build --provenance=false -t ${image} \\
          --build-arg AGENT_UID=\$(id -u) --build-arg AGENT_GID=\$(id -g) ${sc}
-  3. If ${name}'s tests need a service (DB, etc.), wire a per-run sidecar (see the recipe).
-  4. Label an issue ready-for-agent + auto-dev to drive the first run.
+  2. If ${name}'s tests need a service (DB, etc.), wire a per-run sidecar (see the recipe).
+  3. Label an issue ready-for-agent + auto-dev to drive the first run.
 NEXT

@@ -101,10 +101,11 @@ records everything durably, and can be watched and steered. Detail + failure-cla
 
 | Feature | What it does | How to use / configure |
 | --- | --- | --- |
-| **Failure taxonomy** | Classifies each run failure — quota · auth (403) · transient · run-level · unknown — off the run-result *shape*, not exit codes | automatic |
+| **Failure taxonomy** | Classifies each run failure — quota · auth (403) · transient · run-level · setup · unknown — off the run-result *shape*, not exit codes | automatic |
 | **Quota pause/resume** | A quota wall pauses **both** lanes and auto-resumes at reset + 5 min; no parseable reset → holds for a human `/resume-at` | automatic; durable across restarts |
 | **403 halt** | Aborts every in-flight run and halts; a human re-auths, reconcile re-admits on the next boot | automatic |
 | **Transient backoff** | Bounded exponential backoff on 429 / network / 5xx, then the `agent-failed` path | automatic |
+| **Sandbox image preflight** *(self-healing)* | Boot (re)builds every configured sandbox image (cached — unchanged images take seconds), picking up Dockerfile edits and base-image drift; a sandbox-create failure (unbuilt image, docker down) halts as `setup` and a watcher re-reads `config/repos.json` + each `.sandcastle/Dockerfile` every 5 min, rebuilds, auto-resumes, and re-admits the issues that died on it | automatic; fix = edit the Dockerfile / `repos.json`, or start docker (see [`docs/operability.md`](docs/operability.md)) |
 | **Per-flow logs** | Each run streams to its own file instead of a shared, interleaved stdout | `tail -f .scratch/<repo>/<issue>/run.log` |
 | **Durable event log** | Every P1/P2/P3 event is appended (written first, synchronously) as the source of truth | `.scratch/operability/events.jsonl` |
 | **Status snapshot** | Pipeline state, issues by status, and recent events in one view | `npm run status` |
@@ -190,7 +191,9 @@ This clones it into `repos/<name>`, scaffolds `.sandcastle/` (a Dockerfile templ
 + blank `.env`), adds its routing entry to the gitignored `config/repos.json` (additive — it never
 clobbers an existing child), seeds the pipeline labels on its tracker, and regenerates the editor
 workspace. It then prints the child-specific next-steps you own: editing the Dockerfile to base on
-the child's own dev image, building the sandbox image, and wiring any per-run test sidecar.
+the child's own dev image and wiring any per-run test sidecar. The sandbox image itself is built
+automatically — the listener's boot preflight (re)builds every configured image (an unedited
+Dockerfile template is refused with an actionable `setup` halt instead of a doomed build).
 
 ## Running the pipeline
 

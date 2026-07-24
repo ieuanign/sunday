@@ -21,11 +21,14 @@
  *  run-failed: the agent ran but produced a bad/failed outcome → agent-failed path.
  *  summarize-failed: a ≥threshold session's handoff turn produced no usable note
  *    (M5.2) → the issue fails as agent-failed; the bloated session is NOT reused.
+ *  setup: the sandbox couldn't be CREATED (missing image, docker down) → halt;
+ *    deterministic environment breakage a retry can't fix — a human repairs
+ *    (or the boot preflight rebuilds), then /resume.
  *  unknown: unrecognized → fail-safe halt + capture (never silently dropped). */
-export type OpClass = "quota" | "auth" | "transient" | "run-failed" | "summarize-failed" | "unknown";
+export type OpClass = "quota" | "auth" | "transient" | "run-failed" | "summarize-failed" | "setup" | "unknown";
 
-/** P1 halts the pipeline (auth/unknown); P2 pauses recoverably (quota); P3 is a
- *  single-run or auto-recovering issue (transient/run-failed). */
+/** P1 halts the pipeline (auth/setup/unknown); P2 pauses recoverably (quota); P3
+ *  is a single-run or auto-recovering issue (transient/run-failed). */
 export type Severity = "P1" | "P2" | "P3";
 
 export interface OpEvent {
@@ -48,6 +51,13 @@ export interface RunLike {
   stdout?: string;
   preservedWorktreePath?: string;
 }
+
+/** The setup halt's one-line summary — exported so listen.mts can recognize a
+ *  re-armed setup halt on boot and start its recovery watcher. Actionable on
+ *  purpose: it is what the issue comment, Telegram notice, and pause reason show. */
+export const SETUP_SUMMARY =
+  "sandbox setup failure — could not create the sandbox. Check the child's .sandcastle/Dockerfile " +
+  "and that docker is running; the pipeline rechecks every 5 min and auto-resumes (and retries this issue) once the environment builds";
 
 const EXCERPT_MAX = 2000;
 /** Keep the TAIL — provider errors and the final stream-json result land at the end. */
@@ -137,6 +147,15 @@ function classifyError(error: unknown): OpEvent {
       summary: "agent emitted no valid result tag (after retry)",
       excerpt: raw,
     };
+  }
+
+  // Sandcastle couldn't CREATE the sandbox (image missing, daemon down, …) —
+  // captured 2026-07-24 (finance#55, then class `unknown`). Deterministic
+  // environment breakage: halt actionably, never retry. Checked BEFORE auth — a
+  // create-failed message can mention registry credentials without being a
+  // provider-API auth failure.
+  if (/provider '[^']+' create failed|image '[^']+' not found locally/.test(lower)) {
+    return { class: "setup", severity: "P1", summary: SETUP_SUMMARY, excerpt: raw };
   }
 
   if (/\b403\b|forbidden|unauthorized|invalid api key|invalid.{0,12}token|authentication|credential|oauth/.test(lower)) {

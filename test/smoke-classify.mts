@@ -71,6 +71,23 @@ const ok = (label: string, cond: boolean, detail = "") => {
   ok("run-failed: preserved worktree → run-failed", d.class === "run-failed");
 }
 
+// ── setup: sandbox couldn't be created → halt with an actionable class ──
+// (Real excerpt captured 2026-07-24, finance#55 — previously the unknown halt.)
+{
+  const e = classify({
+    error: new Error(
+      "Provider 'docker' create failed: Image 'finance-sandbox:latest' not found locally. Build it first with 'sandcastle docker build-image'.",
+    ),
+  });
+  ok("setup: missing image → setup / P1 (halt)", e.class === "setup" && e.severity === "P1", JSON.stringify(e));
+  const d = classify({
+    error: new Error(
+      "Provider 'docker' create failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    ),
+  });
+  ok("setup: daemon down → setup (not auth/transient)", d.class === "setup", JSON.stringify(d));
+}
+
 // ── fail-safe: an unrecognized failure → halt, and captures the excerpt ──
 {
   const e = classify({ error: new Error("something entirely unexpected happened") });
