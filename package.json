@@ -6,13 +6,16 @@
   "imports": {
     "#config/*": "./config/*",
     "#lib/*": "./lib/*",
-    "#services/*": "./services/*"
+    "#services/*": "./services/*",
+    "#assignor/*": "./assignor/*",
+    "#issue/*": "./issue/*"
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint-console.mts",
     "test": "node test/run.mts",
+    "v2": "node --env-file=.env main.mts",
     "status": "node listener/status.mts",
     "repo:init": "bash scripts/repo-init.sh"
   },
