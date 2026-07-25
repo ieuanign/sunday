@@ -2,18 +2,23 @@
 //   devbox run node test/smoke-token-report.mts
 // Deterministic synthetic fixtures (verified JSONL shape) + a real captured probe
 // session if one is around (grounds the per-phase attribution on real data). $0.
+// The arithmetic assertions are unchanged across the V2 move (issue #33) — the numbers
+// #37's PR footer and #36's handoff threshold read must not move with the module.
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
+import { Logger, type LogLine } from "../services/logger.mts";
 import {
   parseSessionUsage,
   buildReport,
   collectRows,
+  emitReport,
   headline,
+  writeReport,
   type Row,
-} from "../listener/token-report.mts";
+} from "../services/agent/token-report.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {
@@ -97,6 +102,49 @@ const ok = (label: string, cond: boolean, detail = "") => {
   } else {
     console.log("  · real probe session not found — synthetic checks only");
   }
+}
+
+// ── the artefacts: three files per run, into a dir the writer makes itself ──
+{
+  const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-token-report-${process.pid}`, "token-report");
+  const rows = (output: number): Row[] => [
+    { label: "orchestrator", usage: { input: 10, cacheCreation: 20, cacheRead: 30, output }, peakCtx: 60, msgs: 1 },
+  ];
+  try {
+    ok("artefacts: the report dir does not exist yet", !existsSync(dir), dir);
+    writeReport(dir, buildReport(rows(40), "run-1"));
+    writeReport(dir, buildReport(rows(80), "run-2"));
+
+    const json = JSON.parse(readFileSync(resolve(dir, "run-1.json"), "utf8")) as { runId: string; totals: { output: number } };
+    ok("artefacts: <runId>.json carries that run's numbers", json.runId === "run-1" && json.totals.output === 40, JSON.stringify(json.totals));
+    const md = readFileSync(resolve(dir, "run-1.md"), "utf8");
+    ok("artefacts: <runId>.md is the human-readable report", md.startsWith("# Token report — run-1") && md.includes("orchestrator"), md.slice(0, 60));
+    const history = readFileSync(resolve(dir, "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as { runId: string });
+    ok("history: append-only — one line per run, the earlier run kept", history.map((h) => h.runId).join(",") === "run-1,run-2", JSON.stringify(history));
+  } finally {
+    rmSync(resolve(dir, ".."), { recursive: true, force: true });
+  }
+}
+
+// ── emitReport: accounting must never break a run that already succeeded ──
+{
+  const lines: LogLine[] = [];
+  const drop = () => {};
+  const logger = new Logger({ console: (l) => void lines.push(l), runLog: drop, eventLog: drop, github: drop, phone: drop });
+
+  let thrown: unknown;
+  try {
+    emitReport(logger.child("agent"), "acme/finance", resolve(import.meta.dirname, "no-such-session.jsonl"), "run-z");
+  } catch (err) {
+    thrown = err;
+  }
+  ok("emitReport: an unreadable session does not throw out of the run", thrown === undefined, String(thrown));
+  ok(
+    "emitReport: the skipped report is reported through the Logger, against the repo",
+    lines.length === 1 && lines[0]!.message.startsWith("token-report skipped") && lines[0]!.context.repo === "acme/finance",
+    JSON.stringify(lines),
+  );
+  ok("emitReport: a skipped report is not a run failure", lines[0]?.level === "info", lines[0]?.level);
 }
 
 console.log(fails === 0 ? "\nAll token-report smokes pass." : `\n${fails} FAILED`);

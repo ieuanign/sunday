@@ -57,6 +57,16 @@ const paths = await import("../lib/paths.mts");
   );
 }
 
+// ── token report: durable per repo, beside that repo's run logs ──
+{
+  const dir = paths.tokenReportDir("acme/finance");
+  ok(
+    "token report: var/log/<owner>/<repo>/token-report",
+    relative(repoRoot, dir) === "var/log/acme/finance/token-report",
+    dir,
+  );
+}
+
 // ── result + PID lock: one flat file per work-item key (the key carries `/` and `#`) ──
 {
   const result = paths.resultPath("acme/finance#57");
@@ -85,6 +95,7 @@ const paths = await import("../lib/paths.mts");
     paths.eventLogPath,
     paths.fallbackLogPath,
     paths.runLogPath("acme/finance", "57"),
+    paths.tokenReportDir("acme/finance"),
     paths.resultPath("acme/finance#57"),
     paths.pidPath("acme/finance#pr12"),
   ];
