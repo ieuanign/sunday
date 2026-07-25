@@ -44,6 +44,16 @@ function refExists(childDir: string, ref: string): boolean {
   }
 }
 
+/** Does `branch` exist on the REMOTE right now? Asks origin directly, because the
+ *  local `origin/<branch>` ref that `refExists` reads goes stale the instant someone
+ *  merges and deletes a branch — which is precisely the race this guards (a whole
+ *  run elapses between the opening `fetch -p` and the PR create). Empty output means
+ *  gone; a transport failure THROWS, so a flaky network is classified transient and
+ *  retried rather than silently read as "the base is gone". */
+function remoteBranchExists(childDir: string, branch: string): boolean {
+  return sh("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], childDir) !== "";
+}
+
 // The agent emits exactly one of these as its last output (see sandbox-prompt.md
 // §4). Sandcastle extracts it from stdout by the `<sunday-result>` tag literal,
 // JSON-parses it, and validates it against this schema before returning.
@@ -308,10 +318,24 @@ export async function runIssue(
       return { signal, branch, sessionId, question: ask, ctxTokens, handoffSeq: outHandoffSeq };
     }
 
+    // Re-derive the base against the REMOTE before shipping. The boot-time guard
+    // above only sees the base as it was when this run started; a stacked blocker can
+    // merge (and GitHub delete its branch) at any point during the run. Captured
+    // 2026-07-25, finance#57: PR #61 merged 25s after this run's `fetch -p` and 3min
+    // before its create, so the guard passed and `gh pr create --base feat/55` died on
+    // a base that no longer existed. Checked here, adjacent to the create it protects,
+    // so the window is a couple of `gh` calls instead of a whole agent run.
+    if (effectiveBase !== "main" && !remoteBranchExists(childDir, effectiveBase)) {
+      console.log(`  ↪ ${fullName}#${issue}: base ${effectiveBase} landed mid-run — retargeting PR to main`);
+      effectiveBase = "main";
+    }
+
     // ready/draft/fail all ship a PR — but only if the branch actually has commits
     // ahead of its base (robust across a resume, where prior commits sit on the
-    // branch and result.commits may be empty for this iteration).
-    const ahead = sh("git", ["rev-list", "--count", `${stackBase}..${branch}`], childDir);
+    // branch and result.commits may be empty for this iteration). Counts against the
+    // just-revalidated base, not `stackBase` — that one is the run's start-point and
+    // is stale if the retarget above fired.
+    const ahead = sh("git", ["rev-list", "--count", `origin/${effectiveBase}..${branch}`], childDir);
     if (ahead === "0") {
       console.log(`✋ ${fullName}#${issue}: signal ${signal} but no commits — nothing to ship.`);
       return { signal, branch, sessionId, ctxTokens, handoffSeq: outHandoffSeq };
@@ -319,17 +343,29 @@ export async function runIssue(
 
     sh("git", ["push", "origin", branch], childDir);
     const draft = signal !== "ready";
-    const prUrl = sh(
+    // A GitHub 5xx on create classifies as `transient`, so the run is retried — and
+    // the attempt that failed may already have opened the PR, which makes the retry's
+    // `gh pr create` die on "a pull request already exists". That would classify as
+    // `unknown` and halt, turning a recoverable GitHub blip into a human-only stop.
+    // Adopt an already-open PR for this head instead of creating a second one.
+    const openPr = sh(
       "gh",
-      [
-        "pr", "create", "--base", effectiveBase, "--head", branch,
-        ...(draft ? ["--draft"] : []),
-        "--title", title,
-        "--body",
-        `${signal === "fail" ? summary : `${summary}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
-      ],
+      ["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", '.[0].url // ""'],
       childDir,
     );
+    const prUrl =
+      openPr ||
+      sh(
+        "gh",
+        [
+          "pr", "create", "--base", effectiveBase, "--head", branch,
+          ...(draft ? ["--draft"] : []),
+          "--title", title,
+          "--body",
+          `${signal === "fail" ? summary : `${summary}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
+        ],
+        childDir,
+      );
     if (signal === "fail") {
       sh("gh", ["issue", "edit", issue, "--add-label", "agent-failed"], childDir);
     }
