@@ -8,7 +8,7 @@ import { dirname } from "node:path";
 
 import { sundayComment } from "#lib/markers.mts";
 import { sh } from "#lib/sh.mts";
-import type { Destination, Level, LogLine } from "./logger.mts";
+import { Logger, type Destination, type Level, type LogLine } from "./logger.mts";
 
 const ICON: Record<Level, string> = { info: "·", milestone: "🔵", alert: "🟠", error: "🔴" };
 
@@ -103,6 +103,23 @@ export function phoneDestination(send: PhoneSender = telegramSend): Destination 
     if (!token || !chatId) return; // not configured — stay silent
     return send(`${ICON[line.level]} [${line.module}] ${truncate(line.message, PHONE_MAX)}${where(line)}`, token, chatId);
   };
+}
+
+/** THE one place a Logger is assembled from the five destinations, so the parent and a
+ *  forked child cannot drift in what a level reaches — a child that composed its own
+ *  set would be a second routing table nobody maintains.
+ *
+ *  Both durable paths are arguments, never read here: a child's run log is its own work
+ *  item's and the parent's is `fallbackLogPath`, and a smoke forks the real entry point
+ *  into a temp dir rather than the real `var/`. */
+export function createLogger(paths: { runLog: string; eventLog: string }): Logger {
+  return new Logger({
+    console: consoleDestination(),
+    runLog: runLogDestination(paths.runLog),
+    eventLog: eventLogDestination(paths.eventLog),
+    github: githubDestination(),
+    phone: phoneDestination(),
+  });
 }
 
 /** One Bot API sendMessage. Rejects on a transport error or an `ok:false` reply — the
