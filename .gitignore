@@ -31,6 +31,10 @@
 # Scratch
 /.scratch/
 
+# Durable runtime state — survives restarts, but never source (V2: state.json,
+# pause.json, results/, running/, log/)
+/var/
+
 # Tests: track only the .mts smoke sources + runner. The hermetic smokes build and
 # clean their own temp dirs/fixtures (smoke-*-tmp/, smoke-floor/, operability/,
 # fixture-restack/) — ignore any a failed run leaves behind.
