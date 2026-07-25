@@ -6,6 +6,9 @@
     "allowImportingTsExtensions": true
   },
   "include": [
+    "main.mts",
+    "assignor/**/*.mts",
+    "issue/**/*.mts",
     "listener/**/*.mts",
     "config/**/*.mts",
     "test/**/*.mts",
