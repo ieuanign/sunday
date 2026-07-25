@@ -86,13 +86,19 @@ function isStructuredOutputError(error: unknown): boolean {
   );
 }
 
-/** Absolute reset time → epoch ms, or undefined. ISO-8601 or a 10-digit unix
- *  epoch near a "reset" mention. PROVISIONAL — relative durations ("resets in 2h")
- *  are deliberately NOT parsed (they'd need wall-clock, defeating a pure test);
- *  those fall to the no-timestamp quota path (human /resume-at) until the real
- *  format is captured. */
+/** Absolute reset time → epoch ms, or undefined. ISO-8601 or a 10-digit unix epoch,
+ *  BOTH anchored to a nearby reset/limit/quota mention. The anchor is not optional:
+ *  unanchored, *any* timestamped error reads as a quota reset — a GitHub 502 whose
+ *  text happens to carry `…on 2026-07-24T19:22:36Z` (captured 2026-07-24,
+ *  finance#57/#58) then pauses the pipeline until a reset that never existed. Only
+ *  surfaced once `sh` began reporting stderr; before that the timestamp never
+ *  reached here. PROVISIONAL — relative durations ("resets in 2h") are deliberately
+ *  NOT parsed (they'd need wall-clock, defeating a pure test); those fall to the
+ *  no-timestamp quota path (human /resume-at) until the real format is captured. */
 function parseResetTime(msg: string): number | undefined {
-  const iso = msg.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/);
+  const iso = msg.match(
+    /(?:reset|usage limit|quota)[^0-9]{0,40}(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i,
+  );
   if (iso) {
     const t = Date.parse(iso[1]);
     if (!Number.isNaN(t)) return t;
@@ -158,6 +164,44 @@ function classifyError(error: unknown): OpEvent {
     return { class: "setup", severity: "P1", summary: SETUP_SUMMARY, excerpt: raw };
   }
 
+  // The branch is checked out in the PARENT repo, so Sandcastle can't put its
+  // worktree on it (git refuses the same branch in two worktrees). Captured
+  // 2026-07-25, finance PR#61: the run collided with a hand checkout of feat/55 that
+  // moved away 44s later. A human reviewing a branch is temporary, so this is a
+  // contention to wait out — never a run failure, and never the fail-safe halt it
+  // used to fall through to. Longer hint than a network blip: a human keeps a branch
+  // checked out for minutes, not seconds.
+  if (/already checked out in worktree|used by worktree at/.test(lower)) {
+    return {
+      class: "transient",
+      severity: "P3",
+      summary: "branch checked out in the parent worktree — waiting for it to free up",
+      excerpt: raw,
+      retryAfterMs: 5 * 60_000,
+    };
+  }
+
+  // `gh pr create` against a base that no longer exists: a stacked base whose blocker
+  // merged — and GitHub deleted the branch — WHILE this run was in flight. Captured
+  // 2026-07-25, finance#57: PR #61 merged 25s after the run's `fetch -p`, so
+  // run-issue's base-gone guard had already passed and only the create saw it, 3min
+  // later. Self-heals on retry — the next run's own `fetch -p` prunes the dangling
+  // `origin/<base>`, the guard re-bases on main, the create succeeds. So this is a
+  // race to re-run, never the fail-safe halt it used to fall through to. GitHub
+  // reports the missing base as a cluster of blank-sha / no-commits noise; the
+  // discriminating clause is "Base ref must be a branch".
+  if (/base ref must be a branch|head sha can't be blank/.test(lower)) {
+    const base = msg.match(/no commits between (\S+) and \S+/i)?.[1];
+    return {
+      class: "transient",
+      severity: "P3",
+      summary:
+        `PR base ${base ? `'${base}' ` : ""}no longer exists (a stacked blocker merged mid-run) — ` +
+        "re-deriving the base and retrying",
+      excerpt: raw,
+    };
+  }
+
   if (/\b403\b|forbidden|unauthorized|invalid api key|invalid.{0,12}token|authentication|credential|oauth/.test(lower)) {
     return { class: "auth", severity: "P1", summary: "auth failure (403 / invalid credential)", excerpt: raw };
   }
@@ -184,7 +228,16 @@ function classifyError(error: unknown): OpEvent {
   if (/quota|usage limit|limit reached|rate.?limit/.test(lower)) {
     return { class: "quota", severity: "P2", summary: "quota exhausted — no reset timestamp (needs /resume-at)", excerpt: raw };
   }
-  if (/\b429\b|too many requests|\b5\d\d\b|timeout|timed out|econnrefused|econnreset|etimedout|socket hang ?up|network|fetch failed|enotfound|eai_again/.test(lower)) {
+  // 5xx / network — including GitHub's own API failing under us on a `gh` call.
+  // GitHub's GraphQL 502 wrapper carries NO status code in its text, so it has to be
+  // named explicitly: captured 2026-07-24 (finance#57/#58, `GraphQL: Something went
+  // wrong while executing your query`) where it matched nothing here and halted the
+  // whole pipeline on the fail-safe instead of retrying a GitHub-side blip.
+  if (
+    /\b429\b|too many requests|\b5\d\d\b|graphql: something went wrong|bad gateway|service unavailable|timeout|timed out|econnrefused|econnreset|etimedout|socket hang ?up|network|fetch failed|enotfound|eai_again/.test(
+      lower,
+    )
+  ) {
     return { class: "transient", severity: "P3", summary: "transient error (network / 5xx)", excerpt: raw };
   }
 

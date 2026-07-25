@@ -176,7 +176,14 @@ async function runAdmitted(
     // Classify the failure off the RunResult/error shape and act oppositely per
     // class (quota→pause, 403→abort+halt, transient→backoff, run-failed→flag,
     // setup/unknown→halt). notify() writes the durable event first.
-    actOnFailure(classify({ error: err }), { fullName, cfg, childDir, issue, key });
+    actOnFailure(classify({ error: err }), {
+      fullName,
+      cfg,
+      childDir,
+      issue,
+      key,
+      retry: { branch: `feat/${issue}`, run: () => runAdmitted(fullName, cfg, issue) },
+    });
   } finally {
     inFlightAborts.delete(key);
     sh("gh", ["issue", "edit", issue, "--remove-label", "agent-working"], childDir);
@@ -187,8 +194,14 @@ interface FailureCtx {
   fullName: string;
   cfg: RepoConfig;
   childDir: string;
+  /** The issue number — or the PR number, for a PR-comment run. */
   issue: string;
   key: string;
+  /** How to re-run THIS unit of work on a transient retry. An issue run and a
+   *  PR-comment run are different work on different branches; without this the
+   *  retry re-ran `runAdmitted` for whatever number it was handed, which for a
+   *  PR-comment failure means starting an issue run on a PR number. */
+  retry: { branch: string; run: () => Promise<void> };
 }
 
 /** React to a classified run failure. Pauses/halts the whole pipeline for quota
@@ -228,7 +241,7 @@ function actOnFailure(event: ReturnType<typeof classify>, ctx: FailureCtx): void
         notify(event); // auto-recovers — logged, not homed to the issue
         console.log(`  ↻ ${key} transient — retry ${n}/${MAX_TRANSIENT_RETRIES} in ${Math.round(delay / 1000)}s`);
         setTimeout(() => {
-          scheduler.enqueue({ key, branch: `feat/${issue}`, run: () => runAdmitted(fullName, cfg, issue) });
+          scheduler.enqueue({ key, branch: ctx.retry.branch, run: ctx.retry.run });
         }, delay);
       } else {
         transientRetries.delete(key);
@@ -412,7 +425,36 @@ function enqueuePrComments(fullName: string, cfg: RepoConfig, pr: string): void 
     sh("gh", ["pr", "view", pr, "--json", "headRefName"], childDir),
   ) as { headRefName: string };
   console.log(`  ✓ PR-COMMENTS ${key} (branch ${headRefName})`);
-  scheduler.enqueue({ key, branch: headRefName, run: () => runPrComments(fullName, cfg, pr) });
+  scheduler.enqueue({ key, branch: headRefName, run: () => runPrCommentsAdmitted(fullName, cfg, pr, headRefName) });
+}
+
+/** `runPrComments` + the SAME failure taxonomy the issue lane gets. Without this a
+ *  throw fell through to the scheduler's catch, which logs `✗ … failed:` and drops
+ *  it — no classify, no notify, no retry. Captured 2026-07-25: PR#61's run died on a
+ *  worktree collision and nothing anywhere reacted, so the four @sunday comments just
+ *  sat there. No `setIssue` — durable state is keyed by ISSUE, and `#pr<n>` is not an
+ *  issue (the setup-recovery re-admit is guarded on that state, so it stays clear). */
+async function runPrCommentsAdmitted(
+  fullName: string,
+  cfg: RepoConfig,
+  pr: string,
+  branch: string,
+): Promise<void> {
+  const key = `${fullName}#pr${pr}`;
+  const childDir = resolve(parentRoot, cfg.path);
+  try {
+    await runPrComments(fullName, cfg, pr);
+    transientRetries.delete(key); // a clean finish clears the backoff counter
+  } catch (err) {
+    actOnFailure(classify({ error: err }), {
+      fullName,
+      cfg,
+      childDir,
+      issue: pr,
+      key,
+      retry: { branch, run: () => runPrCommentsAdmitted(fullName, cfg, pr, branch) },
+    });
+  }
 }
 
 /** Resume a gated session with a human reply (shared by the live comment handler

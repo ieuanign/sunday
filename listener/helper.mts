@@ -1,7 +1,7 @@
 // listener/helper.mts — shared plumbing for the TS host (M1 wrapper, M2
 // listener): shelling out, the comment marker, and comment routing.
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -11,16 +11,35 @@ import { getIssue } from "./state.mts";
 
 const parentRoot = resolve(import.meta.dirname, "..");
 
-// Run a command, return its trimmed stdout, throw on non-zero exit. stderr
-// streams live so git/gh errors surface. Pass `cwd` to resolve the command
-// against a specific repo (e.g. a child under repos/); omit it for the
-// process's own working directory.
+/** The error a shelled-out command throws: the command's own stderr, prefixed by a
+ *  SHORT label — deliberately NOT the full argv. classify.mts regex-matches this
+ *  message, and our argv carries agent-authored prose (`gh pr create --title/--body
+ *  …`). PR 61's body contains "credential-free sandbox", which the auth rule matches
+ *  — so with the argv in the message a failed create would be classified a P1 auth
+ *  halt on the strength of the agent's own wording. Only the first two args are kept
+ *  (always the subcommand, never content). Captured 2026-07-24: finance#57/#58 died
+ *  on a GitHub 502 whose text never reached the classifier at all. */
+function cmdError(file: string, args: string[], stderr: string): Error {
+  // Keep only the leading positional args (the subcommand path), capped: agent prose
+  // is always a FLAG VALUE (`--title …`, `--body …`), so stopping at the first flag
+  // can never include it.
+  const firstFlag = args.findIndex((a) => a.startsWith("-"));
+  const label = [file, ...args.slice(0, firstFlag === -1 ? 3 : Math.min(firstFlag, 3))].join(" ");
+  const detail = stderr.trim();
+  return new Error(detail ? `${label} failed: ${detail}` : `${label} failed (no stderr)`);
+}
+
+// Run a command, return its trimmed stdout, throw on non-zero exit. stderr is
+// CAPTURED (the classifier reads it off the thrown error) and then written through,
+// so git/gh chatter still shows up in the listener log — buffered to completion now
+// rather than streamed live. Pass `cwd` to resolve the command against a specific
+// repo (e.g. a child under repos/); omit it for the process's own working directory.
 export function sh(file: string, args: string[], cwd?: string): string {
-  return execFileSync(file, args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  }).trim();
+  const r = spawnSync(file, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (r.stderr) process.stderr.write(r.stderr);
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw cmdError(file, args, r.stderr ?? "");
+  return (r.stdout ?? "").trim();
 }
 
 const execFileAsync = promisify(execFile);
@@ -29,11 +48,15 @@ const execFileAsync = promisify(execFile);
 // throws on non-zero, `cwd` resolves against a child repo) but the gh/git
 // subprocess runs OFF the event loop. A synchronous `sh` chain there froze the
 // loop for the whole sweep, starving the listener's readiness probe (`GET /`) →
-// process-compose SIGKILL/restart loop. On failure the rejection carries the
-// command + stderr, so reconcile's `safe()` still surfaces gh/git errors.
+// process-compose SIGKILL/restart loop. Failures carry the same stderr-based error
+// as `sh`, so reconcile's `safe()` surfaces the real gh/git cause.
 export async function shA(file: string, args: string[], cwd?: string): Promise<string> {
-  const { stdout } = await execFileAsync(file, args, { cwd, encoding: "utf8" });
-  return stdout.trim();
+  try {
+    const { stdout } = await execFileAsync(file, args, { cwd, encoding: "utf8" });
+    return stdout.trim();
+  } catch (err) {
+    throw cmdError(file, args, (err as { stderr?: string }).stderr ?? "");
+  }
 }
 
 // Hidden marker on every comment WE post, so comment routing can tell our own

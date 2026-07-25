@@ -88,6 +88,81 @@ const ok = (label: string, cond: boolean, detail = "") => {
   ok("setup: daemon down → setup (not auth/transient)", d.class === "setup", JSON.stringify(d));
 }
 
+// ── GitHub's API failing under a `gh` call → transient (retry), NOT the halt ──
+// (Real excerpt captured 2026-07-24, finance#57/#58 — previously the unknown halt.
+// Note there is no status code anywhere in this text, which is why it fell through.)
+{
+  const e = classify({
+    error: new Error(
+      "gh pr create failed: GraphQL: Something went wrong while executing your query on " +
+        "2026-07-24T19:22:36Z. Please include `0852:3A3CD5:70DD66:753396:6A63BB7B` when reporting this issue.",
+    ),
+  });
+  ok("github-5xx: GraphQL wrapper → transient / P3", e.class === "transient" && e.severity === "P3", JSON.stringify(e));
+  // The excerpt carries an ISO timestamp; an unanchored reset parse read it as a
+  // quota reset and paused the pipeline until a time that had already passed.
+  ok("github-5xx: incidental ISO timestamp is NOT a quota reset", e.resetAt === undefined, String(e.resetAt));
+  const g = classify({ error: new Error("gh api failed: HTTP 502: Bad Gateway") });
+  ok("github-5xx: bad gateway → transient", g.class === "transient", JSON.stringify(g));
+}
+
+// ── the classifier must read the command's STDERR, never our argv ──
+// helper.mts:cmdError keeps agent-authored `--title`/`--body` text out of the thrown
+// message. PR 61's real body says "credential-free sandbox"; with the argv in the
+// message that alone would have classified a failed create as a P1 auth halt.
+{
+  const leaked = classify({
+    error: new Error(
+      'Command failed: gh pr create --title "Shell 1" --body "this credential-free sandbox has no docker"',
+    ),
+  });
+  ok("argv-leak: argv text WOULD misclassify as auth (why cmdError trims it)", leaked.class === "auth", JSON.stringify(leaked));
+  const trimmed = classify({
+    error: new Error("gh pr create failed: GraphQL: Something went wrong while executing your query"),
+  });
+  ok("argv-leak: stderr-only message → transient, not auth", trimmed.class === "transient", JSON.stringify(trimmed));
+}
+
+// ── parent-worktree contention → transient (wait it out), NOT the fail-safe halt ──
+// (Real excerpt captured 2026-07-25, finance PR#61 — a hand checkout of feat/55 that
+// moved away 44s later. Previously fell through to `unknown`.)
+{
+  const e = classify({
+    error: new Error(
+      "Branch 'feat/55' is already checked out in worktree at '/Users/x/sunday/repos/finance'. " +
+        "Sandcastle's branch and merge-to-head strategies run the agent in a git worktree under " +
+        ".sandcastle/worktrees/, and git refuses to check out the same branch in two worktrees at once.",
+    ),
+  });
+  ok("worktree: contention → transient / P3", e.class === "transient" && e.severity === "P3", JSON.stringify(e));
+  ok("worktree: backs off in minutes, not seconds", e.retryAfterMs === 300_000, String(e.retryAfterMs));
+  const d = classify({ error: new Error("error: cannot delete branch 'feat/55' used by worktree at '/x/repos/finance'") });
+  ok("worktree: delete-blocked wording → transient", d.class === "transient", JSON.stringify(d));
+}
+
+// ── PR base deleted mid-run → transient (re-derive + retry), NOT the fail-safe halt ──
+// (Real excerpt captured 2026-07-25, finance#57 — feat/55 merged via PR #61 and was
+// deleted 25s after the run's `fetch -p`, so only `gh pr create` saw it gone. Halted
+// the whole pipeline on `unknown`; the next run's `fetch -p` + base-gone guard fixes
+// it unaided, so it must retry.)
+{
+  const e = classify({
+    error: new Error(
+      "gh pr create failed: pull request create failed: GraphQL: Head sha can't be blank, " +
+        "Base sha can't be blank, No commits between feat/55 and feat/57, Base ref must be a branch " +
+        "(createPullRequest)",
+    ),
+  });
+  ok("base-gone: deleted PR base → transient / P3", e.class === "transient" && e.severity === "P3", JSON.stringify(e));
+  ok("base-gone: summary names the vanished base", e.summary.includes("'feat/55'"), e.summary);
+  ok("base-gone: keeps the raw GraphQL excerpt", e.excerpt.includes("Base ref must be a branch"));
+  // Must not be read as a quota/auth stop — those halt or pause instead of retrying.
+  ok("base-gone: not quota (no reset invented)", e.resetAt === undefined, String(e.resetAt));
+  // The "Base ref must be a branch" clause alone (no no-commits noise) still classifies.
+  const bare = classify({ error: new Error("gh pr create failed: GraphQL: Base ref must be a branch (createPullRequest)") });
+  ok("base-gone: bare base-ref clause → transient", bare.class === "transient", JSON.stringify(bare));
+}
+
 // ── fail-safe: an unrecognized failure → halt, and captures the excerpt ──
 {
   const e = classify({ error: new Error("something entirely unexpected happened") });
