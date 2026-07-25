@@ -14,7 +14,7 @@
 import type { ZodType } from "zod";
 
 import { ClaudeAgent } from "./claude.mts";
-import type { Logger } from "../logger.mts";
+import type { Logger } from "#services/logger.mts";
 
 /** The agents Sunday can run. Sourced from `.env`'s `AGENT`, which v1 declared and
  *  read nowhere (plan.md §2). */

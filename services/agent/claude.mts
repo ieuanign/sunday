@@ -16,10 +16,10 @@
 import { rmSync } from "node:fs";
 import { claudeCode, Output, run as sandcastleRun } from "@ai-hero/sandcastle";
 
-import { SandboxService, type SandboxHandle } from "../sandbox.mts";
+import { SandboxService, type SandboxHandle } from "#services/sandbox.mts";
 import { assembleFloor, floorDir } from "./floor.mts";
 import { emitReport } from "./token-report.mts";
-import type { Logger, ModuleLogger } from "../logger.mts";
+import type { Logger, ModuleLogger } from "#services/logger.mts";
 import type { Agent, AgentRunRequest, AgentRunResult, AgentUsage } from "./index.mts";
 import { EFFORTS, isEffort, type Effort } from "#config/roster.mts";
 

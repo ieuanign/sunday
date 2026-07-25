@@ -6,8 +6,8 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { sundayComment } from "../lib/markers.mts";
-import { sh } from "../lib/sh.mts";
+import { sundayComment } from "#lib/markers.mts";
+import { sh } from "#lib/sh.mts";
 import type { Destination, Level, LogLine } from "./logger.mts";
 
 const ICON: Record<Level, string> = { info: "·", milestone: "🔵", alert: "🟠", error: "🔴" };

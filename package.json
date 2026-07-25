@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "imports": {
-    "#config/*": "./config/*"
+    "#config/*": "./config/*",
+    "#lib/*": "./lib/*",
+    "#services/*": "./services/*"
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {

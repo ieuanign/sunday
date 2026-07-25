@@ -18,8 +18,8 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
-import { tokenReportDir } from "../../lib/paths.mts";
-import type { ModuleLogger } from "../logger.mts";
+import { tokenReportDir } from "#lib/paths.mts";
+import type { ModuleLogger } from "#services/logger.mts";
 import { loadRoster, PHASES, type Phase } from "#config/roster.mts";
 
 /** Cost weights in base-input units (from #9: output = 5×, cacheCreation = 1.25×,
