@@ -1,14 +1,16 @@
-// test/smoke-roster-inject.mts — no-quota smoke for the M5.1b floor injector.
-//   devbox run node test/smoke-roster-inject.mts
-// Asserts assembleFloor() writes one agent def per roster phase (tracked body +
-// the matrix's model/effort applied to frontmatter) + the 3 floor skills, into a
-// throwaway dir. Pure host-side — no sandbox, no quota. Proves the model/effort
-// OVERRIDE actually rewrites frontmatter (reviewer: tracked xhigh → roster high).
+// test/smoke-agent-floor.mts — no-quota smoke for the discipline floor (V2, issue #33).
+//   devbox run node test/smoke-agent-floor.mts
+// Was smoke-roster-inject.mts: the assembly is unchanged, so the assertions follow the
+// module to services/agent/floor.mts. Asserts assembleFloor() writes one agent def per
+// roster phase (tracked body + the matrix's model/effort applied to frontmatter) + the
+// 3 floor skills, into a throwaway dir. Pure host-side — no sandbox, no quota. Proves
+// the model/effort OVERRIDE actually rewrites frontmatter (reviewer: tracked xhigh →
+// roster high). $0, offline, no docker, no tokens.
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
-import { assembleFloor } from "../listener/roster-inject.mts";
+import { assembleFloor, floorDir } from "../services/agent/floor.mts";
 import { loadRoster, PHASES } from "../config/roster.mts";
 
 let fails = 0;
@@ -55,5 +57,26 @@ for (const s of ["tdd", "code-review-mp", "diagnosing-bugs"]) {
 }
 
 rmSync(dest, { recursive: true, force: true });
-console.log(fails === 0 ? "\nAll roster-inject smokes pass." : `\n${fails} FAILED`);
+
+// ── floorDir: one throwaway dir per work item, and naming it creates nothing ──
+{
+  const issueRun = floorDir("acme/finance#57");
+  const prRun = floorDir("acme/finance#pr12");
+  const scratch = resolve(import.meta.dirname, "..", ".scratch");
+  ok("floorDir: the floor is throwaway — under .scratch/, never var/", issueRun.startsWith(`${scratch}${sep}`), issueRun);
+  ok(
+    "floorDir: concurrent work items never share a floor dir",
+    issueRun !== prRun && issueRun !== floorDir("acme/drive#57"),
+    `${issueRun} / ${prRun}`,
+  );
+  ok("floorDir: the same work item resolves to the same dir", issueRun === floorDir("acme/finance#57"), issueRun);
+  ok(
+    "floorDir: the key's / and # cannot nest a dir or walk out of .scratch/",
+    relative(scratch, issueRun).split(sep).length === 2 && !issueRun.includes(".."),
+    relative(scratch, issueRun),
+  );
+  ok("floorDir: naming a floor creates nothing", !existsSync(issueRun), issueRun);
+}
+
+console.log(fails === 0 ? "\nAll floor smokes pass." : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

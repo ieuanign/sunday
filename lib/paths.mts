@@ -58,3 +58,11 @@ export function pidPath(key: string): string {
 export function runLogPath(fullName: string, flow: string): string {
   return resolve(logDir, fullName, flow, "run.log");
 }
+
+/** Where one repo's token reports accumulate: `var/log/<owner>/<repo>/token-report/`,
+ *  beside that repo's run logs. Durable, not throwaway — v1 kept them in `.scratch/`,
+ *  which CLAUDE.md documents as `rm -rf`-able, so the spend history of every run so far
+ *  died with the next clean-up. */
+export function tokenReportDir(fullName: string): string {
+  return resolve(logDir, fullName, "token-report");
+}
