@@ -5,11 +5,11 @@
 import type { RepoConfig } from "#config/repos.mts";
 // Type-only, so the worker stays OUT of the parent's import graph (ADR-0001): the job
 // shape is a contract, and the entry point itself is only ever reached by path.
-import type { Job } from "../issue/run.mts";
-import { readLock, releaseLock } from "../lib/lock.mts";
-import { clearOutcome, readOutcome, type Outcome } from "../lib/outcome.mts";
-import { CLAIM_LABEL, type GitHub } from "../services/github/index.mts";
-import type { ModuleLogger } from "../services/logger.mts";
+import type { Job } from "#issue/run.mts";
+import { readLock, releaseLock } from "#lib/lock.mts";
+import { clearOutcome, readOutcome, type Outcome } from "#lib/outcome.mts";
+import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
+import type { ModuleLogger } from "#services/logger.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 

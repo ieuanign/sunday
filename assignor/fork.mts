@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 
 // Type-only, and deliberately the only reference to the worker anywhere in the parent:
 // the job shape is a contract, the entry point itself is only ever reached by path.
-import type { Job } from "../issue/run.mts";
+import type { Job } from "#issue/run.mts";
 import type { ChildExit, ForkWorkItem } from "./index.mts";
 
 const worker = resolve(import.meta.dirname, "..", "issue", "run.mts");

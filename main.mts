@@ -17,14 +17,14 @@ import { loadRepos } from "#config/repos.mts";
 // The worker is reached BY PATH, from in there — nothing in this process's import graph
 // refers to `issue/`, so editing it takes effect on the next work item with no restart
 // (ADR-0001).
-import { createForkWorkItem } from "./assignor/fork.mts";
-import { Assignor } from "./assignor/index.mts";
-import { createScheduler } from "./assignor/scheduler.mts";
-import { StateStore } from "./assignor/state.mts";
-import { eventLogPath, fallbackLogPath, pidPath, resultPath, runLogPath, statePath } from "./lib/paths.mts";
-import { createLogger } from "./services/destinations.mts";
-import { Gh } from "./services/github/index.mts";
-import { createReceiver } from "./services/github/receiver.mts";
+import { createForkWorkItem } from "#assignor/fork.mts";
+import { Assignor } from "#assignor/index.mts";
+import { createScheduler } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
+import { eventLogPath, fallbackLogPath, pidPath, resultPath, runLogPath, statePath } from "#lib/paths.mts";
+import { createLogger } from "#services/destinations.mts";
+import { Gh } from "#services/github/index.mts";
+import { createReceiver } from "#services/github/receiver.mts";
 
 // Its own port for as long as v1 owns `LISTENER_PORT`: both pipelines are supervised
 // side by side until cutover (#45), and sharing the number is an EADDRINUSE crash loop.

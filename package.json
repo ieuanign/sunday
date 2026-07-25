@@ -6,7 +6,9 @@
   "imports": {
     "#config/*": "./config/*",
     "#lib/*": "./lib/*",
-    "#services/*": "./services/*"
+    "#services/*": "./services/*",
+    "#assignor/*": "./assignor/*",
+    "#issue/*": "./issue/*"
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {

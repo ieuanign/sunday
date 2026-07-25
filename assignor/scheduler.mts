@@ -15,7 +15,7 @@
 // (never synchronously inside pump), so pump's check-then-start can't race and
 // can't be re-entered mid-scan.
 
-import type { ModuleLogger } from "../services/logger.mts";
+import type { ModuleLogger } from "#services/logger.mts";
 
 export interface WorkItem {
   /** Stable identity for dedup, e.g. `${fullName}#${issue}` or `restack:…:feat/A`. */

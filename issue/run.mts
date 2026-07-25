@@ -3,9 +3,9 @@
 // takes effect on the next work item with no restart.
 
 import type { RepoConfig } from "#config/repos.mts";
-import { acquireLock, releaseLock } from "../lib/lock.mts";
-import { writeOutcome, type Outcome } from "../lib/outcome.mts";
-import { createLogger } from "../services/destinations.mts";
+import { acquireLock, releaseLock } from "#lib/lock.mts";
+import { writeOutcome, type Outcome } from "#lib/outcome.mts";
+import { createLogger } from "#services/destinations.mts";
 
 /** The fully-resolved description of one issue run, handed over at fork time. The
  *  child derives nothing: every path it writes is in here, so the parent decides once

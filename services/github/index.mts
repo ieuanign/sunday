@@ -3,7 +3,7 @@
 // shape of every write is visible at once. The spine writes exactly one thing — the
 // claim — and #33/#36/#40/#42 grow the rest.
 
-import { sh } from "../../lib/sh.mts";
+import { sh } from "#lib/sh.mts";
 
 /** The label that says an issue is Sunday's RIGHT NOW. It is the durable cross-restart
  *  guard: a parent that comes back up with no memory reads this off GitHub, and a

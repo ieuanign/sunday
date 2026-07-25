@@ -7,8 +7,8 @@
 
 import { createServer, type Server } from "node:http";
 
-import type { Delivery } from "../../assignor/index.mts";
-import type { ModuleLogger } from "../logger.mts";
+import type { Delivery } from "#assignor/index.mts";
+import type { ModuleLogger } from "#services/logger.mts";
 
 export interface ReceiverDeps {
   /** The port to bind. Constructor-injected rather than read from the environment:
