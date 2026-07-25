@@ -10,7 +10,7 @@ The stack is two **host processes** (not containers):
 | Process | What it is | Supervision |
 | --- | --- | --- |
 | **`listener`** | the singleton orchestrator — `node --env-file=.env listener/listen.mts` | `restart: always`; readiness-probed on its GET endpoint |
-| **`webhook-forward`** | one `gh webhook forward` per configured repo, delivering GitHub events to the listener | `restart: always`; starts only after the listener is healthy |
+| **`webhook-forward`** | one `gh webhook forward` per configured repo, delivering GitHub events to the listener | `restart: always`; starts only after the listener is healthy; respawns individual forwarders itself, readiness-probed on live forwarder count |
 
 ## Why host processes, not containers
 
@@ -69,9 +69,22 @@ state only carries session ids that let an interrupted run *resume* rather than 
 per repo. Keeping the repo names out of the tracked `process-compose.yaml` is deliberate (publish
 policy): child names live only in `config/repos.json`.
 
-The forwarders are stateless and idempotent (a missed event is recovered by reconcile), so if any
-one exits the launcher exits and process-compose restarts the **whole group** — simple, and
-harmless.
+Each forwarder is supervised **individually**. `gh webhook forward` exits when its websocket drops
+(`close 1006 (abnormal closure)` — routine), so the launcher respawns just that repo's forwarder
+and leaves the others flowing. Recovery is deliberately *not* delegated upward: on 2026-07-24 one
+dropped forwarder took the whole group down and process-compose did not restart it for 8h44m,
+blacking out every repo's events. Reconcile only re-derives missed work **on boot**, so with the
+listener still up nothing recovered until the relay was restarted by hand.
+
+`gh` registers one dev webhook per repo and removes it on a clean exit. A hard stop (SIGKILL,
+crash, power loss) strands it, and every later start then dies on `HTTP 422 … Hook already exists
+on this repository` — a blackout no amount of retrying clears. The launcher drops a stranded
+forwarder hook (matched on gh's own forwarder URL, so a repo's real webhooks are untouched) before
+each (re)start, so the relay always recovers unattended.
+
+The launcher is readiness-probed as well: `Ready` means one live forwarder per routed repo. That
+probe is **observability only** — process-compose (v1.110) logs a failed probe but never acts on
+one, liveness probes included — so the respawn loop is what actually recovers the relay.
 
 ## Watching a run
 

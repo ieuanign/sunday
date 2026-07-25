@@ -51,3 +51,16 @@ processes:
     availability:
       restart: "always"
       backoff_seconds: 5
+    # OBSERVABILITY, not recovery — a dropped forwarder is self-healed in the
+    # script's poll loop, and process-compose (v1.110) only LOGS a failed probe,
+    # it never acts on one (liveness_probe included — verified). Without a probe
+    # the relay had no health signal at all (`has_ready_probe: false`), which is
+    # how the 2026-07-24 outage ran 8h44m unnoticed. Ready == at least one live
+    # forwarder per routed repo; the `[g]h` class stops the probe matching itself.
+    readiness_probe:
+      exec:
+        command: 'test "$(pgrep -f "[g]h webhook forward" | wc -l | tr -d "[:space:]")" -ge "$(jq -r "keys|length" config/repos.json)"'
+      initial_delay_seconds: 10
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 2
