@@ -387,6 +387,26 @@ try {
     ok("killed child: the comment names the signal, not a null exit code", h.comments.at(-1)?.message.includes("SIGKILL") === true, JSON.stringify(h.comments.at(-1)));
   }
 
+  // ── a child that never STARTED (no node binary, no file descriptors left, EACCES) has
+  //    neither a code nor a signal, and "exited with code null" reads as a clean finish.
+  //    What stopped it IS the report — and the work item is still one failed item, not a
+  //    dead pipeline ──
+  {
+    const key = "acme/finance#57";
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(key, undefined, { code: null, signal: null, error: "spawn /nonexistent/node-binary ENOENT" });
+
+    ok("unstarted child: the item is recorded failed rather than left in-flight", h.state.get(key)?.status === "failed", JSON.stringify(h.state.get(key)));
+    ok(
+      "unstarted child: the comment carries what stopped it, and claims no exit code it never had",
+      h.comments.at(-1)?.message.includes("ENOENT") === true && h.comments.at(-1)?.message.includes("null") === false,
+      JSON.stringify(h.comments.at(-1)),
+    );
+    ok("unstarted child: the claim is released, so a human re-labelling it can retry", h.released.join(",") === key, h.released.join(","));
+  }
+
   // ── the cap counts CHILDREN, not fork calls: a work item occupies its slot until the
   //    process exits, which is the whole reason the Assignor hands the scheduler a run
   //    that settles on the exit rather than on the fork ──

@@ -13,17 +13,14 @@
 // injected: the real routing table, the real GitHub CLI, the real `var/` paths and a
 // real fork.
 
-import { fork } from "node:child_process";
-import { resolve } from "node:path";
-
 import { loadRepos } from "#config/repos.mts";
-import { Assignor, type ChildExit } from "./assignor/index.mts";
+// The worker is reached BY PATH, from in there — nothing in this process's import graph
+// refers to `issue/`, so editing it takes effect on the next work item with no restart
+// (ADR-0001).
+import { createForkWorkItem } from "./assignor/fork.mts";
+import { Assignor } from "./assignor/index.mts";
 import { createScheduler } from "./assignor/scheduler.mts";
 import { StateStore } from "./assignor/state.mts";
-// Type-only, and deliberately the ONLY reference to the worker: forking it by path
-// keeps it out of this process's import graph, so editing `issue/` takes effect on the
-// next work item with no restart (ADR-0001).
-import type { Job } from "./issue/run.mts";
 import { eventLogPath, fallbackLogPath, pidPath, resultPath, runLogPath, statePath } from "./lib/paths.mts";
 import { createLogger } from "./services/destinations.mts";
 import { Gh } from "./services/github/index.mts";
@@ -41,31 +38,13 @@ const repos = loadRepos(); // fail fast on a malformed routing table
 const logger = createLogger({ runLog: fallbackLogPath, eventLog: eventLogPath });
 const log = logger.child("main");
 
-const worker = resolve(import.meta.dirname, "issue", "run.mts");
-
-/** Fork one work item, and settle when the child EXITS — so the concurrency cap and the
- *  branch lock hold for the child's whole life rather than for the fork call. The job
- *  carries every path the child writes; the child derives none (constraint 7).
- *
- *  The child's report over IPC is deliberately not listened for: it only says an outcome
- *  is ready, and the parent applies from the FILE (constraint 4) — which is what lets
- *  this process die mid-run without losing the work. */
-function forkWorkItem(job: Job): Promise<ChildExit> {
-  return new Promise((settle) => {
-    // stdio inherited: a child's own lines belong in the same supervised log stream as
-    // the parent's, alongside its durable per-run log.
-    const child = fork(worker, [JSON.stringify(job)]);
-    child.on("exit", (code, signal) => settle({ code, signal }));
-  });
-}
-
 const assignor = new Assignor({
   repos,
   github: new Gh(),
   log: logger.child("assignor"),
   scheduler: createScheduler(maxConcurrency, logger.child("scheduler")),
   state: new StateStore(statePath),
-  fork: forkWorkItem,
+  fork: createForkWorkItem(),
   paths: { resultPath, pidPath, runLogPath, eventLogPath },
 });
 

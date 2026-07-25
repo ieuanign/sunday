@@ -10,6 +10,7 @@ import { fork } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { createForkWorkItem } from "../assignor/fork.mts";
 // Type-only, so the entry point stays OUT of this process's module graph exactly as it
 // stays out of the parent's (ADR-0001) — what is asserted below is a real fork.
 import type { Job } from "../issue/run.mts";
@@ -182,6 +183,45 @@ try {
     ok("a child that cannot do its job exits with a code rather than reporting success", code !== 0, `code=${code}`);
     ok(
       "it leaves no outcome, so the parent has nothing to mistake for finished work",
+      readOutcome(job.resultPath).state === "absent",
+      JSON.stringify(readOutcome(job.resultPath)),
+    );
+  }
+
+  // ── the fork the parent actually wires in (`main.mts`): the real entry point, by
+  //    path, settling when the child EXITS — so the concurrency cap and the branch lock
+  //    hold for the child's whole life rather than for the fork call ──
+  {
+    const job = jobFor("acme/finance#61", 61);
+    // `silent` only keeps the child's own console lines out of this smoke's output; the
+    // parent inherits them into the supervised stream.
+    const exit = await createForkWorkItem({ silent: true })(job);
+
+    ok("the parent's own fork runs the real entry point to a clean exit", exit.code === 0 && exit.signal === null, JSON.stringify(exit));
+    ok(
+      "and it settles no earlier than the outcome it exists to hand back",
+      readOutcome(job.resultPath).state === "ok",
+      JSON.stringify(readOutcome(job.resultPath)),
+    );
+  }
+
+  // ── a child that never STARTS — no node binary to exec, no file descriptors left,
+  //    EACCES. The ChildProcess emits `error`, and an `error` event with no listener is
+  //    an UNCAUGHT exception: it takes the parent down and every other in-flight item
+  //    and the socket it answers on with it. Constraint 6 from the other end — a child
+  //    that cannot start is one work item's failure, not a dead pipeline ──
+  {
+    const job = jobFor("acme/finance#62", 62);
+    const exit = await createForkWorkItem({ execPath: resolve(dir, "not-a-node-binary") })(job);
+
+    ok("a child that cannot be spawned fails its own work item instead of the parent", exit.error !== undefined, JSON.stringify(exit));
+    ok(
+      "and carries what stopped it, since a spawn failure has no exit code and `code null` reads as a clean one",
+      (exit.error ?? "").includes("ENOENT") && exit.code === null && exit.signal === null,
+      JSON.stringify(exit),
+    );
+    ok(
+      "leaving no outcome, so the parent records the item failed rather than finished",
       readOutcome(job.resultPath).state === "absent",
       JSON.stringify(readOutcome(job.resultPath)),
     );

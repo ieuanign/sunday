@@ -35,6 +35,9 @@ export interface Delivery {
 export interface ChildExit {
   code: number | null;
   signal: NodeJS.Signals | null;
+  /** Why the child never RAN, when it never did — a spawn that failed has neither a code
+   *  nor a signal, and `code null` on its own reads as a clean exit. */
+  error?: string;
 }
 
 /** Fork one work item and settle when it EXITS, so the concurrency cap and the branch
@@ -240,7 +243,7 @@ export class Assignor {
       }
       // Constraint 6: a child that dies is an exit code, not a dead pipeline. Recorded
       // failed carrying it, never left in-flight; classifying it is #39's job.
-      this.record(item, "failed", `child exited ${describeExit(exit)} leaving no outcome`);
+      this.record(item, "failed", describeChildFailure(exit));
       return;
     }
     this.record(item, read.outcome.status, read.outcome.summary);
@@ -265,9 +268,11 @@ export class Assignor {
   }
 }
 
-/** How a child ended, for the human reading the comment. A signal is not an exit code
- *  and reads as neither ("code null" says nothing about a SIGKILL). */
-function describeExit(exit?: ChildExit): string {
-  if (!exit) return "with no exit recorded";
-  return exit.signal ? `on ${exit.signal}` : `with code ${exit.code}`;
+/** How a child failed its work item, for the human reading the comment. A signal is not
+ *  an exit code and a child that never started is neither: "code null" says nothing
+ *  about a SIGKILL and less about a fork that never got a process at all. */
+function describeChildFailure(exit?: ChildExit): string {
+  if (!exit) return "no outcome, and no exit recorded";
+  if (exit.error) return `child never started — ${exit.error}`;
+  return `child exited ${exit.signal ? `on ${exit.signal}` : `with code ${exit.code}`} leaving no outcome`;
 }
