@@ -202,17 +202,19 @@ export class Boot {
     for (const item of items.values()) {
       // Constraint 6, and the one genuinely dangerous write in the sequence: children
       // outlive the parent by design (ADR-0001), so a live lock means somebody IS on this
-      // item — and settling it releases a claim, which re-admits the issue to a SECOND
-      // agent run on real quota while the first is still going. Re-attaching to a
-      // surviving child is #41's; leaving it alone is this issue's whole answer.
+      // item — and settling it now releases a claim, which re-admits the issue to a SECOND
+      // agent run on real quota while the first is still going. So a survivor is ADOPTED
+      // rather than applied: queued under its own key, untouched until it exits, and
+      // settled through the same one path everything else here takes.
       // The Assignor is asked rather than `var/running/` read here (constraint 5): one
       // owner for the lock is what stops two readings of it drifting apart.
       const pid = this.assignor.liveChild(item.key);
-      if (pid !== undefined) {
-        this.log.info(`· ${item.key} left alone — pid ${pid} is still on it`);
-        continue;
-      }
       try {
+        if (pid !== undefined) {
+          this.log.info(`· ${item.key} adopted — pid ${pid} is still on it, and its outcome is applied when it exits`);
+          this.assignor.adopt(item);
+          continue;
+        }
         this.assignor.applyOutcome(item);
       } catch (err) {
         // Isolated per ITEM, not per sweep: applying reaches GitHub, and one 502 must not
