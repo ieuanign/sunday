@@ -63,6 +63,15 @@ export interface GitHubReconcile extends GitHub {
   /** Apply labels to an issue — the missed summon, replayed as the label the human would
    *  have had to add. Admission then reaches it through its ordinary path. */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** Give the claim back, OFF the event loop — the async twin of `release`, and the only
+   *  one re-deriving may use. Both edit the same label; what differs is how many of them
+   *  there can be. The Assignor's `release` is reached once per item it is applying an
+   *  outcome for, and those cannot outnumber `maxConcurrency`. Re-deriving reaches this
+   *  one once per open issue wearing a claim nobody is on — and nothing anywhere caps
+   *  that. A cutover, or any restart after a hard kill, faces a whole backlog of them at
+   *  once; a blocking round-trip each is a parent that answers no readiness probe until
+   *  the sweep ends, which is the SIGKILL/restart loop of ADR-0001. */
+  releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
 /** The real one, over the `gh` CLI. `--repo` addresses the issue directly — v1 passed a
@@ -78,6 +87,10 @@ export class Gh implements GitHubReconcile {
 
   release(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--remove-label", CLAIM_LABEL]);
+  }
+
+  async releaseAsync(repo: string, issue: number): Promise<void> {
+    await shA("gh", ["issue", "edit", String(issue), "--repo", repo, "--remove-label", CLAIM_LABEL]);
   }
 
   async listOpenIssues(repo: string): Promise<OpenIssue[]> {

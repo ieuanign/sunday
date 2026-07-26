@@ -64,10 +64,17 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
 
   const claimed: string[] = [];
   const released: string[] = [];
+  // The claim releases that went through the INHERITED SYNCHRONOUS seam, kept apart from
+  // the async ones so "off the event loop" is observable at all. Reconcile's release count
+  // is bounded by how many open issues wear a stale claim — nothing caps that — so one
+  // blocking `gh` round-trip each is a parent that answers no readiness probe for as long
+  // as the sweep runs, and a supervisor that SIGKILLs it (ADR-0001).
+  const releasedSync: string[] = [];
   const labelled: string[] = [];
   const github: GitHubReconcile = {
     claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
-    release: (repo, issue) => {
+    release: (repo, issue) => void releasedSync.push(`${repo}#${issue}`),
+    releaseAsync: async (repo, issue) => {
       if (over.releaseThrows === `${repo}#${issue}`) throw new Error("gh issue edit failed: HTTP 502");
       released.push(`${repo}#${issue}`);
     },
@@ -109,7 +116,7 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
     return [...s.regularInFlight, ...s.regularQueued].sort();
   };
 
-  return { reconciler, assignor, scheduler, state, paths, lines, comments, claimed, released, labelled, forked, queued };
+  return { reconciler, assignor, scheduler, state, paths, lines, comments, claimed, released, releasedSync, labelled, forked, queued };
 }
 
 try {
@@ -174,6 +181,7 @@ try {
     await h.reconciler.run();
 
     ok("orphan: a claim with no process behind it is released", h.released.join(",") === "acme/finance#57", h.released.join(","));
+    ok("orphan: and released OFF the event loop — a restart can find any number of stale claims, and one blocking `gh` round-trip each is a parent that answers no readiness probe until the sweep ends", h.releasedSync.length === 0, `blocking releases: ${h.releasedSync.join(",")}`);
     ok("orphan: and the issue under it is reconsidered in the same pass — leaving it for the next webhook is waiting for an event GitHub will never send again", h.queued().join(",") === "acme/finance#57", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
     ok("orphan: it is named, because a released claim is Sunday editing somebody's issue", said(h.lines, "acme/finance#57") && said(h.lines, CLAIM_LABEL), JSON.stringify(h.lines.map((l) => l.message)));
   }
@@ -188,7 +196,7 @@ try {
     acquireLock(h.paths.pidPath("acme/finance#57"), process.pid); // a live holder — this very process
     await h.reconciler.run();
 
-    ok("live child: the claim stays ON — the process on the item says so, not this parent's memory", h.released.length === 0, h.released.join(","));
+    ok("live child: the claim stays ON — the process on the item says so, not this parent's memory", h.released.length === 0 && h.releasedSync.length === 0, `${h.released.join(",")} ${h.releasedSync.join(",")}`);
     ok("live child: and nothing is re-admitted under the run that is still going", h.queued().length === 0 && h.claimed.length === 0, `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
     ok("live child: the lock it is working under is left exactly where it is", readLock(h.paths.pidPath("acme/finance#57"))?.alive === true, JSON.stringify(readLock(h.paths.pidPath("acme/finance#57"))));
     ok("live child: the skip names the process that owns the item", said(h.lines, `pid ${process.pid}`), JSON.stringify(h.lines.map((l) => l.message)));

@@ -89,7 +89,7 @@ export class Reconciler {
    *  and let the Assignor decide. `undefined` back from the unclaim means somebody is on
    *  this issue right now and reconcile has no business touching it at all. */
   private async issue(repo: string, open: OpenIssue): Promise<void> {
-    const labels = this.unclaim(repo, open);
+    const labels = await this.unclaim(repo, open);
     if (!labels) return;
     this.assignor.considerIssue({ repo, number: open.number, labels: await this.replaySummon(repo, open.number, labels) });
   }
@@ -129,8 +129,15 @@ export class Reconciler {
    *  the truth and this issue is somebody's work in progress. Releasing it there re-admits
    *  the issue underneath a run still going — two agents on one work item, on real quota,
    *  both pushing the same branch. The Assignor is asked rather than `var/running/` read
-   *  here (constraint 5): one owner for the lock is what stops two readings of it drifting. */
-  private unclaim(repo: string, open: OpenIssue): string[] | undefined {
+   *  here (constraint 5): one owner for the lock is what stops two readings of it drifting.
+   *
+   *  The release goes through `releaseAsync` and never the Assignor's synchronous
+   *  `release` (constraint 9). How many of these a boot performs is bounded by how many
+   *  open issues wear a stale claim, and nothing caps that — a cutover, or a restart after
+   *  a hard kill, meets a whole backlog of them. One blocking `gh` round-trip each is a
+   *  parent that answers no readiness probe until the sweep ends, and the supervisor
+   *  SIGKILLs it into the restart loop ADR-0001 exists to stop. */
+  private async unclaim(repo: string, open: OpenIssue): Promise<string[] | undefined> {
     if (!open.labels.includes(CLAIM_LABEL)) return open.labels;
     const pid = this.assignor.liveChild(`${repo}#${open.number}`);
     if (pid !== undefined) {
@@ -138,7 +145,7 @@ export class Reconciler {
       return undefined;
     }
     this.log.info(`⟲ ${repo}#${open.number} — released an orphaned ${CLAIM_LABEL}: nothing is on it`, { repo });
-    this.github.release(repo, open.number);
+    await this.github.releaseAsync(repo, open.number);
     return open.labels.filter((label) => label !== CLAIM_LABEL);
   }
 }
