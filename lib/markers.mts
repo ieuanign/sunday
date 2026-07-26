@@ -17,3 +17,16 @@ export const SUNDAY_SIGN = "🤖 **Sunday** · autonomous agent";
 export function sundayComment(body: string): string {
   return `${SUNDAY_MARKER}\n${SUNDAY_SIGN}\n\n${body}`;
 }
+
+/** The summon keyword. Case-insensitive because a human writes it by hand, and bounded
+ *  so an account whose name merely starts with ours (`@sundaybot`) is somebody else's
+ *  mention. Unchanged from v1 — live issue threads already summon Sunday this way. */
+const SUNDAY_MENTION = /@sunday\b/i;
+
+/** Is this comment a human handing work to Sunday? The marker check comes first and is
+ *  what makes it a HUMAN's: Sunday posts under the same account, so a comment of ours
+ *  that quotes the request it is answering would otherwise summon us to answer
+ *  ourselves — forever, each round a real agent run on real quota. */
+export function isSummon(body: string): boolean {
+  return !body.includes(SUNDAY_MARKER) && SUNDAY_MENTION.test(body);
+}

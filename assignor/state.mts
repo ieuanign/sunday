@@ -30,6 +30,14 @@ export class StateStore {
     return this.read()[key];
   }
 
+  /** Every item Sunday has recorded. The whole file is what #35's boot sweep needs: an
+   *  item left `in-flight` by a parent that died is only findable by asking what is in
+   *  here, since nothing else on disk necessarily survives a child that wrote no
+   *  outcome. */
+  all(): Record<string, WorkItemState> {
+    return this.read();
+  }
+
   /** Record what an item is doing now. */
   set(key: string, state: WorkItemState): void {
     const all = this.read();

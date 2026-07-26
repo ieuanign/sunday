@@ -13,20 +13,27 @@ import type { ModuleLogger } from "#services/logger.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 
-/** One webhook delivery, normalised — `event`, `action`, and who it is about. The
- *  receiver (`services/github/receiver.mts`) builds these and decides NOTHING; every
- *  decision taken on one is taken here. */
-export interface Delivery {
-  /** The `X-GitHub-Event` header: `issues`, `issue_comment`, `pull_request`, … */
-  event: string;
-  action: string;
+/** One issue, as ADMISSION needs to see it: which repo, which number, and the labels on
+ *  it right now. `Delivery` is a superset of exactly this, which is the point — the live
+ *  route and #35's reconcile hand `considerIssue` the SAME shape, so there is one
+ *  admission path rather than a live one and a recovery one that drift. */
+export interface IssueCandidate {
   /** `repository.full_name` as the payload spelled it — untrusted until it matches a
    *  configured repo, which is what admission does (constraint 14). */
   repo: string;
-  /** The issue or PR number the delivery is about. Likewise untrusted: it becomes a
-   *  work-item key and a path segment. */
+  /** The issue number this is about. Likewise untrusted: it becomes a work-item key and
+   *  a path segment. */
   number: number;
   labels: string[];
+}
+
+/** One webhook delivery, normalised — `event`, `action`, and who it is about. The
+ *  receiver (`services/github/receiver.mts`) builds these and decides NOTHING; every
+ *  decision taken on one is taken here. */
+export interface Delivery extends IssueCandidate {
+  /** The `X-GitHub-Event` header: `issues`, `issue_comment`, `pull_request`, … */
+  event: string;
+  action: string;
 }
 
 /** How a forked child ENDED. Not what it produced — the parent applies that from the
@@ -95,6 +102,29 @@ export interface WorkItemRef {
   issue: number;
 }
 
+/** The inverse of the key `considerIssue` builds, for the one caller that has to go the
+ *  other way: #35's boot sweep, which reads a key out of a result file left on disk.
+ *  Constraint 14 applies there too and MORE so — nothing proves that file came from a
+ *  child of ours, and its key becomes a path segment, an issue Sunday comments on, and a
+ *  claim Sunday strips. So a key is only a work item if its repo is one this parent
+ *  ROUTES and its issue is a positive integer, and the ref is rebuilt from those rather
+ *  than trusted as spelled. Lives here because this is the file that spells keys — a
+ *  parse that drifted from the format would resolve to the wrong work item. */
+export function parseWorkItemKey(key: string, table: Record<string, RepoConfig>): WorkItemRef | undefined {
+  const at = key.lastIndexOf("#");
+  if (at === -1) return undefined;
+  const repo = key.slice(0, at);
+  const issue = Number(key.slice(at + 1));
+  // `hasOwn`, not a truthiness check: `table["__proto__"]` is an object on every table
+  // there is, and reading it as a routed repo is how untrusted input gets in.
+  if (!Object.hasOwn(table, repo)) return undefined;
+  if (!Number.isInteger(issue) || issue <= 0) return undefined;
+  const ref: WorkItemRef = { key: `${repo}#${issue}`, repo, issue };
+  // Rebuilt and compared, so a key that only LOOKS canonical (`#0057`, `#57.0`) cannot
+  // name one work item on disk and a different one in the state file.
+  return ref.key === key ? ref : undefined;
+}
+
 export type Admission = { admit: true } | { admit: false; reason: string };
 
 /** Is this issue Sunday's to work? Its repo must be routed, it must not already be
@@ -159,8 +189,15 @@ export class Assignor {
 
   /** Admit an issue, or say why not. Four guards, cheapest and most durable first: is it
    *  Sunday's work at all, is the number one, is the item already somewhere in its life,
-   *  and is a process still on it. */
-  private considerIssue({ repo, number, labels }: Delivery): void {
+   *  and is a process still on it.
+   *
+   *  PUBLIC because it is the admission SEAM (constraint 3): #35's reconcile re-derives
+   *  open issues from GitHub and hands each one straight to this, rather than carrying a
+   *  second copy of these four guards that drifts from this one — which is exactly how
+   *  v1's live and recovery paths came apart. It takes an `IssueCandidate` and not a
+   *  `Delivery` for the same reason: reconcile has no webhook event to name, and a
+   *  synthetic one would put an event in the log that never happened. */
+  considerIssue({ repo, number, labels }: IssueCandidate): void {
     const decision = admitIssue(repo, labels, this.repos);
     if (!decision.admit) {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);
@@ -221,6 +258,15 @@ export class Assignor {
     this.applyOutcome(item, await this.fork(job));
   }
 
+  /** The pid of the process still working this item, or `undefined` when nobody is. The
+   *  Assignor owns the PID lock — #35's boot sweep and reconcile ASK, and neither reads
+   *  `var/running/` for itself, so the one guard that stops two agents running the same
+   *  issue has exactly one reading of it. */
+  liveChild(key: string): number | undefined {
+    const lock = readLock(this.paths.pidPath(key));
+    return lock?.alive === true ? lock.pid : undefined;
+  }
+
   /** Apply a finished work item's outcome, FROM THE FILE the child left (constraint 4).
    *  #35's boot sweep applies through this same method — one path is what stops the live
    *  and recovery paths drifting apart, which is exactly how v1's restack lost its
@@ -246,13 +292,25 @@ export class Assignor {
       this.record(item, "failed", describeChildFailure(exit));
       return;
     }
+    // A file still on disk for an item ALREADY recorded terminal is a `record()` that was
+    // killed part-way through (ADR-0001: at any instant), between the milestone and the
+    // clear. The issue carries both of its comments already, so recording it again is a
+    // third (constraint 12) — and #35's boot sweep finds exactly this file and applies it.
+    // Leaving it alone is no answer either: the claim, the lock and the file are all still
+    // there, so the item would stay taken forever. Finish the tail, say nothing.
+    const recorded = this.state.get(item.key)?.status;
+    if (recorded === "done" || recorded === "failed") {
+      this.log.info(`· ${item.key} is already ${recorded} — clearing what its interrupted apply left behind`);
+      this.settle(item);
+      return;
+    }
     this.record(item, read.outcome.status, read.outcome.summary);
   }
 
-  /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, the
-   *  result file, the lock, then the claim. A crash part-way through re-applies on the
-   *  next boot rather than losing the outcome — a repeated comment is a visible harmless
-   *  failure, a lost one is silent. */
+  /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, then the
+   *  tail. A crash part-way through is re-applied by the next boot rather than losing the
+   *  outcome — losing one is silent, where the re-apply is caught by the guard above and
+   *  costs the issue nothing. */
   private record(item: WorkItemRef, status: Outcome["status"], summary: string): void {
     this.state.set(item.key, { status });
     // Milestone 2 of exactly two (constraint 12).
@@ -260,10 +318,17 @@ export class Assignor {
       repo: item.repo,
       target: item.issue,
     });
+    this.settle(item);
+  }
+
+  /** The tail of an apply: the result file, the lock, then the claim. Its own method
+   *  because an interrupted record is finished by exactly this and nothing else — the
+   *  state and the comment are already done, and only these three are outstanding.
+   *  The claim is last because it is the most durable of the three: while it is on, a
+   *  delivery arriving in the middle of all this reads the issue as taken. */
+  private settle(item: WorkItemRef): void {
     clearOutcome(this.paths.resultPath(item.key));
     releaseLock(this.paths.pidPath(item.key));
-    // Last, because it is the most durable of the four: while the claim is on, a delivery
-    // arriving in the middle of all this reads the issue as taken.
     this.github.release(item.repo, item.issue);
   }
 }
