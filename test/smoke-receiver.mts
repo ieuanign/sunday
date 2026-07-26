@@ -125,6 +125,39 @@ async function harness(onDelivery: (delivery: Delivery) => void = () => {}) {
   await h.stop();
 }
 
+// ── a comment delivery carries the two things a gate resume is decided on: what the
+//    human wrote, and whether they wrote it on an ISSUE. GitHub files a pull request's
+//    conversation comments under `issue` as well, with a `pull_request` key inside it as
+//    the only tell — and a run resumed off a PR comment is #44's, not this one's ──
+{
+  const h = await harness();
+  await h.post("issue_comment", {
+    action: "created",
+    repository: { full_name: "acme/finance" },
+    issue: { number: 57, labels: [{ name: "awaiting-human" }] },
+    comment: { body: "Use the OAuth flow." },
+  });
+  await h.post("issue_comment", {
+    action: "created",
+    repository: { full_name: "acme/finance" },
+    issue: { number: 61, labels: [], pull_request: { url: "https://api.github.com/repos/acme/finance/pulls/61" } },
+    comment: { body: "@sunday the rebase dropped a commit" },
+  });
+
+  ok(
+    "comment: the body reaches the Assignor — it IS the reply a gated run resumes on",
+    h.delivered[0]?.comment === "Use the OAuth flow.",
+    JSON.stringify(h.delivered[0]),
+  );
+  ok("comment: one on an issue is said to be one", h.delivered[0]?.onPullRequest === false, JSON.stringify(h.delivered[0]));
+  ok(
+    "comment: a PR's conversation comment arrives under `issue`, and is still known for a PR's",
+    h.delivered[1]?.onPullRequest === true,
+    JSON.stringify(h.delivered[1]),
+  );
+  await h.stop();
+}
+
 // ── a payload with no issue or PR in it (a `ping`, a `push`) is still a delivery. The
 //    receiver judges nothing: it hands on a number that is not one, and the Assignor
 //    refuses to build a work-item key out of it (constraint 14, already smoke-covered) ──

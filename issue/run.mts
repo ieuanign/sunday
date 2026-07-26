@@ -46,6 +46,9 @@ export interface Job {
   /** The shared append-only event log. Handed over rather than read from
    *  `lib/paths.mts` for the same reason as the other three: the child derives no path. */
   eventLogPath: string;
+  /** Present when this run CONTINUES the session an earlier one gated on: the handle the
+   *  parent kept in durable state, and what the human replied. Absent is a fresh run. */
+  resume?: { sessionId: string; reply: string };
 }
 
 /** What the child sends over IPC once its outcome is durable. A NOTIFICATION only:
@@ -122,6 +125,9 @@ async function runIssue(): Promise<Outcome> {
       // The run log is the agent's log too — the library appends its raw output to the
       // path it is handed, so one work item reads back in one file.
       logPath: job.runLogPath,
+      // Undefined on a fresh run, which is what the module reads as "start from the
+      // baseline prompt" — the parent decides which of the two this is.
+      resume: job.resume,
     });
   } catch (err) {
     return {

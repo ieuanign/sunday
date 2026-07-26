@@ -36,6 +36,7 @@ interface Payload {
   repository?: { full_name?: string };
   issue?: Subject;
   pull_request?: Subject;
+  comment?: { body?: string };
 }
 
 /** The issue or pull request a delivery is about. GitHub keeps it under one key or the
@@ -43,6 +44,10 @@ interface Payload {
 interface Subject {
   number?: number;
   labels?: { name: string }[];
+  /** Set when a subject filed under `issue` is really a pull request: GitHub delivers a
+   *  PR's conversation comments as `issue_comment` with the PR under `issue`, and this
+   *  key is the ONLY thing that distinguishes them. */
+  pull_request?: unknown;
 }
 
 /** What a payload IS, in the vocabulary the Assignor decides in. Nothing here is
@@ -57,6 +62,11 @@ function normalise(event: string, payload: Payload): Delivery {
     repo: payload.repository?.full_name ?? "?",
     number: Number(subject?.number),
     labels: (subject?.labels ?? []).map((label) => label.name),
+    comment: payload.comment?.body,
+    // Both spellings, because GitHub uses both: a `pull_request` event keeps its subject
+    // under that key, while a PR's conversation comment arrives as an `issue_comment`
+    // whose `issue` carries a `pull_request` of its own.
+    onPullRequest: payload.pull_request !== undefined || payload.issue?.pull_request !== undefined,
   };
 }
 
