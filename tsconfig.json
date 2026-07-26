@@ -7,6 +7,7 @@
   },
   "include": [
     "main.mts",
+    "boot.mts",
     "assignor/**/*.mts",
     "issue/**/*.mts",
     "listener/**/*.mts",

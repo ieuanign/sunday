@@ -95,6 +95,29 @@ export interface WorkItemRef {
   issue: number;
 }
 
+/** The inverse of the key `considerIssue` builds, for the one caller that has to go the
+ *  other way: #35's boot sweep, which reads a key out of a result file left on disk.
+ *  Constraint 14 applies there too and MORE so — nothing proves that file came from a
+ *  child of ours, and its key becomes a path segment, an issue Sunday comments on, and a
+ *  claim Sunday strips. So a key is only a work item if its repo is one this parent
+ *  ROUTES and its issue is a positive integer, and the ref is rebuilt from those rather
+ *  than trusted as spelled. Lives here because this is the file that spells keys — a
+ *  parse that drifted from the format would resolve to the wrong work item. */
+export function parseWorkItemKey(key: string, table: Record<string, RepoConfig>): WorkItemRef | undefined {
+  const at = key.lastIndexOf("#");
+  if (at === -1) return undefined;
+  const repo = key.slice(0, at);
+  const issue = Number(key.slice(at + 1));
+  // `hasOwn`, not a truthiness check: `table["__proto__"]` is an object on every table
+  // there is, and reading it as a routed repo is how untrusted input gets in.
+  if (!Object.hasOwn(table, repo)) return undefined;
+  if (!Number.isInteger(issue) || issue <= 0) return undefined;
+  const ref: WorkItemRef = { key: `${repo}#${issue}`, repo, issue };
+  // Rebuilt and compared, so a key that only LOOKS canonical (`#0057`, `#57.0`) cannot
+  // name one work item on disk and a different one in the state file.
+  return ref.key === key ? ref : undefined;
+}
+
 export type Admission = { admit: true } | { admit: false; reason: string };
 
 /** Is this issue Sunday's to work? Its repo must be routed, it must not already be
@@ -219,6 +242,15 @@ export class Assignor {
     // The IPC report the child sends on the way out is deliberately not waited for: it
     // says an outcome is READY, and the file it points at is what gets applied.
     this.applyOutcome(item, await this.fork(job));
+  }
+
+  /** The pid of the process still working this item, or `undefined` when nobody is. The
+   *  Assignor owns the PID lock — #35's boot sweep and reconcile ASK, and neither reads
+   *  `var/running/` for itself, so the one guard that stops two agents running the same
+   *  issue has exactly one reading of it. */
+  liveChild(key: string): number | undefined {
+    const lock = readLock(this.paths.pidPath(key));
+    return lock?.alive === true ? lock.pid : undefined;
   }
 
   /** Apply a finished work item's outcome, FROM THE FILE the child left (constraint 4).
