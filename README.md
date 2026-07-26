@@ -1,231 +1,169 @@
 # Sunday
 
-Sunday is a **reusable workspace template** that turns GitHub issues into autonomous,
-sandbox-isolated code implementations that open pull requests. It hosts multiple project
-repositories under one shared setup and drives them through an event-driven automation
-pipeline built on [Sandcastle](https://github.com/mattpocock/sandcastle).
+Sunday turns labelled GitHub issues into autonomous, sandbox-isolated code implementations that
+open pull requests — on **your** hardware, not GitHub Actions. It is a **reusable workspace
+template**: one shared setup hosting many project repositories, driven by an event-driven pipeline
+built on [Sandcastle](https://github.com/mattpocock/sandcastle).
 
-Sunday is **orchestration only**: it owns the GitHub workflow (webhook → listener) and the
-Sandcastle automation that runs coding agents in Docker sandboxes. Each hosted repository
-owns its own rules — its `CLAUDE.md`, ADRs, and context. Sunday injects a baseline
-discipline into every run and otherwise defers to each repo.
+Sunday is **orchestration only**. It owns the GitHub workflow (webhook → pipeline) and the
+Sandcastle runs that drive coding agents in Docker sandboxes; each hosted repository keeps its own
+rules — its `CLAUDE.md`, ADRs and context. Sunday injects a baseline discipline into every run and
+otherwise defers to each repo.
 
-> **Status: pipeline implemented (M1–M5), live-hardening in progress.** The listener,
-> per-repo routing, the event loop, the human gate, dependency stacking, crash recovery,
-> the operability layer (failure taxonomy, quota pause/resume, notifier, per-flow logs,
-> `sunday status`, and optional Telegram control), process supervision, and resource
-> management (per-phase model/effort matrix + discipline-floor injection, context-threshold
-> handoff, and a cost-weighted token report) are **built and smoke-verified**. A few paths are
-> still owed an end-to-end live run (a real quota pause; a Telegram round-trip; a supervised
-> kill → restart → reconcile; a forced ≥120K handoff). See [`docs/architecture.md`](docs/architecture.md),
-> [`docs/operability.md`](docs/operability.md), [`docs/supervision.md`](docs/supervision.md), and
-> [`docs/resource-management.md`](docs/resource-management.md).
+> **Status: pipeline built (M1–M5), live-hardening in progress.** Everything here is built and
+> smoke-verified; a few paths are still owed an end-to-end live run — a real quota pause, a
+> Telegram round-trip, a supervised kill → restart → reconcile, a forced ≥120K handoff.
 
-## Architecture
-
-A GitHub issue that is labelled ready flows through:
+## How it works
 
 ```
 GitHub issue (labelled)
    → gh webhook forward   GitHub → your machine (no public server, no cron)
-   → listener             routes repo → config, enforces global concurrency
+   → the parent process   routes repo → config, enforces global concurrency
    → sandcastle.run({ cwd: repos/<child> })
    → Docker sandbox       headless coding agent implements the issue
-   → push + open PR        to the child repo's own origin
+   → push + open PR       to the child repo's own origin
 ```
 
-Inside each sandbox, the agent follows a fixed discipline — plan → test-first
-implementation → review → debug-on-red → sign-off → PR — while obeying the child repo's own
-rules. See [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md).
-
-The full design — trigger labels, the label state machine, dependency stacking, concurrency,
-and crash recovery — lives in [`docs/architecture.md`](docs/architecture.md).
-
-## Repository structure
-
-Public (tracked) layout:
-
-```
-.
-├── README.md              this file
-├── devbox.json            host toolchain (node, gh, git, …)
-├── process-compose.yaml   supervised run stack (one process, forwarders included) — `devbox services up`
-├── .env.example           config template (copy to .env)
-├── docs/
-│   ├── architecture.md    the pipeline design
-│   ├── operability.md     failure handling, notifier, status, Telegram control (M3)
-│   ├── supervision.md     running the stack under process supervision (M4)
-│   ├── resource-management.md  per-phase matrix, handoff-at-threshold, token report (M5)
-│   └── sandbox-prompt.md  the baseline injected into every sandbox run
-├── .claude/               tracked slice of the discipline floor:
-│   ├── agents/            default roster (architecture-engineer, code-writer, reviewer, debugger, sign-off)
-│   └── skills/            roster skills (tdd, code-review-mp, diagnosing-bugs)
-├── listener/              the Node webhook listener + orchestration (listen, scheduler,
-│                          run-issue, restack, reconcile, classify, notify, telegram, status, token-report)
-├── config/                per-repo routing (repos.json — gitignored; repos.example.json tracked)
-│                          + roster.json — the per-phase model/effort matrix (tracked)
-├── scripts/               dev helpers (gen-workspace.sh, repo-init.sh)
-└── repos/                 child repo clones — gitignored, each its own repo
-    └── <child>/           own origin, own .sandcastle/, own rules
-
-At runtime the listener writes gitignored operability artifacts under `.scratch/`:
-per-flow logs (`.scratch/<repo>/<issue>/run.log`), the event log
-(`.scratch/operability/events.jsonl`), the pause state (`.scratch/operability/pause.json`),
-token reports (`.scratch/<repo>/token-report/`), and threshold-handoff notes
-(`.scratch/<repo>/handoff/`).
-```
-
-Child repositories live under `repos/` as independent clones — each with its own `origin`,
-its own `.sandcastle/Dockerfile`, and its own agent rules. They are **gitignored**: Sunday
-never tracks or commits them, and every git operation inside a run resolves to the child's
-own `.git`/`origin`, so branches and pushes land in the child, never in Sunday.
-
-### Editor: per-child git status
-
-Because `repos/` is gitignored, editors grey out everything under it — hiding each child's *own*
-tracked/ignored status. Give each child its own editor root so decorations follow the **child's**
-`.gitignore`, not Sunday's:
-
-- **VS Code / Cursor / Windsurf:** run `scripts/gen-workspace.sh` after cloning a child, then open
-  the generated `sunday.code-workspace`. Re-run it whenever you add a child — it rebuilds the roots
-  from `repos/`, so you never hand-edit it. (The generated file is gitignored, since it lists your
-  child paths.)
-- **JetBrains:** add each child under *Settings → Version Control → Directory Mappings*.
-- **Any editor:** open the child in its own window, or check `git -C repos/<child> status --ignored`.
-
-## Operability
-
-The listener classifies every failure off the run result, reacts oppositely per class,
-records everything durably, and can be watched and steered. Detail + failure-class table:
-[`docs/operability.md`](docs/operability.md).
-
-| Feature | What it does | How to use / configure |
-| --- | --- | --- |
-| **Failure taxonomy** | Classifies each run failure — quota · auth (403) · transient · run-level · setup · unknown — off the run-result *shape*, not exit codes | automatic |
-| **Quota pause/resume** | A quota wall pauses **both** lanes and auto-resumes at reset + 5 min; no parseable reset → holds for a human `/resume-at` | automatic; durable across restarts |
-| **403 halt** | Aborts every in-flight run and halts; a human re-auths, reconcile re-admits on the next boot | automatic |
-| **Transient backoff** | Bounded exponential backoff on 429 / network / 5xx, then the `agent-failed` path | automatic |
-| **Sandbox image preflight** *(self-healing)* | Boot (re)builds every configured sandbox image (cached — unchanged images take seconds), picking up Dockerfile edits and base-image drift; a sandbox-create failure (unbuilt image, docker down) halts as `setup` and a watcher re-reads `config/repos.json` + each `.sandcastle/Dockerfile` every 5 min, rebuilds, auto-resumes, and re-admits the issues that died on it | automatic; fix = edit the Dockerfile / `repos.json`, or start docker (see [`docs/operability.md`](docs/operability.md)) |
-| **Per-flow logs** | Each run streams to its own file instead of a shared, interleaved stdout | `tail -f .scratch/<repo>/<issue>/run.log` |
-| **Durable event log** | Every P1/P2/P3 event is appended (written first, synchronously) as the source of truth | `.scratch/operability/events.jsonl` |
-| **Status snapshot** | Pipeline state, issues by status, and recent events in one view | `npm run status` |
-| **Telegram control** *(optional)* | Phone notifications + `/status` `/pause` `/resume` `/resume-at` over polling ($0, no public endpoint) | set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` |
-| **Supervision** *(M4)* | Runs the pipeline as one auto-restarting supervised process that owns a `gh webhook forward` per repo in-process — kill it → restart → reconcile recovers; kill one forwarder → it alerts, respawns, and catches that repo up | `devbox services up` (see [`docs/supervision.md`](docs/supervision.md)) |
-| **Per-phase matrix** *(M5)* | Each run injects the discipline floor (agents + skills) at the sandbox user level; per-phase model/effort from the matrix, child's own `.claude/` overrides | edit `config/roster.json`; `.env` `MODEL`/`MODEL_EFFORT` is the fallback |
-| **Handoff-at-threshold** *(M5)* | A gate-resumed session ≥120K context hands off to a fresh one via an agent-written note instead of resuming the bloated session | automatic; `HANDOFF_CTX_THRESHOLD` (`.env`) |
-| **Token report** *(M5)* | Per-phase, cost-weighted token accounting on every run (no USD) — surfaces the real offender, not the raw-token-heaviest | `.scratch/<repo>/token-report/` (see [`docs/resource-management.md`](docs/resource-management.md)) |
+Inside the sandbox the agent follows a fixed discipline — plan → test-first implementation →
+review → debug-on-red → sign-off → PR — while obeying the child repo's own rules. The design
+behind all of it (trigger labels, the label state machine, dependency stacking, concurrency, state
+and recovery) is [`docs/architecture.md`](docs/architecture.md).
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — the pipeline design: shape, trigger
-  labels, state machine, dependency stacking, concurrency, and crash recovery.
-- [`docs/operability.md`](docs/operability.md) — failure handling, the notifier + event
-  log, `sunday status`, and the optional Telegram control channel.
-- [`docs/supervision.md`](docs/supervision.md) — running the stack under process supervision
-  (`devbox services up`), the singleton rule, the in-process forwarders, and restart recovery.
-- [`docs/resource-management.md`](docs/resource-management.md) — the per-phase model/effort
-  matrix + discipline-floor injection, context-threshold handoff, and the token report.
-- [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) — the baseline discipline injected into
-  every sandbox run.
+| Doc | What it answers |
+| --- | --- |
+| [`CONTEXT.md`](CONTEXT.md) | The shared vocabulary — what a work item, a blackout, a fork point or the floor *is*. |
+| [`docs/architecture.md`](docs/architecture.md) | The pipeline design: shape, trigger labels, the label state machine, dependency stacking + restack, concurrency lanes, the human gate, state and recovery, auth. |
+| [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, `npm run status`, and the optional Telegram control channel. |
+| [`docs/supervision.md`](docs/supervision.md) | Running unattended: `devbox services up`, the singleton rule, startup ordering and the readiness probe, the in-process forwarders and blackout catch-up, restart recovery, and the manual invocation for debugging. |
+| [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, context-threshold handoff, the cost-weighted token report. |
+| [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) | The baseline discipline injected into every issue run, and the result contract the host reads back. |
+| [`docs/sandbox-pr-comment-prompt.md`](docs/sandbox-pr-comment-prompt.md) | The same, for an `@sunday` summon on a pull request. |
+| [`docs/adr/`](docs/adr/) | Decisions that constrain the code: fork per work item, failure scope over a global halt, keeping PR stacking. |
+| [`docs/implementation-plan.md`](docs/implementation-plan.md) | The ordered M1–M5 build sequence — the historical record of what was built and in what order. |
 
 ## Prerequisites
 
-Sunday runs on **macOS or Linux** (Ubuntu is the reference / production host).
+macOS or Linux (Ubuntu is the reference / production host). Two things are installed by hand;
+everything else is declared in `devbox.json`:
 
-Two things are installed manually; everything else is declared in `devbox.json`:
-
-1. **Docker** — the daemon is a host service, not a devbox package. Docker Desktop or colima
-   on macOS; `docker-ce` on Linux.
-2. **[devbox](https://www.jetify.com/devbox)** — provisions the rest of the toolchain
-   (node, gh, git, …) identically across macOS and Linux.
-
-Then:
+1. **Docker** — the daemon is a host service, not a devbox package. Docker Desktop or colima on
+   macOS; `docker-ce` on Linux.
+2. **[devbox](https://www.jetify.com/devbox)** — provisions the rest of the toolchain (node, gh,
+   git, …) identically across macOS and Linux.
 
 ```bash
 devbox shell          # enter the provisioned env; its init hook also installs the gh webhook
                       #   extension (cli/gh-webhook) — gh ships no built-in `webhook` command
-gh auth login         # gh drives the webhook forwarder, PRs, labels, comments
+gh auth login         # gh drives the webhook forwarders, PRs, labels, comments
 cp .env.example .env  # agent auth + webhook secret (+ optional Telegram keys)
 ```
 
-> Devbox provisions the **parent host** toolchain only. Each child sandbox gets its
-> dependencies from its own `.sandcastle/Dockerfile`, not from here.
+Devbox provisions the **parent host** toolchain only — each child sandbox gets its dependencies
+from its own `.sandcastle/Dockerfile`, not from here.
 
-**Optional — Telegram control.** For phone notifications + remote `/pause` `/resume`
-`/status`, set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env`. It's off by default
-(no keys → no-op), uses polling ($0, no public endpoint), and needs no extra install.
-Setup steps are in [`docs/operability.md`](docs/operability.md).
+**The agent.** Claude is the default; swap it in `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT` — the
+pointers are in `.env.example`). It must be runnable **headless inside the Docker sandbox**, so an
+agent Sandcastle does not support is more than a config line
+([`docs/architecture.md`](docs/architecture.md#auth)).
 
-### Choosing an agent
-
-Sunday ships with **Claude** as the default coding agent. To use a different agent or model,
-edit `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT`) — the pointers are in `.env.example`.
-
-Note: the agent must run **headless inside the Docker sandbox**. Sandcastle runs the agent
-in the container, so swapping to an agent it does not yet support is more than a config
-line — that agent has to be runnable in the sandbox first.
-
-### Engineering-skills setup (per repo)
-
-Sunday's default roster expects each repo it runs in to carry the engineering-skills
-scaffolding under `docs/agents/` — the triage-label vocabulary, issue-tracker and domain-doc
-conventions, and the coding-standards rubric the `reviewer` links. Run both setup skills
-**once per repo** (Sunday itself, and each hosted child) before the roster's first use:
-
-- **`setup-matt-pocock-skills`** — issue tracker, triage labels, and domain-doc layout.
-- **`setup-ieuanign-skills`** — distills `docs/agents/coding-standards.md`, the Standards rubric
-  the `reviewer` (via `code-review-mp`) links.
-
-Without them the roster still runs — the `reviewer` falls back to `CLAUDE.md` and whatever the
-repo documents — but the tailored rubric and label vocabulary won't be present.
+**Telegram (optional).** Phone notifications plus `/status` `/pause` `/resume` `/resume-at` over
+polling — $0, no public endpoint, nothing extra to install. Off until `TELEGRAM_BOT_TOKEN` +
+`TELEGRAM_CHAT_ID` are set in `.env`; setup steps are in
+[`docs/operability.md`](docs/operability.md#telegram-control-optional).
 
 ## Onboarding a repo
-
-Add a child repo to Sunday with:
 
 ```bash
 npm run repo:init <git-url> [name]        # add "-- --dry-run" to preview, touching nothing
 ```
 
-This clones it into `repos/<name>`, scaffolds `.sandcastle/` (a Dockerfile template + `.gitignore`
-+ blank `.env`), adds its routing entry to the gitignored `config/repos.json` (additive — it never
-clobbers an existing child), seeds the pipeline labels on its tracker, and regenerates the editor
-workspace. It then prints the child-specific next-steps you own: editing the Dockerfile to base on
-the child's own dev image and wiring any per-run test sidecar. The sandbox image itself is built
-automatically — the listener's boot preflight (re)builds every configured image (an unedited
-Dockerfile template is refused with an actionable `setup` halt instead of a doomed build).
+This clones the repo into `repos/<name>`, scaffolds `.sandcastle/` (a Dockerfile template +
+`.gitignore` + blank `.env`), adds its routing entry to the gitignored `config/repos.json`
+(additive — it never clobbers an existing child), seeds the pipeline labels on its tracker, and
+regenerates the editor workspace. It then prints the child-specific next steps you own: base the
+Dockerfile on the child's own dev image, and wire any per-run test sidecar. The image itself is
+built for you — boot's preflight (re)builds every configured image, and an unedited template is
+refused with an actionable `setup` halt instead of a doomed build
+([`docs/operability.md`](docs/operability.md#setup-failures-sandbox-image-preflight)).
+
+**Engineering skills — once per repo.** The default roster expects every repo it runs in (Sunday
+itself, and each child) to carry the engineering-skills scaffolding under `docs/agents/`. Run
+`setup-matt-pocock-skills` (issue tracker, triage labels, domain-doc layout) and
+`setup-ieuanign-skills` (which distills `docs/agents/coding-standards.md`, the rubric the
+`reviewer` links via `code-review-mp`) once each, before the roster's first use. Without them the
+roster still runs — the `reviewer` just falls back to `CLAUDE.md` and whatever the repo documents.
+
+**Editor roots.** Because `repos/` is gitignored, editors grey out everything under it, hiding
+each child's *own* tracked/ignored status. Give each child its own editor root: run
+`scripts/gen-workspace.sh` and open the generated `sunday.code-workspace` (VS Code / Cursor /
+Windsurf — re-run it whenever you add a child; the generated file is gitignored since it names
+your children), or map each child under *Settings → Version Control → Directory Mappings*
+(JetBrains), or simply open the child in its own window — `git -C repos/<child> status --ignored`
+works from anywhere.
 
 ## Running the pipeline
 
-Once configured, run the stack under devbox's built-in process supervisor, which restarts it if
-it ever exits. It is **one process** (`main.mts`): it starts a `gh webhook forward` per routed
-repo itself, so there is no relay to launch alongside it.
-
 ```bash
 devbox services up            # foreground — the process + a live TUI
-devbox services up -b          # background
-devbox services stop           # stop the stack
+devbox services up -b         # background
+devbox services stop          # stop the stack
+npm run v2                    # or run it by hand, unsupervised
 ```
 
-It is a **singleton**: restarted on death, never replicated (its queue assumes one process). On
-each start it re-arms any pause and reconciles pending work from GitHub, so a crash-restart is a
-delay, not a loss; a dropped forwarder alerts and its repo is caught up without one. Full operator
-guide — startup ordering, watching a run, and the manual invocation for debugging — is in
-[`docs/supervision.md`](docs/supervision.md).
+It is **one process** (`main.mts`): it starts a `gh webhook forward` per routed repo itself, so
+there is no relay to launch alongside it. It is also a **singleton** — devbox's built-in
+supervisor restarts it on death but never replicates it (its queue assumes one process). On each
+start it re-arms any pause and reconciles pending work from GitHub, so a crash-restart is a delay,
+not a loss; a dropped forwarder alerts, respawns, and catches that repo up without one. The full
+operator guide is [`docs/supervision.md`](docs/supervision.md).
+
+## Repository structure
+
+```
+.
+├── main.mts               the parent process — receiver, forwarders, queue, boot
+├── boot.mts               every (re)start: re-arm pause → build images → sweep → reconcile
+├── process-compose.yaml   the supervised stack (one process) — `devbox services up`
+├── devbox.json            host toolchain (node, gh, git, …)
+├── .env.example           config template (copy to .env)
+├── assignor/              admission, scheduling, state, reconcile — the decisions
+├── services/              the seams: GitHub CLI + receiver + forwarders, sandbox, logging, git
+├── issue/                 the forked per-work-item worker (one process per run, ADR-0001)
+├── lib/                   shared plumbing — the `var/` paths, shell-out, outcome + lock files
+├── listener/              v1's single-process pipeline — hand-run only now, and the source of
+│                          `npm run status` (docs/supervision.md#manual-invocation-debugging)
+├── config/                per-repo routing (`repos.json`, gitignored; `repos.example.json`
+│                          tracked) + `roster.json`, the per-phase model/effort matrix
+├── .claude/               the shipped discipline floor — the agent roster + its skills
+├── docs/                  see Documentation above
+├── scripts/               dev helpers (repo-init.sh, gen-workspace.sh)
+├── test/                  the offline smoke suite — `npm test`
+└── repos/                 child repo clones — gitignored, each its own repo
+```
+
+Children are independent clones with their own `origin`, `.sandcastle/` and agent rules. Sunday
+never tracks or commits them, and every git operation inside a run resolves to the child's own
+`.git`/`origin`, so branches and pushes land in the child, never in Sunday.
+
+Durable runtime state and logs are gitignored, under `var/` (v1's live under `.scratch/`) — what
+is written where is in [`docs/supervision.md`](docs/supervision.md#watching-a-run) and
+[`docs/operability.md`](docs/operability.md#where-things-are-recorded).
 
 ## Security
 
-- **Agent auth** — the agent token/OAuth lives in `.env`, which is gitignored. Never commit
-  it. Only `.env.example` (no secrets) is published.
-- **Webhook secret** — `gh webhook forward` authenticates deliveries with a shared secret;
-  keep it in `.env`.
-- **Sandbox isolation** — each run executes in a Docker sandbox as a **non-root** user;
-  agents never run directly on the host.
-- **Telegram control** *(if enabled)* — a `chat_id` allowlist is the sole authz and **fails
-  closed**: no allowlist → the poller refuses to start, and any update from another chat is
-  dropped. Polling means there is no inbound public endpoint to forge. `TELEGRAM_BOT_TOKEN`
-  lives in `.env` (gitignored) — treat it as a secret; it can drive the pipeline.
-- **The private recipe** — the individual tooling used to improve Sunday itself (`CLAUDE.md`,
-  `docs/agents/`, and most of `.claude/`) is gitignored and never published. The exception is the
-  shipped discipline floor — `.claude/agents/` and the `tdd`/`code-review-mp`/`diagnosing-bugs`
-  skills — which is tracked (see [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) §2).
+- **Secrets live in the gitignored `.env`** — the agent token/OAuth, and the shared secret
+  `gh webhook forward` authenticates deliveries with. Never commit it; only `.env.example` (no
+  secrets) is published.
+- **Sandboxes are credential-free** — each run executes in Docker as a **non-root** user and
+  cannot push; the host performs every GitHub write. Agents never run directly on the host.
+- **Telegram control fails closed** *(if enabled)* — a `chat_id` allowlist is the sole authz, and
+  polling means there is no inbound public endpoint to forge. `TELEGRAM_BOT_TOKEN` can drive the
+  pipeline, so treat it as a secret ([`docs/operability.md`](docs/operability.md#authz)).
+- **The private recipe stays private** — the individual tooling used to improve Sunday itself
+  (`CLAUDE.md`, `docs/agents/`, most of `.claude/`) is gitignored and never published. The
+  exception is the shipped discipline floor — `.claude/agents/` and the
+  `tdd`/`code-review-mp`/`diagnosing-bugs` skills — which is tracked.
+```

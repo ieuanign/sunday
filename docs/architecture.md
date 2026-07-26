@@ -204,6 +204,10 @@ Agent-agnostic. **Claude is the default** (auth via a Max subscription token —
 API key). Configured in `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT`, and the auth var). All runs
 share one quota, which is why the concurrency cap is global.
 
+Agent-agnostic within one limit: the agent must run **headless inside the Docker sandbox**.
+Sandcastle is what runs it in the container, so swapping to an agent it does not yet support is
+more than a config line — that agent has to be runnable in the sandbox first.
+
 > A subscription-token automation path may warrant checking the agent vendor's current terms.
 
 ## Accepted risks
