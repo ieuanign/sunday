@@ -8,7 +8,7 @@ import type { RepoConfig } from "#config/repos.mts";
 import type { Job } from "#issue/run.mts";
 import { readLock, releaseLock } from "#lib/lock.mts";
 import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
-import { clearOutcome, readOutcome, type Outcome } from "#lib/outcome.mts";
+import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
 import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import type { Scheduler } from "./scheduler.mts";
@@ -390,8 +390,12 @@ export class Assignor {
     // `awaiting-human` counts as recorded alongside the other two: a gate is FINISHED
     // work, so re-recording it asks the human the same question a second time and, worse,
     // re-writes the state entry their reply is routed on.
+    // Which statuses are terminal comes off OUTCOME_STATUSES rather than a list spelled
+    // again here: a status the outcome grows is one this guard has to count, or the
+    // interrupted apply it names is re-recorded and the issue gets its comment twice.
+    // `in-flight` and an item never recorded at all are what still falls through.
     const recorded = this.state.get(item.key)?.status;
-    if (recorded === "done" || recorded === "failed" || recorded === "awaiting-human") {
+    if (OUTCOME_STATUSES.some((status) => status === recorded)) {
       this.log.info(`· ${item.key} is already ${recorded} — clearing what its interrupted apply left behind`);
       this.settle(item);
       return;
