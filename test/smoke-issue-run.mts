@@ -220,7 +220,7 @@ function harness(s: Scenario = {}) {
     ["## Description", "## Related issue", "## Context", "## Type of change", "## Risk", "## Verification", "## Review findings"].every((h2) => body.includes(h2)),
     body,
   );
-  ok("body: the whole result reaches the composer, not just the description", body.includes("CHANGES_REQUESTED") && body.includes("The defuser missed") && body.includes("medium"), body);
+  ok("body: the whole result reaches the composer, not just the description", body.includes("CHANGES_REQUESTED") && body.includes("The defuser missed") && body.includes("- [x] Medium"), body);
   ok(
     "footer: the commit count is the one git measured, never the agent's own list",
     body.includes("3 commits") && !body.includes("7 commits"),

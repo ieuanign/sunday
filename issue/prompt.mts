@@ -13,6 +13,10 @@ export const RESULT_TAG = "sunday-result";
  *  the subset the agent chose out of exactly these, and a reviewer triages on them. */
 export const TYPES_OF_CHANGE = ["new feature", "breaking change", "bug fix", "docs"] as const;
 
+/** How much of a blast radius the change has. A fixed vocabulary for the same reason:
+ *  the body lists all three and ticks exactly the one the agent chose (AC3). */
+export const RISK_LEVELS = ["low", "medium", "high"] as const;
+
 /** What Sunday's own review phase concluded. `NOT_RUN` is sayable on purpose — a review
  *  that never happened has to be distinguishable from a clean one (#31 story 36), and an
  *  absent `review` is composed as this same verdict rather than as an empty finding list. */
@@ -36,7 +40,7 @@ export const resultSchema = z.object({
   context: z.string().optional(),
   typeOfChange: z.array(z.enum(TYPES_OF_CHANGE)).optional(),
   /** Exactly one level (AC3) — a body cannot state two, and states none when absent. */
-  risk: z.enum(["low", "medium", "high"]).optional(),
+  risk: z.enum(RISK_LEVELS).optional(),
   /** What was actually run, so a reviewer knows what "verified" means here. */
   verification: z.string().optional(),
   relatedIssues: z.array(z.number()).optional(),

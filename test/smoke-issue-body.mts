@@ -153,15 +153,24 @@ const footer = (body: string): string => body.split(/\n---\n/).slice(1).join("\n
   ok("review: and says the findings are missing rather than showing an empty list", /not provided/i.test(silent), silent);
 }
 
-// ── risk is ONE level (AC3), so a reviewer can triage on it ──
+// ── risk is ONE level (AC3), so a reviewer can triage on it — in the same FORM as the
+//    Type of change section directly above it: the whole vocabulary, exactly one tick
+//    (the dogfooded template, `docs/agents/dev-loop.md`). Two adjacent sections that
+//    disagree in form is what a reader trips over ──
 {
   const risk = (level: IssueResult["risk"]) => section(composeBody({ signal: "ready", description: "d", ...(level ? { risk: level } : {}) }, FACTS), "Risk");
   for (const level of ["low", "medium", "high"] as const) {
     const rendered = risk(level);
-    ok(`risk: \`${level}\` renders as itself…`, new RegExp(level, "i").test(rendered), rendered);
-    ok(`risk: …and as the only level named`, (rendered.match(/low|medium|high/gi) ?? []).length === 1, rendered);
+    ok(`risk: \`${level}\` is the level ticked…`, new RegExp(`- \\[x\\] ${level}$`, "im").test(rendered), rendered);
+    ok(`risk: …and it is the only tick — a body cannot state two`, (rendered.match(/\[x\]/gi) ?? []).length === 1, rendered);
+    ok(`risk: …with the levels it is not still listed, unticked`, (rendered.match(/^- \[/gm) ?? []).length === 3, rendered);
   }
   ok("risk: an absent level says so rather than being guessed at", !/low|medium|high/i.test(risk(undefined)) && risk(undefined).length > 0, risk(undefined));
+  ok(
+    "risk: an absent level is NOT an all-unticked list — that form reads as a deliberate 'no level applies'",
+    !risk(undefined).includes("- ["),
+    risk(undefined),
+  );
 }
 
 // ── the type of change ticks the subset the agent chose, out of the whole vocabulary —
