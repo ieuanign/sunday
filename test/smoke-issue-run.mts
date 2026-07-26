@@ -121,6 +121,8 @@ function harness(s: Scenario = {}) {
       counted.push(`${baseRef}..${branch}`);
       return s.ahead ?? 1;
     },
+    // Nothing reads it yet — the footer that states it is #37's next commit.
+    diffStat: async () => ({ files: 2, insertions: 40, deletions: 5 }),
     removeWorktree: async (_dir, path) => {
       trace.push("removeWorktree");
       removedWorktrees.push(path);

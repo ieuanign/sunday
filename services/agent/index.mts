@@ -90,15 +90,20 @@ export interface AgentUsage {
 }
 
 /** What a finished run hands back. Every field has a named consumer: `sessionId` is
- *  the gate/resume handle (#36), `usage`/`durationMs`/`commits` are the PR-body footer
- *  (#37), and `preservedWorktreePath` is what a run's cleanup force-removes before it
- *  can delete the branch (#36). */
+ *  the gate/resume handle (#36), `usage`/`durationMs`/`commits`/`model` are the PR-body
+ *  footer (#37), and `preservedWorktreePath` is what a run's cleanup force-removes
+ *  before it can delete the branch (#36). */
 export interface AgentRunResult<T = string> {
   /** The parsed structured output the contract asked for. */
   output: T;
   /** Present when the agent supports resume and the session was captured. */
   sessionId?: string;
   usage?: AgentUsage;
+  /** The model this run actually ran on, resolved by the implementation — the request's
+   *  or its own fallback. Optional because only the implementation knows one: nothing
+   *  outside it may read `MODEL`, so a footer that wants to state the model has to be
+   *  told, and an agent that cannot say degrades that line rather than fabricating it. */
+  model?: string;
   /** SHAs the agent committed during this run. */
   commits: string[];
   /** Set when the run left uncommitted changes and the worktree was kept host-side. */

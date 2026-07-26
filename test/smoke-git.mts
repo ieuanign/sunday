@@ -52,6 +52,32 @@ function hasRef(fx: { git(dir: string, ...args: string[]): string }, dir: string
   ok("ahead: a base ref that does not resolve fails loudly", thrown !== undefined, "counting against a missing base returned a number");
 }
 
+// ── the diff stat: the "16 files, +1533/−49" the PR footer states (#37) ───────
+{
+  const fx = makeFixture("git-diffstat");
+  fx.commit("shared.txt", "base\n", "C0 base");
+  fx.push("main");
+  const child = fx.cloneChild();
+
+  fx.git(child, "checkout", "-b", "feat/9");
+  writeFileSync(resolve(child, "notes.md"), "one\ntwo\nthree\n", "utf8");
+  writeFileSync(resolve(child, "shared.txt"), "changed\n", "utf8");
+  fx.git(child, "add", "-A");
+  fx.git(child, "commit", "-m", "A1");
+
+  const stat = await git.diffStat(child, "origin/main", "feat/9");
+  ok("stat: the branch's own files, insertions and deletions are counted", stat.files === 2 && stat.insertions === 4 && stat.deletions === 1, JSON.stringify(stat));
+
+  // The base moves while the run works — somebody else's PR merged. The footer must
+  // still state what THIS branch changed, exactly as the PR's own diff shows it, not
+  // the base's commits read backwards.
+  fx.commit("other.txt", "theirs\nagain\n", "C1 someone else");
+  fx.push("main");
+  await git.fetchPrune(child);
+  const after = await git.diffStat(child, "origin/main", "feat/9");
+  ok("stat: a base that moved under the branch does not enter its stat", after.files === 2 && after.insertions === 4 && after.deletions === 1, JSON.stringify(after));
+}
+
 // ── the scratch exclude: what stops the floor's own files blocking cleanup ────
 {
   const fx = makeFixture("git-exclude");
