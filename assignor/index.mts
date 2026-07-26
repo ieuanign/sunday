@@ -250,9 +250,9 @@ export class Assignor {
     // The guard the in-memory queue cannot be: children deliberately outlive the parent
     // (hot-reload, crash, deploy — ADR-0001), so a live lock means someone IS on this
     // item whatever this process remembers.
-    const lock = readLock(this.paths.pidPath(item.key));
-    if (lock?.alive) {
-      this.log.info(`· skip ${item.key} — pid ${lock.pid} is still on it`);
+    const pid = this.liveChild(item.key);
+    if (pid !== undefined) {
+      this.log.info(`· skip ${item.key} — pid ${pid} is still on it`);
       return;
     }
     // Claim BEFORE the queue: the claim is what the NEXT delivery reads, and it may
@@ -359,7 +359,7 @@ export class Assignor {
    *  issue has exactly one reading of it. */
   liveChild(key: string): number | undefined {
     const lock = readLock(this.paths.pidPath(key));
-    return lock?.alive === true ? lock.pid : undefined;
+    return lock?.alive ? lock.pid : undefined;
   }
 
   /** Take over a child THIS parent never forked — one that outlived the parent that did
