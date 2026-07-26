@@ -87,6 +87,12 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
     },
     issueComments: async (repo, issue) => over.comments?.[`${repo}#${issue}`] ?? [],
     addLabels: async (repo, issue, labels) => void labelled.push(`${repo}#${issue} [${labels.join(", ")}]`),
+    // Admission's blocker read (#42), answering "nothing blocks this issue": what this
+    // file is about is which issues reconcile hands to admission, not what it decides.
+    blockedBy: async () => [],
+    issueState: async () => "closed",
+    readIssue: async () => ({ title: "", body: "" }),
+    openPrForHead: async () => undefined,
   };
 
   const paths: Paths = {

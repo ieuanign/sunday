@@ -94,6 +94,13 @@ function harness() {
   const github: GitHub = {
     claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
     release: (repo, issue) => void released.push(`${repo}#${issue}`),
+    // Admission's blocker read (#42). Nothing in this file is about dependencies, so the
+    // defaults say "nothing blocks this issue" — native links empty, a body with no
+    // `## Blocked by` section — which is the unblocked issue every case here drives.
+    blockedBy: async () => [],
+    issueState: async () => "closed",
+    readIssue: async () => ({ title: "", body: "" }),
+    openPrForHead: async () => undefined,
   };
 
   const paths: Paths = {
