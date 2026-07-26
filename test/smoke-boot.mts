@@ -10,8 +10,8 @@
 // $0, no network, no GitHub.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "../boot.mts";
 import type { RepoConfig } from "#config/repos.mts";
@@ -107,7 +107,10 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
 
   const scheduler = createScheduler(2, logger.child("scheduler"));
   const state = new StateStore(resolve(caseDir, "state.json"));
-  const pause = new PauseStore(resolve(caseDir, "pause.json"));
+  // The path as well as the store: a pause file is ordinary disk, and a case that puts
+  // something on it the store did not write is how "unreadable" gets driven at all.
+  const pausePath = resolve(caseDir, "pause.json");
+  const pause = new PauseStore(pausePath);
   const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths });
 
   /** What the build saw when it ran — above all whether the queue was HELD, which is the
@@ -149,7 +152,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     log: logger.child("boot"),
   });
 
-  return { boot, scheduler, state, pause, paths, lines, events, comments, claimed, released, build, reDerive, forked };
+  return { boot, scheduler, state, pause, pausePath, paths, lines, events, comments, claimed, released, build, reDerive, forked };
 }
 
 try {
@@ -473,6 +476,32 @@ try {
 
     ok("reconcile: a re-derive that throws does not take boot down with it", said(h.lines, "502"), JSON.stringify(h.lines.map((l) => l.message)));
     ok("reconcile: and the queue is released — a pipeline held for a failed re-derive runs nothing at all", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+  }
+
+  // ── and neither does a pause file boot cannot read. It is the ONE file the sequence
+  //    reads twice — once to re-arm and once to decide whether the hold may lift — and
+  //    the second read has nothing above it: `main.mts` awaits `boot.run()` at the top
+  //    level, so a throw there is an unhandled rejection that kills the parent AFTER the
+  //    receiver is already answering webhooks, and under `restart: always` that is the
+  //    crash loop constraint 2 exists to eliminate ──
+  {
+    const h = harness();
+    mkdirSync(dirname(h.pausePath), { recursive: true });
+    // Half a JSON object: a kill mid-write, a disk that corrupted, a hand-edit. Nothing
+    // proves the file on disk parses, and `read` throws when it does not.
+    writeFileSync(h.pausePath, '{"reason": "quota exhaus', "utf8");
+
+    let crashed: string | undefined;
+    try {
+      await h.boot.run();
+    } catch (err) {
+      crashed = err instanceof Error ? err.message : String(err);
+    }
+
+    ok("corrupt pause: a pause file that cannot be read does not take boot down with it", crashed === undefined, `boot.run() rejected: ${crashed}`);
+    ok("corrupt pause: the rest of the sequence still runs — one unreadable file is not the whole boot", h.build.held === true && h.reDerive.ran === 1, JSON.stringify({ build: h.build, reDerive: h.reDerive.ran }));
+    ok("corrupt pause: and the queue stays HELD — a file Sunday cannot read could be the halt the pipeline stopped for, and lifting on a guess spends the quota it was waiting on", h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("corrupt pause: reported at error, since a queue held for a reason nobody can see is a pipeline that silently runs nothing", h.events.some((l) => l.level === "error" && l.message.includes("pause")), JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });

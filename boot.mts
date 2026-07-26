@@ -25,7 +25,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { type Assignor, parseWorkItemKey, type WorkItemRef } from "#assignor/index.mts";
-import { type PauseStore, rearmAction } from "#assignor/pause.mts";
+import { type PauseState, type PauseStore, rearmAction } from "#assignor/pause.mts";
 import type { Scheduler } from "#assignor/scheduler.mts";
 import type { StateStore } from "#assignor/state.mts";
 import type { RepoConfig } from "#config/repos.mts";
@@ -280,9 +280,26 @@ export class Boot {
 
   /** Lift boot's own hold — and ONLY boot's. An armed pause file outranks it: the
    *  pipeline stopped for a reason that has not expired yet, and lifting the hold here
-   *  would spend the quota that pause is waiting on. */
+   *  would spend the quota that pause is waiting on.
+   *
+   *  The one step with nothing above it to catch a throw: it runs after `run`'s last
+   *  `step`, and again from the re-scheduled auto-resume, which fires on a timer whose
+   *  callback has no caller at all. `run` is awaited at the top level of `main.mts`, so
+   *  a throw here is an unhandled rejection that kills the parent AFTER the receiver is
+   *  answering webhooks — under `restart: always`, the crash loop constraint 2 exists to
+   *  eliminate. So it swallows its own failure rather than relying on a caller. */
   private lift(): void {
-    const armed = this.pause.read();
+    let armed: PauseState | undefined;
+    try {
+      armed = this.pause.read();
+    } catch (err) {
+      // A pause file that cannot be read is NOT "not paused": it exists because the
+      // pipeline had to stop, and a torn or corrupted one could be a halt. Staying held
+      // costs a delay somebody can see in `sunday status` and fix; guessing the other way
+      // spends the quota (or re-runs against the auth failure) the pause was armed for.
+      this.log.error(`✗ boot done — the pause file is unreadable (${describe(err)}), so the queue stays held until a human clears it`);
+      return;
+    }
     if (armed) {
       this.log.info(`⏸ boot done — the queue stays held: ${armed.reason}`);
       return;
