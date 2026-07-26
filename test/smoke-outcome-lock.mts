@@ -43,6 +43,38 @@ try {
     );
   }
 
+  // ── the gate: a run that stopped to ask a human finished, and finished as neither
+  //    done nor failed. Its session handle is the whole difference between the reply
+  //    resuming that run and the work starting over, and the child that holds it is
+  //    gone — so it survives here or nowhere ──
+  {
+    const path = resolve(dir, "results", "acme-finance-62.json");
+    const gated: Outcome = {
+      key: "acme/finance#62",
+      status: "awaiting-human",
+      summary: "Which of the two auth flows should this use?",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      sessionId: "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c",
+    };
+    writeOutcome(path, gated);
+    const read = readOutcome(path);
+    ok(
+      "gate: a run waiting on a human is a readable outcome, not an unknown status",
+      read.state === "ok" && read.outcome.status === "awaiting-human",
+      JSON.stringify(read),
+    );
+    ok(
+      "gate: the session handle survives the file, or the reply starts the work over",
+      read.state === "ok" && read.outcome.sessionId === gated.sessionId,
+      JSON.stringify(read),
+    );
+    ok(
+      "gate: the question the child asked is what the parent will post",
+      read.state === "ok" && read.outcome.summary === gated.summary,
+      JSON.stringify(read),
+    );
+  }
+
   // ── absence is an answer, not an exception: no file means the item is not finished
   //    (or its outcome was already applied and cleared), which the parent asks on every
   //    sweep. A throw there would turn the common case into an incident ──

@@ -7,7 +7,8 @@ import type { RepoConfig } from "#config/repos.mts";
 // shape is a contract, and the entry point itself is only ever reached by path.
 import type { Job } from "#issue/run.mts";
 import { readLock, releaseLock } from "#lib/lock.mts";
-import { clearOutcome, readOutcome, type Outcome } from "#lib/outcome.mts";
+import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
+import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
 import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import type { Scheduler } from "./scheduler.mts";
@@ -34,6 +35,13 @@ export interface Delivery extends IssueCandidate {
   /** The `X-GitHub-Event` header: `issues`, `issue_comment`, `pull_request`, … */
   event: string;
   action: string;
+  /** What the comment said, when the delivery is one. It is the human's REPLY on a gate
+   *  resume, so it is carried whole and judged here rather than in the receiver. */
+  comment?: string;
+  /** Is the subject a pull request rather than an issue? Required, not optional: a
+   *  comment on a PR is #44's work and never an issue run's, and a field left off would
+   *  default to the dangerous answer — an issue run resumed from a PR thread. */
+  onPullRequest: boolean;
 }
 
 /** How a forked child ENDED. Not what it produced — the parent applies that from the
@@ -81,15 +89,26 @@ export interface AssignorDeps {
  *  Ported from v1's `listener/listen.mts`. */
 const ADMIT_ACTIONS = new Set(["opened", "reopened", "labeled"]);
 
+/** The event a gate resume arrives on, spelled once for both readings of it below: a
+ *  `created` one is routed, and every other action on it is recognised-and-unbuilt. Two
+ *  spellings drift into a comment that routes nowhere while the log calls it recognised. */
+const COMMENT_EVENT = "issue_comment";
+
 /** Event types the pipeline knows and this issue deliberately does not act on, so
- *  "not built yet" and "never heard of it" are different lines in the log: comment runs
- *  and gate resumes are #44, the DAG re-evaluation and restack cascade #42/#43. */
-const KNOWN_UNBUILT = new Set(["issue_comment", "pull_request", "pull_request_review_comment"]);
+ *  "not built yet" and "never heard of it" are different lines in the log: PR-comment
+ *  runs are #44, the DAG re-evaluation and restack cascade #42/#43. A created comment is
+ *  routed above (a gate resume); every other comment action lands here. */
+const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", "pull_request_review_comment"]);
 
 /** A spec describes the shape of a feature; its child issues are the work (CONTEXT.md).
  *  The literal is ported from v1's `listener/helper.mts` rather than imported — v1 and
  *  V2 must not cross-import until cutover deletes v1. */
 const SPEC_LABEL = "spec";
+
+/** How each way of finishing opens the comment it is posted as. `⏸` is the same mark
+ *  boot and the scheduler use for "held, awaiting a human" — a gate is that, on one work
+ *  item. */
+const MARK: Record<Outcome["status"], string> = { done: "✓", failed: "✗", "awaiting-human": "⏸" };
 
 /** One work item's IDENTITY, resolved once at admission: what a fork, an outcome and a
  *  comment all have to agree on. (`scheduler.mts`'s `WorkItem` is the other half — the
@@ -180,6 +199,10 @@ export class Assignor {
       this.considerIssue(delivery);
       return;
     }
+    if (event === COMMENT_EVENT && action === "created") {
+      this.considerReply(delivery);
+      return;
+    }
     this.log.info(
       KNOWN_UNBUILT.has(event)
         ? `· ${what} — recognised, and not the spine's to handle (#42/#43/#44)`
@@ -234,10 +257,75 @@ export class Assignor {
     this.scheduler.enqueue({ key: item.key, branch: `feat/${item.issue}`, run: () => this.run(item, cfg) });
   }
 
+  /** A comment on an issue, which is how a gated run gets its answer. The item is picked
+   *  back up only when the pipeline is actually waiting on one: it is a routed issue (not
+   *  a pull request), a human wrote it (not Sunday), and durable state says this item
+   *  gated with a session to continue.
+   *
+   *  Everything past those guards is the SAME claim-enqueue-fork path an admitted issue
+   *  takes — a resume is an issue run, and a second way in that could drift from the
+   *  first is the defect class this rewrite exists to kill. */
+  private considerReply({ repo, number, comment = "", onPullRequest }: Delivery): void {
+    const key = `${repo}#${number}`;
+    // Constraint 14, and the resume's own need: a run works from its repo's config, so a
+    // repo that left the routing table between the question and the answer has nothing to
+    // run against. The state file outlives an edit to `config/repos.json`; this decides.
+    const cfg = this.repos[repo];
+    if (!cfg) {
+      this.log.info(`· skip ${key} — ${repo} not in config/repos.json`);
+      return;
+    }
+    // Sunday's own comment, coming straight back as a delivery. It has to be told from a
+    // human's by the MARKER and never by the author, because both post under the same
+    // account — and the gate question is itself a comment Sunday posts on an issue that
+    // is already `awaiting-human`, so unguarded every gate answers its own question with
+    // its own question, on real quota.
+    if (comment.includes(SUNDAY_MARKER)) {
+      this.log.info(`· ${key} — Sunday's own comment, not an answer to it`);
+      return;
+    }
+    // A PR's conversation comment arrives as an `issue_comment` too, so the SUBJECT is
+    // the only thing separating the two flows — and answering @sunday on a pull request
+    // is #44's run, not a gate resume.
+    if (onPullRequest) {
+      this.log.info(`· ${key} — a comment on a pull request, which is #44's run and not this one`);
+      return;
+    }
+    const prior = this.state.get(key);
+    if (prior?.status !== "awaiting-human") {
+      // Most comments are this: humans talking to each other. A summon among them is not
+      // this issue's work either, and saying so is the difference between a decision and
+      // a delivery that vanished (constraint 10).
+      const summon = isSummon(comment) ? " — an @sunday summon is replayed by the next boot's reconcile (#35)" : "";
+      this.log.info(`· ${key} — a comment, and nothing here is waiting on an answer${summon}`);
+      return;
+    }
+    const session = prior.sessionId;
+    if (!session) {
+      // Fresh work, not a resume: the human is answering a question this pipeline can no
+      // longer continue from, and starting over would spend a whole new quota deciding
+      // what they already answered. Said out loud, because they are waiting on a reply
+      // that is otherwise never coming.
+      this.log.info(`· skip ${key} — awaiting-human with no session to resume`);
+      return;
+    }
+    this.github.claim(repo, number);
+    // The whole record is replaced, so the handle is written back deliberately
+    // (constraint 12): dropped here, a run that dies mid-resume leaves a gated item with
+    // nothing left to resume from.
+    this.state.set(key, { status: "in-flight", sessionId: session });
+    const item: WorkItemRef = { key, repo, issue: number };
+    this.scheduler.enqueue({
+      key,
+      branch: `feat/${number}`,
+      run: () => this.run(item, cfg, { sessionId: session, reply: comment }),
+    });
+  }
+
   /** One work item, from the fork to its applied outcome. Handed to the scheduler, and
    *  it settles when the CHILD exits — so the cap and the branch lock hold for the
    *  child's whole life rather than just for the fork call. */
-  private async run(item: WorkItemRef, cfg: RepoConfig): Promise<void> {
+  private async run(item: WorkItemRef, cfg: RepoConfig, resume?: Job["resume"]): Promise<void> {
     const job: Job = {
       key: item.key,
       repo: item.repo,
@@ -249,6 +337,7 @@ export class Assignor {
       pidPath: this.paths.pidPath(item.key),
       runLogPath: this.paths.runLogPath(item.repo, String(item.issue)),
       eventLogPath: this.paths.eventLogPath,
+      resume,
     };
     // Milestone 1 of exactly two (constraint 12) — every one posts a comment on the
     // issue, so a third is thread spam.
@@ -298,23 +387,36 @@ export class Assignor {
     // third (constraint 12) — and #35's boot sweep finds exactly this file and applies it.
     // Leaving it alone is no answer either: the claim, the lock and the file are all still
     // there, so the item would stay taken forever. Finish the tail, say nothing.
+    // `awaiting-human` counts as recorded alongside the other two: a gate is FINISHED
+    // work, so re-recording it asks the human the same question a second time and, worse,
+    // re-writes the state entry their reply is routed on.
+    // Which statuses are terminal comes off OUTCOME_STATUSES rather than a list spelled
+    // again here: a status the outcome grows is one this guard has to count, or the
+    // interrupted apply it names is re-recorded and the issue gets its comment twice.
+    // `in-flight` and an item never recorded at all are what still falls through.
     const recorded = this.state.get(item.key)?.status;
-    if (recorded === "done" || recorded === "failed") {
+    if (OUTCOME_STATUSES.some((status) => status === recorded)) {
       this.log.info(`· ${item.key} is already ${recorded} — clearing what its interrupted apply left behind`);
       this.settle(item);
       return;
     }
-    this.record(item, read.outcome.status, read.outcome.summary);
+    this.record(item, read.outcome.status, read.outcome.summary, read.outcome.sessionId);
   }
 
   /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, then the
    *  tail. A crash part-way through is re-applied by the next boot rather than losing the
    *  outcome — losing one is silent, where the re-apply is caught by the guard above and
-   *  costs the issue nothing. */
-  private record(item: WorkItemRef, status: Outcome["status"], summary: string): void {
-    this.state.set(item.key, { status });
-    // Milestone 2 of exactly two (constraint 12).
-    this.log.milestone(`${status === "done" ? "✓" : "✗"} ${status} — ${summary}`, {
+   *  costs the issue nothing.
+   *
+   *  `sessionId` is carried into durable state because the outcome file is cleared in the
+   *  tail below: a gated item's handle would otherwise be gone before the human it is
+   *  waiting on has read the question. */
+  private record(item: WorkItemRef, status: Outcome["status"], summary: string, sessionId?: string): void {
+    this.state.set(item.key, { status, sessionId });
+    // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
+    // asks the human something, and rendering it as a failure tells them work broke when
+    // what actually happened is that they are being waited on.
+    this.log.milestone(`${MARK[status]} ${status} — ${summary}`, {
       repo: item.repo,
       target: item.issue,
     });

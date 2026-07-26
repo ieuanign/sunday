@@ -163,7 +163,7 @@ try {
     await rederived.reconciler.run();
 
     const live = harness();
-    live.assignor.handle({ event: "issues", action: "labeled", repo: "acme/finance", number: 57, labels });
+    live.assignor.handle({ event: "issues", action: "labeled", repo: "acme/finance", number: 57, labels, onPullRequest: false });
 
     ok("seam: an open issue carrying its triggers is claimed, exactly as a delivery for it would be", rederived.claimed.join(",") === live.claimed.join(",") && rederived.claimed.join(",") === "acme/finance#57", `${rederived.claimed.join(",")} vs ${live.claimed.join(",")}`);
     ok("seam: recorded in the same state", rederived.state.get("acme/finance#57")?.status === live.state.get("acme/finance#57")?.status, `${JSON.stringify(rederived.state.get("acme/finance#57"))} vs ${JSON.stringify(live.state.get("acme/finance#57"))}`);

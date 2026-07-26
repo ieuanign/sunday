@@ -6,11 +6,19 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { OutcomeStatus } from "#lib/outcome.mts";
 
-export type WorkItemStatus = "in-flight" | "done" | "failed" | "awaiting-human";
+/** Every way an outcome can finish, plus the one status only this file knows: `in-flight`
+ *  is a claim, not a result, so no outcome file ever carries it. Derived rather than
+ *  re-spelled — a status the outcome grows is a status a work item can be recorded as. */
+export type WorkItemStatus = OutcomeStatus | "in-flight";
 
 export interface WorkItemState {
   status: WorkItemStatus;
+  /** The agent session a gated item's answer RESUMES (#36). Kept here and not just in
+   *  the outcome file, because the outcome is cleared as it is applied and the human may
+   *  reply weeks later — this file is the only thing left that knows what to resume. */
+  sessionId?: string;
 }
 
 /** The whole file: one record per work-item key. */
