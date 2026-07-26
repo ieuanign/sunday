@@ -21,6 +21,15 @@ import { shA } from "#lib/sh.mts";
  *  (cwd-relative inside the sandbox). Ported from v1's `ensureSandboxIgnores`. */
 const PIPELINE_SCRATCH = ".scratch/";
 
+/** What a branch changed, as the PR footer states it (#37). Numbers rather than git's
+ *  own sentence: the footer renders `16 files, +1533/−49`, and the body composer is a
+ *  pure function that must not have to know git's output text. */
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
 /** What a run is allowed to do to a child checkout. */
 export interface Git {
   /** Keep the pipeline's own scratch out of this checkout's `git status`, idempotently.
@@ -40,6 +49,10 @@ export interface Git {
    *  not a crash. A `baseRef` that does not resolve still throws: a fetch that
    *  silently failed must not read as an empty branch. */
   aheadCount(childDir: string, baseRef: string, branch: string): Promise<number>;
+  /** What `branch` changes against `baseRef`, for the PR footer. Measured from where the
+   *  two diverged, so a base that moved while the run worked does not enter the count —
+   *  the footer states what the PR's own diff shows. */
+  diffStat(childDir: string, baseRef: string, branch: string): Promise<DiffStat>;
   /** Force-remove a worktree the agent library preserved because the run left it dirty.
    *  It holds the run's branch checked out, so it goes FIRST or the delete below
    *  cannot. */
@@ -73,6 +86,21 @@ export class GitCli implements Git {
   async aheadCount(childDir: string, baseRef: string, branch: string): Promise<number> {
     if (!(await this.branchExists(childDir, branch))) return 0;
     return Number(await shA("git", ["rev-list", "--count", `${baseRef}..${branch}`], childDir));
+  }
+
+  async diffStat(childDir: string, baseRef: string, branch: string): Promise<DiffStat> {
+    // Three dots: the diff from the merge base, which is what the PR shows. Two dots
+    // would fold every commit the base gained since the run started into the branch's
+    // own stat, as deletions it never made.
+    const line = await shA("git", ["diff", "--shortstat", `${baseRef}...${branch}`], childDir);
+    // `--shortstat` omits a clause entirely when its count is zero ("1 file changed, 2
+    // insertions(+)"), so an absent clause is a zero, not a parse failure.
+    const count = (clause: RegExp): number => Number(clause.exec(line)?.[1] ?? 0);
+    return {
+      files: count(/(\d+) files? changed/),
+      insertions: count(/(\d+) insertions?\(\+\)/),
+      deletions: count(/(\d+) deletions?\(-\)/),
+    };
   }
 
   async removeWorktree(childDir: string, worktreePath: string): Promise<void> {

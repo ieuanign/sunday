@@ -58,11 +58,26 @@ function remoteBranchExists(childDir: string, branch: string): boolean {
 // §4). Sandcastle extracts it from stdout by the `<sunday-result>` tag literal,
 // JSON-parses it, and validates it against this schema before returning.
 const SIGNAL_TAG = "sunday-result";
-const resultSchema = z.object({
-  signal: z.enum(["ready", "draft", "gate", "fail"]),
-  summary: z.string(),
-  question: z.string().optional(),
-});
+// V2 renames the prose field `summary` → `description` (#37) in that same shared
+// prompt, so v1 accepts EITHER: both names are optional in the shape and the
+// transform requires one of them, so a result in either dialect parses while one
+// carrying neither is still malformed (worth the run's automatic re-emit — an empty
+// PR body is not). Exported for test/smoke-v1-result.mts; retired with v1 at #45.
+export const resultSchema = z
+  .object({
+    signal: z.enum(["ready", "draft", "gate", "fail"]),
+    summary: z.string().optional(),
+    description: z.string().optional(),
+    question: z.string().optional(),
+  })
+  .transform(({ signal, summary, description, question }, ctx) => {
+    const prose = description ?? summary;
+    if (prose === undefined) {
+      ctx.addIssue({ code: "custom", message: "one of `description` or `summary` is required" });
+      return z.NEVER;
+    }
+    return { signal, description: prose, question };
+  });
 export type RunSignal = z.infer<typeof resultSchema>["signal"];
 
 // Appended to a resume prompt: the human reply carries no tag, but Output.object
@@ -70,7 +85,7 @@ export type RunSignal = z.infer<typeof resultSchema>["signal"];
 // to finish the same way.
 const RESUME_REMINDER =
   `\n\n---\n\nWhen you have addressed this, finish exactly as before: emit one ` +
-  `\`<${SIGNAL_TAG}>{ "signal": …, "summary": …, "question": … }</${SIGNAL_TAG}>\` result.`;
+  `\`<${SIGNAL_TAG}>{ "signal": …, "description": …, "question": … }</${SIGNAL_TAG}>\` result.`;
 
 // M5.2 handoff-at-threshold. At a gate resume, if the prior orchestrator context
 // (input + cacheRead + cacheCreation) is at/above this, don't resume the bloated
@@ -305,13 +320,13 @@ export async function runIssue(
     // M5.3: on completion, emit the cost-weighted per-phase token report (host-side,
     // free, never throws) from the captured session + its sub-agent files.
     if (last?.sessionFilePath && sessionId) emitReport(fullName, last.sessionFilePath, sessionId);
-    const { signal, summary, question } = result.output;
+    const { signal, description, question } = result.output;
 
     // Gate: no PR. Post the question (marked, so resume can skip our own comment)
     // and claim the issue for a human. The session + local branch live on for resume.
     if (signal === "gate") {
       gated = true;
-      const ask = question ?? summary;
+      const ask = question ?? description;
       sh("gh", ["issue", "comment", issue, "--body", sundayComment(ask)], childDir);
       sh("gh", ["issue", "edit", issue, "--add-label", "awaiting-human"], childDir);
       console.log(`⛔ ${fullName}#${issue}: gate — asked the human, awaiting-human.`);
@@ -362,7 +377,7 @@ export async function runIssue(
           ...(draft ? ["--draft"] : []),
           "--title", title,
           "--body",
-          `${signal === "fail" ? summary : `${summary}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
+          `${signal === "fail" ? description : `${description}\n\nCloses #${issue}.`}\n\n---\n${SUNDAY_SIGN} opened this PR.`,
         ],
         childDir,
       );

@@ -113,6 +113,9 @@ export class ClaudeAgent implements Agent {
         output: result.output as T,
         sessionId,
         usage: last?.usage ? usageOf(last.usage) : undefined,
+        // The RESOLVED model, not the request's: the fallback to `.env`'s `MODEL` happens
+        // here and nowhere else, so this is the only place that can say what actually ran.
+        model,
         commits: result.commits.map((c) => c.sha),
         preservedWorktreePath: result.preservedWorktreePath,
         durationMs: Date.now() - startedAt,

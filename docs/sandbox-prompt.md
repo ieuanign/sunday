@@ -41,7 +41,8 @@ the depth; this section sets only the sequence and who owns each phase.
    files involved, and the tests that will prove it). Do not over-reach the issue's scope.
 2. **Implement (test-first)** — the **code-writer**.
 3. **Review** — the **reviewer**: against the repo's standards and what the issue actually asked
-   for.
+   for. Relay its verdict and findings into your result's `review` field (§4) — what it fixed, and
+   what it accepted and why. A review that did not run says so; it is never reported as clean.
 4. **Debug (only on red)** — the **debugger**. Skip this phase entirely when everything is green.
 5. **Sign off** — the **sign-off** agent: a final conformance check that the plan is satisfied, tests
    are green, no scope crept in, and the repo's rules are honoured (a fresh sub-agent, not the plan's).
@@ -60,7 +61,17 @@ The host reads your outcome from **exactly one** `<sunday-result>` tag, which yo
 the very last thing you output**:
 
 ```
-<sunday-result>{ "signal": "ready" | "draft" | "gate" | "fail", "summary": "…", "question": "…" }</sunday-result>
+<sunday-result>{
+  "signal": "ready" | "draft" | "gate" | "fail",
+  "description": "…",
+  "question": "…",
+  "context": "…",
+  "typeOfChange": ["new feature" | "breaking change" | "bug fix" | "docs"],
+  "risk": "low" | "medium" | "high",
+  "verification": "…",
+  "relatedIssues": [12, 34],
+  "review": { "verdict": "APPROVED" | "CHANGES_REQUESTED" | "ERROR" | "NOT_RUN", "body": "…" }
+}</sunday-result>
 ```
 
 - **`signal`** — one of:
@@ -72,11 +83,37 @@ the very last thing you output**:
     your `question` to the issue, and waits. Your session is resumed with the human's reply.
   - **fail** — you could not reach green within the fix bounds (§7); commit WIP first. → host
     pushes and opens a **draft** PR labelled for a human to retry.
-- **`summary`** — plain English: what you did, how you verified it, any ADR tension or follow-up.
-  The host uses it **verbatim** as the PR body (ready/draft) or the failure diagnosis (fail). For a
+- **`description`** — plain English: what changed, and what a reviewer needs to know first — enough
+  to follow the change without opening the diff, in a few sentences. The host composes the PR body
+  from it and the fields below (ready/draft), or reads it as the failure diagnosis (fail). For a
   gate, one line of context.
 - **`question`** — **required when `signal` is `gate`**: the exact question the host posts to the
   issue for the human. Omit otherwise.
+
+The rest are the PR body's remaining sections and are all **optional** — a missing one is rendered
+as "not provided", so emit what you actually know and never invent the rest:
+
+- **`context`** — why the change took this shape: the reasoning, the alternatives you rejected, any
+  ADR tension. What the diff cannot show.
+- **`typeOfChange`** — any subset of exactly `"new feature"`, `"breaking change"`, `"bug fix"`,
+  `"docs"`. Other words are not accepted.
+- **`risk`** — exactly one of `"low"`, `"medium"`, `"high"`, so a reviewer can triage.
+- **`verification`** — what you actually ran and what it said (the commands, the suite, the manual
+  check) — not what you intended to run. Commands and results, not a narrative.
+- **`relatedIssues`** — issue **numbers** only, e.g. `[12, 34]`. The host renders the references.
+- **`review`** — your review phase's (§2 step 3) `verdict` plus a `body` of its findings: what it
+  fixed, and what it **accepted and why**, so a human can disagree with an accepted finding instead
+  of never learning it existed. The findings and their disposition — not a retelling of the review.
+  Omitting `review` is read as `NOT_RUN`; a review that did not run or that errored is **never**
+  reported as `APPROVED`.
+
+**Write these to be read fast.** A human reads every prose field above beside the diff: never
+restate the diff, never pad to look thorough, never invent. Prefer a missing field over filler —
+a missing one already renders as "not provided".
+
+**Never write a closing keyword.** The host writes `Closes #<issue>` itself on every PR it opens,
+and neutralises any `Closes #12` / `Fixes #9` / `Resolves #4` in your prose before rendering it —
+use `relatedIssues` to point at an issue you did not close.
 
 Emit valid JSON in a single `<sunday-result>…</sunday-result>` tag — write the tag literally, the
 host scans stdout for it. Do not push, comment, or label; the host does all of that from this
@@ -108,7 +145,7 @@ unresolvable conflict):
 If you cannot get to a green, signed-off state within the fix bounds:
 
 1. **Commit your work-in-progress.**
-2. **Emit `signal: "fail"`** (§4) with a **diagnosis** in `summary`: what you tried, where it
+2. **Emit `signal: "fail"`** (§4) with a **diagnosis** in `description`: what you tried, where it
    stands, what's blocking green. The host pushes the WIP, opens a **draft** PR with your diagnosis,
    and applies the `agent-failed` label. This is a deliberate handoff — a human retries by
    relabelling. Do not auto-resume.
