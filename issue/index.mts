@@ -7,12 +7,12 @@
 // GitHub and git — no docker, no network, no quota — which is the only way any of this is
 // checkable at all.
 
-import { SUNDAY_SIGN } from "#lib/markers.mts";
 import type { Outcome } from "#lib/outcome.mts";
-import type { Agent } from "#services/agent/index.mts";
-import type { Git } from "#services/git.mts";
+import type { Agent, AgentRunResult } from "#services/agent/index.mts";
+import type { DiffStat, Git } from "#services/git.mts";
 import type { GitHubRun } from "#services/github/index.mts";
 import type { LogContext, ModuleLogger } from "#services/logger.mts";
+import { composeBody } from "./body.mts";
 import { freshPrompt, RESULT_TAG, resultSchema, resumePrompt, type IssueResult } from "./prompt.mts";
 
 function describe(err: unknown): string {
@@ -140,7 +140,7 @@ export class IssueModule {
       }
       await this.git.push(input.childDir, branch);
       const draft = signal !== "ready";
-      const url = await this.openPr(input, branch, detail.title, description, draft);
+      const url = await this.openPr(input, branch, detail.title, result, ahead, draft);
       this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about);
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
       // human to read, not because the run succeeded. Classifying it (and the
@@ -193,22 +193,50 @@ export class IssueModule {
     input: IssueRunInput,
     branch: string,
     title: string,
-    description: string,
+    result: AgentRunResult<IssueResult>,
+    commits: number,
     draft: boolean,
   ): Promise<string> {
     const open = await this.github.openPrForHead(input.repo, branch);
+    // An adopted PR keeps the body it was opened with, so nothing below is worth
+    // measuring for it.
     if (open) return open;
+    const stat = await this.fileStat(input, branch);
     return await this.github.createPr({
       repo: input.repo,
       base: BASE,
       head: branch,
       title,
-      // The closing keyword is UNCONDITIONAL (AC7): v1 omitted it on a failed run, and
-      // every one of those PRs merged leaving its issue open and its dependents deferred
-      // forever.
-      body: `${description}\n\nCloses #${input.issue}.\n\n---\n${SUNDAY_SIGN} opened this PR.`,
+      // Composed, never concatenated here: the closing keyword, the defusing of the
+      // agent's prose and the not-provided sections are one pure function's invariants
+      // (`issue/body.mts`), and this class reads no file and resolves no path.
+      body: composeBody(result.output, {
+        issue: input.issue,
+        base: BASE,
+        // What GIT counted, not `result.commits`: on a gate resume the agent's own list
+        // names only the resuming session's commits.
+        commits,
+        durationMs: result.durationMs,
+        logPath: result.logPath,
+        // Only the agent adapter knows what it ran on — nothing out here may read
+        // `MODEL`, so an agent that cannot say leaves the footer saying so.
+        model: result.model,
+        stat,
+      }),
       draft,
     });
+  }
+
+  /** What the branch changed, for the footer — or nothing. BEST-EFFORT on purpose: this
+   *  runs after the push, so a `git` blip here would turn a pushed branch into a failed
+   *  work item (ADR-0001). The footer degrades that one fact instead, and says so. */
+  private async fileStat(input: IssueRunInput, branch: string): Promise<DiffStat | undefined> {
+    try {
+      return await this.git.diffStat(input.childDir, `origin/${BASE}`, branch);
+    } catch (err) {
+      this.log.info(`file stats unavailable — ${describe(err)}`, { repo: input.repo, target: input.issue });
+      return undefined;
+    }
   }
 
   /** One durable answer for the parent to apply. */

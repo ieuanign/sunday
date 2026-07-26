@@ -36,6 +36,11 @@ interface Scenario {
   readIssueError?: string;
   /** Commits on the run's branch that the base does not have. */
   ahead?: number;
+  /** SHAs the agent says IT committed — on a resume, only the resuming session's. */
+  agentCommits?: string[];
+  /** What the agent adapter resolved and how long the run took, for the footer. */
+  model?: string;
+  durationMs?: number;
   /** A PR already open for this head — the retry case. */
   openPr?: string;
   sessionId?: string;
@@ -43,6 +48,8 @@ interface Scenario {
   resume?: { sessionId: string; reply: string };
   /** Cleanup blows up (a `git` that threw with its own stderr). */
   cleanupError?: string;
+  /** The footer's file-stat read blows up — a `git` blip AFTER the push. */
+  diffStatError?: string;
 }
 
 /** A real IssueModule over the real Logger, with the three world-reaching services stood
@@ -74,9 +81,10 @@ function harness(s: Scenario = {}) {
       return {
         output: (s.result ?? { signal: "ready", description: "shipped it" }) as unknown as T,
         sessionId: s.sessionId,
-        commits: [],
+        commits: s.agentCommits ?? [],
         preservedWorktreePath: s.preservedWorktreePath,
-        durationMs: 1,
+        model: s.model,
+        durationMs: s.durationMs ?? 1,
         logPath: request.logPath,
       };
     },
@@ -110,6 +118,7 @@ function harness(s: Scenario = {}) {
   const deleted: string[] = [];
   const removedWorktrees: string[] = [];
   const counted: string[] = [];
+  const statted: string[] = [];
   const git: Git = {
     excludeScratch: async () => void trace.push("exclude"),
     fetchPrune: async () => void trace.push("fetch"),
@@ -121,8 +130,12 @@ function harness(s: Scenario = {}) {
       counted.push(`${baseRef}..${branch}`);
       return s.ahead ?? 1;
     },
-    // Nothing reads it yet — the footer that states it is #37's next commit.
-    diffStat: async () => ({ files: 2, insertions: 40, deletions: 5 }),
+    diffStat: async (_dir, baseRef, branch) => {
+      trace.push("diffStat");
+      statted.push(`${baseRef}...${branch}`);
+      if (s.diffStatError) throw new Error(s.diffStatError);
+      return { files: 2, insertions: 40, deletions: 5 };
+    },
     removeWorktree: async (_dir, path) => {
       trace.push("removeWorktree");
       removedWorktrees.push(path);
@@ -159,6 +172,7 @@ function harness(s: Scenario = {}) {
     deleted,
     removedWorktrees,
     counted,
+    statted,
   };
 }
 
@@ -180,6 +194,97 @@ function harness(s: Scenario = {}) {
   ok("ready: the PR bases on main, not on the resolved ref the agent started from", h.created[0]?.base === "main", h.created[0]?.base ?? "");
   ok("ready: the outcome is done and carries the PR url", outcome.status === "done" && outcome.summary.includes(PR_URL), JSON.stringify(outcome));
   ok("ready: the outcome is named back with the work-item key", outcome.key === "acme/finance#57", outcome.key);
+}
+
+// ── the body the PR ships is the COMPOSED one: every section the agent answered, and a
+//    footer of facts the agent was never asked for (#37) ──
+{
+  const h = harness({
+    result: {
+      signal: "ready",
+      description: "Composed the body in code.",
+      context: "A template file would drift from the sections.",
+      risk: "medium",
+      review: { verdict: "CHANGES_REQUESTED", body: "The defuser missed `GH-`." },
+    },
+    // What the agent says it committed is NOT what the footer counts: on a gate resume
+    // this list names only the resuming session's commits.
+    agentCommits: ["a1", "b2", "c3", "d4", "e5", "f6", "g7"],
+    ahead: 3,
+  });
+  await h.run();
+  const body = h.created[0]?.body ?? "";
+
+  ok(
+    "body: the run ships the composed sections, not one line of agent prose",
+    ["## Description", "## Related issue", "## Context", "## Type of change", "## Risk", "## Verification", "## Review findings"].every((h2) => body.includes(h2)),
+    body,
+  );
+  ok("body: the whole result reaches the composer, not just the description", body.includes("CHANGES_REQUESTED") && body.includes("The defuser missed") && body.includes("medium"), body);
+  ok(
+    "footer: the commit count is the one git measured, never the agent's own list",
+    body.includes("3 commits") && !body.includes("7 commits"),
+    body,
+  );
+}
+
+// ── the file stats are read from git, AFTER the push, and are best-effort: a `git` blip
+//    there must degrade the footer, never turn a shipped PR into a failed work item
+//    (ADR-0001 — the child leaves exactly one honest outcome) ──
+{
+  const h = harness();
+  await h.run();
+
+  ok(
+    "stat: measured from where the branch diverged from the freshly-fetched base",
+    h.statted.length === 1 && h.statted[0] === "origin/main...feat/57",
+    h.statted.join(", "),
+  );
+  ok(
+    "stat: read AFTER the push — the branch it describes is the one the PR shows",
+    h.trace.indexOf("push") < h.trace.indexOf("diffStat"),
+    h.trace.join(" → "),
+  );
+  ok("stat: and its numbers are what the footer states", h.created[0]?.body.includes("2 files, +40/−5") === true, h.created[0]?.body ?? "");
+}
+{
+  const h = harness({ diffStatError: "fatal: bad revision 'origin/main...feat/57'" });
+  const outcome = await h.run();
+
+  ok("stat: a read that throws still opens the PR", h.created.length === 1, String(h.created.length));
+  ok("stat: and still leaves a done work item", outcome.status === "done", JSON.stringify(outcome));
+  ok("stat: the footer degrades that one fact rather than fabricating a zero", h.created[0]?.body.includes("file stats unavailable") === true, h.created[0]?.body ?? "");
+  ok(
+    "stat: and the blip is not silent",
+    h.lines.some((l) => l.message.includes("bad revision")),
+    h.lines.map((l) => l.message).join(" | "),
+  );
+}
+{
+  const h = harness({ openPr: "https://github.com/acme/finance/pull/12" });
+  await h.run();
+  ok("stat: an adopted PR keeps the body it was opened with, so nothing is measured for it", h.statted.length === 0, h.statted.join(", "));
+}
+
+// ── the footer states the facts THIS run was handed, not defaults ──
+{
+  const h = harness({ model: "claude-opus-4-6", durationMs: 7 * 60_000 + 9_000 });
+  await h.run();
+  const body = h.created[0]?.body ?? "";
+
+  ok("footer: the model the agent adapter resolved", body.includes("claude-opus-4-6"), body);
+  ok("footer: the duration the run took", body.includes("7m 09s"), body);
+  ok("footer: this run's own log path, verbatim", body.includes("/var/log/acme/finance/57/run.log"), body);
+  ok("footer: the base the PR targets", body.includes("base `main`"), body);
+}
+{
+  const h = harness();
+  await h.run();
+  ok(
+    "footer: an agent that reports no model degrades that one fact, and ships anyway",
+    h.created[0]?.body.includes("model unknown") === true,
+    h.created[0]?.body ?? "",
+  );
 }
 
 // ── draft and fail ship too — as a DRAFT, and still closing the issue ──
