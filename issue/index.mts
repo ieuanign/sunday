@@ -83,6 +83,12 @@ export class IssueModule {
     /** A gate keeps its branch and its worktree: they are the only copy of the commits it
      *  made, and the resume continues from them. */
     let gated = false;
+    /** The commit THIS run created its branch at, once it has one. Undefined on a resume
+     *  all the way through: the branch already exists, so the agent library ignores the
+     *  start point it is handed and this run forks from nothing — reporting a re-resolved
+     *  base there would overwrite the real fork point with wherever the base has moved to
+     *  (ADR-0003). */
+    let forkPoint: string | undefined;
 
     try {
       // Read on every run, fresh or resumed: the PR a resume finally opens is titled from
@@ -100,6 +106,13 @@ export class IssueModule {
       await this.git.excludeScratch(input.childDir);
       // The base as the origin has it NOW — the agent branches off the freshly-fetched ref.
       await this.git.fetchPrune(input.childDir);
+      // …resolved to the COMMIT it names, after the fetch and before the agent: the
+      // library creates the branch at exactly this, so handing over the SHA makes the
+      // fork point recorded below true by construction rather than by argument. A base
+      // that no longer resolves (a blocker merged and its branch deleted since admission)
+      // throws here, which is one failed work item — not an agent started from nowhere.
+      const startPoint = await this.git.resolveRef(input.childDir, `origin/${input.base}`);
+      if (!input.resume) forkPoint = startPoint;
 
       const result = await this.agent.run<IssueResult>({
         key: input.key,
@@ -110,7 +123,7 @@ export class IssueModule {
         branch,
         // RESOLVED, never a bare branch name: handed one, the library prefers a stale
         // local branch over the origin's (#33's contract).
-        startPoint: `origin/${input.base}`,
+        startPoint,
         logPath: input.logPath,
         output: { tag: RESULT_TAG, schema: resultSchema },
         ...(input.resume ? { resumeSession: input.resume.sessionId } : {}),
@@ -126,7 +139,13 @@ export class IssueModule {
         // the one comment this work item gets, and it reaches the human even if the parent
         // dies before it can. The handle travels with it or the answer starts over from
         // nothing — the child holding the session is gone by the time anyone reads this.
-        return this.outcome(input.key, "awaiting-human", question ?? description, result.sessionId);
+        return this.outcome({
+          key: input.key,
+          status: "awaiting-human",
+          summary: question ?? description,
+          sessionId: result.sessionId,
+          forkPoint,
+        });
       }
 
       // Asked of git rather than taken from the agent's own commit list: on a resume the
@@ -136,7 +155,12 @@ export class IssueModule {
         // An honest nothing-to-ship, not a crash — and not a success either: whatever the
         // agent signalled, no work reached the origin.
         this.log.info(`${signal} — no commits ahead of ${input.base}, nothing to ship`, about);
-        return this.outcome(input.key, "failed", `${description}\n\nsignal ${signal}, but no commits — nothing to ship.`);
+        return this.outcome({
+          key: input.key,
+          status: "failed",
+          summary: `${description}\n\nsignal ${signal}, but no commits — nothing to ship.`,
+          forkPoint,
+        });
       }
       await this.git.push(input.childDir, branch);
       const draft = signal !== "ready";
@@ -145,11 +169,12 @@ export class IssueModule {
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
       // human to read, not because the run succeeded. Classifying it (and the
       // `agent-failed` label) is #39's.
-      return this.outcome(
-        input.key,
-        signal === "fail" ? "failed" : "done",
-        `${description}\n\n${draft ? "draft " : ""}PR: ${url}`,
-      );
+      return this.outcome({
+        key: input.key,
+        status: signal === "fail" ? "failed" : "done",
+        summary: `${description}\n\n${draft ? "draft " : ""}PR: ${url}`,
+        forkPoint,
+      });
     } catch (err) {
       // NOTHING escapes this method. The child's whole job is to leave exactly one durable
       // outcome behind (ADR-0001) — a throw here leaves the parent an exit code, and the
@@ -157,7 +182,7 @@ export class IssueModule {
       // The message is the agent's or the tool's own, because #39 classifies on that text.
       const failure = describe(err);
       this.log.info(`failed — ${failure}`, about);
-      return this.outcome(input.key, "failed", failure);
+      return this.outcome({ key: input.key, status: "failed", summary: failure, forkPoint });
     } finally {
       if (!gated) await this.cleanup(input, branch, preserved, about);
     }
@@ -239,8 +264,11 @@ export class IssueModule {
     }
   }
 
-  /** One durable answer for the parent to apply. */
-  private outcome(key: string, status: Outcome["status"], summary: string, sessionId?: string): Outcome {
-    return { key, status, summary, finishedAt: new Date().toISOString(), ...(sessionId ? { sessionId } : {}) };
+  /** One durable answer for the parent to apply. Takes the outcome's own shape rather
+   *  than a positional list: what a run reports back grows (a session handle, a fork
+   *  point, #39's classification), and a list of optionals makes every call site spell
+   *  `undefined` for the ones it has nothing to say about. */
+  private outcome(fields: Omit<Outcome, "finishedAt">): Outcome {
+    return { ...fields, finishedAt: new Date().toISOString() };
   }
 }

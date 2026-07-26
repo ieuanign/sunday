@@ -152,6 +152,8 @@ function harness(reads: Partial<GitHub> = {}) {
 const KEY = "acme/finance#57";
 const QUESTION = "Which of the two auth flows should this use?";
 const SESSION = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
+/** The commit a child says it created its branch at (#42). */
+const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
 
 /** Take the item all the way to a gate — forked, gated, its claim back off. That is the
  *  state a human's reply arrives into, and it is reached through the real path so no case
@@ -534,6 +536,54 @@ try {
       "milestone: exactly two per work item — started and finished. A third is thread spam",
       h.comments.length === 2,
       JSON.stringify(h.comments.map((l) => l.message)),
+    );
+  }
+
+  // ── the fork point (#42): the commit the child created its branch at, reported on the
+  //    outcome and kept in durable state. It is what #43 rebases a dependent's own
+  //    commits off, and it has to survive everything that happens between the two —
+  //    including a gate that is answered weeks and one restart later (ADR-0003) ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(KEY, {
+      key: KEY,
+      status: "awaiting-human",
+      summary: QUESTION,
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      sessionId: SESSION,
+      forkPoint: FORK_POINT,
+    });
+
+    ok("fork point: what the child reported is what the parent records", h.state.get(KEY)?.forkPoint === FORK_POINT, JSON.stringify(h.state.get(KEY)));
+
+    h.assignor.handle(reply("Use the OAuth flow — the SAML one is being retired."));
+    await tick();
+    ok(
+      "fork point: a resume keeps it — the whole record is replaced, and the branch being resumed is still the one that forked there",
+      h.state.get(KEY)?.forkPoint === FORK_POINT,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    // A resumed child that dies leaves no outcome AT ALL, and a resume forks from
+    // nothing — so there is no second fork point to record and the first one stands.
+    await h.finish(KEY, undefined, { code: 1, signal: null });
+    ok(
+      "fork point: a resumed child that leaves no outcome does not erase it",
+      h.state.get(KEY)?.status === "failed" && h.state.get(KEY)?.forkPoint === FORK_POINT,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    // …but a FRESH run is a new branch, created wherever the base is now. Yesterday's
+    // fork point is not where, and a restack aimed at it would replay commits that are
+    // already in this branch's ancestry.
+    h.assignor.handle(delivery());
+    await tick();
+    ok(
+      "fork point: a fresh re-admission clears it — the run that starts now has not created its branch yet",
+      h.state.get(KEY)?.status === "in-flight" && h.state.get(KEY)?.forkPoint === undefined,
+      JSON.stringify(h.state.get(KEY)),
     );
   }
 

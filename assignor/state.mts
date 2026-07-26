@@ -24,6 +24,12 @@ export interface WorkItemState {
    *  PR the gate never did, and it has to target the base the item started from. Absent
    *  on every item admitted before this existed, which reads as `main`. */
   base?: string;
+  /** The commit this item's branch was CREATED FROM, as the run that created it reported
+   *  (#42). What #43 rebases the item's own commits off — anchored in the item's own
+   *  ancestry, so it survives the blocker's branch being deleted on merge or force-pushed
+   *  (ADR-0003), neither of which the blocker's final tip does. Absent until a run has
+   *  actually created the branch. */
+  forkPoint?: string;
 }
 
 /** The whole file: one record per work-item key. */

@@ -419,10 +419,11 @@ export class Assignor {
     // was stacked (#42 constraint 8). Absent for an item admitted before this existed.
     const base = prior.base ?? "main";
     this.github.claim(repo, number);
-    // The whole record is replaced, so the handle and the base are written back
-    // deliberately (constraint 12): dropped here, a run that dies mid-resume leaves a
-    // gated item with nothing left to resume from and no base to resume onto.
-    this.state.set(key, { status: "in-flight", sessionId: session, base });
+    // The whole record is replaced, so the handle, the base and the fork point are all
+    // written back deliberately (constraint 12): dropped here, a run that dies mid-resume
+    // leaves a gated item with nothing left to resume from, no base to resume onto, and
+    // no commit for #43 to restack its branch off.
+    this.state.set(key, { status: "in-flight", sessionId: session, base, forkPoint: prior.forkPoint });
     const item: WorkItemRef = { key, repo, issue: number };
     this.scheduler.enqueue({
       key,
@@ -504,7 +505,7 @@ export class Assignor {
     if (read.state === "unreadable") {
       // Parseable is not usable. Recording it failed and clearing it is the only way the
       // item does not sit in-flight with its claim on it forever.
-      this.record(item, "failed", `unreadable outcome — ${read.detail}`);
+      this.record(item, { status: "failed", summary: `unreadable outcome — ${read.detail}` });
       return;
     }
     if (read.state === "absent") {
@@ -517,7 +518,7 @@ export class Assignor {
       }
       // Constraint 6: a child that dies is an exit code, not a dead pipeline. Recorded
       // failed carrying it, never left in-flight; classifying it is #39's job.
-      this.record(item, "failed", describeChildFailure(exit));
+      this.record(item, { status: "failed", summary: describeChildFailure(exit) });
       return;
     }
     // A file still on disk for an item ALREADY recorded terminal is a `record()` that was
@@ -539,7 +540,9 @@ export class Assignor {
       this.settle(item);
       return;
     }
-    this.record(item, read.outcome.status, read.outcome.summary, read.outcome.sessionId);
+    // The outcome ITSELF, not four fields off it: what the child reported is what the
+    // parent records, and a field the child grows must not need a fifth argument here.
+    this.record(item, read.outcome);
   }
 
   /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, then the
@@ -550,15 +553,24 @@ export class Assignor {
    *  `sessionId` is carried into durable state because the outcome file is cleared in the
    *  tail below: a gated item's handle would otherwise be gone before the human it is
    *  waiting on has read the question. */
-  private record(item: WorkItemRef, status: Outcome["status"], summary: string, sessionId?: string): void {
+  private record(item: WorkItemRef, outcome: Omit<Outcome, "key" | "finishedAt">): void {
+    const prior = this.state.get(item.key);
     // The base is carried forward rather than re-derived: the whole record is replaced,
     // and a gated item that loses it resumes onto `main` — which would open a stacked
     // item's PR against the wrong branch, carrying its blocker's commits as its own.
-    this.state.set(item.key, { status, sessionId, base: this.state.get(item.key)?.base });
+    // The fork point is carried the same way, and falls back one step further: a resumed
+    // run creates no branch, so it reports none — and a resumed child that DIES reports
+    // nothing at all. Either would otherwise erase the commit #43 restacks against.
+    this.state.set(item.key, {
+      status: outcome.status,
+      sessionId: outcome.sessionId,
+      base: prior?.base,
+      forkPoint: outcome.forkPoint ?? prior?.forkPoint,
+    });
     // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
     // asks the human something, and rendering it as a failure tells them work broke when
     // what actually happened is that they are being waited on.
-    this.log.milestone(`${MARK[status]} ${status} — ${summary}`, {
+    this.log.milestone(`${MARK[outcome.status]} ${outcome.status} — ${outcome.summary}`, {
       repo: item.repo,
       target: item.issue,
     });

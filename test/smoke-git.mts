@@ -133,6 +133,32 @@ function hasRef(fx: { git(dir: string, ...args: string[]): string }, dir: string
   ok("push: the run's own commits reach the origin under their branch", fx.git(fx.origin, "rev-parse", "feat/10") === head);
 }
 
+// ── resolveRef: the commit a run's branch is actually created FROM (#42) ─────
+{
+  const fx = makeFixture("git-resolve");
+  fx.commit("shared.txt", "base\n", "C0 base");
+  fx.push("main");
+  fx.checkout("feat/9", "main");
+  const blockerTip = fx.commit("b.txt", "from the blocker\n", "B1");
+  fx.push("feat/9");
+  const child = fx.cloneChild();
+
+  ok(
+    "resolve: a remote ref answers with the commit it points at — the fork point ADR-0003 anchors on",
+    (await git.resolveRef(child, "origin/feat/9")) === blockerTip,
+    `${await git.resolveRef(child, "origin/feat/9")} !== ${blockerTip}`,
+  );
+
+  // A blocker's branch deleted on merge between admission and the run. Resolved to
+  // nothing, the agent would be handed a start point that is not a commit — so this
+  // fails the run loudly instead (ADR-0003).
+  fx.deleteOnOrigin("feat/9");
+  await git.fetchPrune(child);
+  let thrown: unknown;
+  await git.resolveRef(child, "origin/feat/9").catch((err: unknown) => void (thrown = err));
+  ok("resolve: a ref that no longer resolves throws rather than answering with nothing", thrown !== undefined, String(await git.resolveRef(child, "origin/feat/9").catch(() => "threw")));
+}
+
 // ── cleanup: the preserved worktree, then the local branch ───────────────────
 {
   const fx = makeFixture("git-cleanup");
