@@ -44,17 +44,43 @@ const alive = (child: ChildProcess): boolean => {
   }
 };
 
-/** One spawned forwarder as the smoke sees it. */
+/** Is the timestamp this line carries really when the thing happened? Parsed out of the
+ *  message and bounded by the case's own clock, so a stale or invented one fails. */
+function between(message: string | undefined, from: number): boolean {
+  const iso = message?.match(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/)?.[0];
+  const at = iso === undefined ? NaN : Date.parse(iso);
+  return at >= from && at <= Date.now();
+}
+
+/** One spawned forwarder as the smoke sees it. `stderr` is what THIS child really wrote:
+ *  the supervisor attaches its own `data` listener and both receive every chunk, which is
+ *  what lets a case wait until the stderr it asserts on has actually been delivered. */
 interface Spawned {
   repo: string;
   url: string;
   child: ChildProcess;
+  stderr: string;
 }
 
-/** The real supervisor, with the two things it must not reach in a smoke substituted: the
- *  `gh` hook drop (recorded, and made to throw where a case needs it) and the child it
- *  spawns — a real node process that stays alive until it is killed. */
-function harness(repos: string[], opts: { dropThrows?: string; retryMs?: number; holdDrop?: boolean } = {}) {
+/** What a spawned child runs when a case does not say otherwise: stay alive until
+ *  something kills it, which is what makes "respawned" and "stopped" observable. */
+const STAY_ALIVE = "setInterval(() => {}, 1000)";
+
+interface Opts {
+  dropThrows?: string;
+  retryMs?: number;
+  settleMs?: number;
+  holdDrop?: boolean;
+  reconcileThrows?: string;
+  /** The `-e` source the nth spawned child runs — how a case makes a forwarder say
+   *  something on its way out, or die the moment it is respawned. */
+  script?: (n: number) => string;
+}
+
+/** The real supervisor, with the three things it must not reach in a smoke substituted:
+ *  the `gh` hook drop (recorded, and made to throw where a case needs it), the catch-up
+ *  re-derive (recorded) and the child it spawns — a real node process. */
+function harness(repos: string[], opts: Opts = {}) {
   const lines: LogLine[] = [];
   /** What would land on an issue thread as a comment. A relay drop is pipeline-scope and
    *  must reach nobody's issue (constraint 10), so this stays empty. */
@@ -85,6 +111,11 @@ function harness(repos: string[], opts: { dropThrows?: string; retryMs?: number;
     },
   };
 
+  /** Every catch-up re-derive asked for, in order — a blackout is per repo, and sweeping
+   *  the whole table to catch one up spends every other repo's rate limit on a gap they
+   *  never had. */
+  const reconciled: string[] = [];
+
   const spawned: Spawned[] = [];
   const forwarders = new Forwarders({
     repos,
@@ -92,18 +123,29 @@ function harness(repos: string[], opts: { dropThrows?: string; retryMs?: number;
     github,
     log: new Logger(dests).child("forwarder"),
     retryMs: opts.retryMs ?? 20,
+    settleMs: opts.settleMs ?? 40,
+    reconcile: async (repo) => {
+      reconciled.push(repo);
+      if (opts.reconcileThrows) throw new Error(opts.reconcileThrows);
+    },
     spawn: (repo, url) => {
       // A real child that outlives the call and dies only when it is killed or when the
-      // case kills it — which is what makes "respawned" and "stopped" observable.
-      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+      // case's own script ends it. stderr is PIPED because the drop alert carries the
+      // child's last words — the diagnostic bash could never give.
+      const source = (opts.script ?? (() => STAY_ALIVE))(spawned.length);
+      const child = spawn(process.execPath, ["-e", source], { stdio: ["ignore", "ignore", "pipe"] });
       started.push(child);
-      spawned.push({ repo, url, child });
+      const seen: Spawned = { repo, url, child, stderr: "" };
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => (seen.stderr += chunk));
+      spawned.push(seen);
       return child;
     },
   });
 
   const forOf = (repo: string) => spawned.filter((s) => s.repo === repo);
-  return { forwarders, lines, comments, dropped, spawned, forOf, release: () => release() };
+  const alerts = () => lines.filter((l) => l.level === "alert");
+  return { forwarders, lines, comments, dropped, reconciled, spawned, forOf, alerts, release: () => release() };
 }
 
 // ── one forwarder per routed repo, each preceded by its own stranded-hook drop. `gh`
@@ -161,6 +203,105 @@ function harness(repos: string[], opts: { dropThrows?: string; retryMs?: number;
   h.forwarders.stop();
 }
 
+// ── a drop OPENS A BLACKOUT and says so once, on the phone, with what the child said on
+//    its way out. This is the whole issue: on 2026-07-24 a forwarder dropped and the gap
+//    ran 8h44m with a healthy listener and nobody told ──
+{
+  const h = harness(["acme/finance", "acme/drive"], {
+    script: () => `process.stderr.write("websocket: close 1006 (abnormal closure)"); ${STAY_ALIVE}`,
+  });
+  await h.forwarders.start();
+  const drive = h.forOf("acme/drive")[0]!;
+  // Wait until the child has REALLY spoken, so what the alert carries is a delivered
+  // chunk rather than a race the assertion happens to win.
+  await until(() => drive.stderr.includes("1006"));
+  const before = Date.now();
+
+  drive.child.kill("SIGKILL");
+  await until(() => h.alerts().length > 0);
+
+  const alert = h.alerts()[0];
+  ok("blackout: a drop is exactly one alert — the phone line the retired bash launcher could not send", h.alerts().length === 1, JSON.stringify(h.alerts().map((l) => l.message)));
+  ok("blackout: it names the repo that lost its forwarder, and only that one", alert?.message.includes("acme/drive") === true && alert.context.repo === "acme/drive" && !alert.message.includes("acme/finance"), `${alert?.message} ${JSON.stringify(alert?.context)}`);
+  ok("blackout: it carries the child's stderr — the diagnostic an `echo` could never give", alert?.message.includes("close 1006") === true, alert?.message);
+  ok("blackout: and when the gap started, so the recovery line can measure it", between(alert?.message, before), alert?.message);
+  ok("blackout: pipeline-scope — it carries no target and reaches no issue thread", alert?.context.target === undefined && h.comments.length === 0, `${JSON.stringify(alert?.context)} ${h.comments.length}`);
+  ok("blackout: and nothing is re-derived yet — the relay is still down", h.reconciled.length === 0, h.reconciled.join(","));
+
+  h.forwarders.stop();
+}
+
+// ── a forwarder that comes back and STAYS back closes the blackout: one alert carrying
+//    the measured window, then that repo's missed work re-derived. v1 re-derived only on
+//    boot, which is why a forwarder-only blackout was never caught up at all ──
+{
+  const h = harness(["acme/finance", "acme/drive"], { retryMs: 20, settleMs: 60 });
+  await h.forwarders.start();
+  const t0 = Date.now();
+
+  h.forOf("acme/drive")[0]!.child.kill("SIGKILL");
+  await until(() => h.alerts().length === 2);
+  const recovery = h.alerts()[1];
+  const measured = Number(recovery?.message.match(/for (\d+)ms/)?.[1]);
+
+  ok("recovery: one alert, and only one — the blackout is opened once and closed once", h.alerts().length === 2, JSON.stringify(h.alerts().map((l) => l.message)));
+  ok("recovery: it names the repo, against its own repo context", recovery?.message.includes("acme/drive") === true && recovery.context.repo === "acme/drive" && recovery.context.target === undefined, `${recovery?.message} ${JSON.stringify(recovery?.context)}`);
+  ok("recovery: it says when the gap started — the drop line's timestamp, carried through", between(recovery?.message, t0), recovery?.message);
+  ok("recovery: and how long it lasted, measured rather than assumed", measured >= 60 && measured <= Date.now() - t0, `${recovery?.message} vs ${Date.now() - t0}ms elapsed`);
+  ok("recovery: the window is only called closed once the respawn has SURVIVED it", h.forOf("acme/drive").length === 2 && alive(h.forOf("acme/drive")[1]!.child), h.forOf("acme/drive").map((s) => `${s.child.pid}:${alive(s.child)}`).join(","));
+
+  ok("recovery: that repo's missed work is re-derived", await until(() => h.reconciled.length > 0), h.reconciled.join(","));
+  ok("recovery: exactly once, and for that repo ALONE — the others had no gap to catch up", h.reconciled.join(",") === "acme/drive", h.reconciled.join(","));
+
+  h.forwarders.stop();
+}
+
+// ── a forwarder that keeps dying leaves the blackout OPEN: no second alert, no re-derive.
+//    Otherwise a crash loop is a phone message and a full repo re-derive every few
+//    seconds, against real GitHub reads (constraint 6) ──
+{
+  const h = harness(["acme/finance"], {
+    retryMs: 20,
+    // Long enough that nothing in this case can settle: every respawn dies first.
+    settleMs: 5_000,
+    script: (n) => (n === 0 ? STAY_ALIVE : "process.exit(1)"),
+  });
+  await h.forwarders.start();
+
+  h.forOf("acme/finance")[0]!.child.kill("SIGKILL");
+  await until(() => h.spawned.length >= 4);
+  const waits = h.lines.flatMap((l) => l.message.match(/respawning in (\d+)ms/)?.[1] ?? []);
+
+  ok("crash loop: still exactly one alert — the blackout is already open and stays open", h.alerts().length === 1, JSON.stringify(h.alerts().map((l) => l.message)));
+  ok("crash loop: and nothing is re-derived — a catch-up per crash is a storm on real GitHub quota", h.reconciled.length === 0, h.reconciled.join(","));
+  ok("crash loop: the further deaths are still recorded, just not on the phone", h.lines.filter((l) => l.level === "info" && l.message.includes("down again")).length >= 2, JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
+  ok("crash loop: and the wait grows, so a forwarder that never comes back cannot spend the gh rate limit on retries", waits.slice(0, 3).join(",") === "20,40,80", waits.join(","));
+
+  h.forwarders.stop();
+}
+
+// ── the catch-up reaches GitHub, so it fails: it is recorded and survived. Nothing may
+//    throw out of the settle timer — there is no caller above it, and an unhandled
+//    rejection kills the parent under `restart: always`, which is the crash loop ADR-0001
+//    exists to stop (constraint 3) ──
+{
+  const h = harness(["acme/finance"], { retryMs: 20, settleMs: 60, reconcileThrows: "HTTP 502: Bad gateway" });
+  await h.forwarders.start();
+
+  h.forOf("acme/finance")[0]!.child.kill("SIGKILL");
+  ok("catch-up failure: it was attempted", await until(() => h.reconciled.length === 1), h.reconciled.join(","));
+  ok("catch-up failure: and recorded with its reason, at error", await until(() => h.lines.some((l) => l.level === "error" && l.message.includes("502") && l.context.repo === "acme/finance")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
+
+  // The supervisor is still a supervisor: this smoke reaching here at all is the other
+  // half of the assertion, since an unhandled rejection would have ended the process.
+  h.forOf("acme/finance")[1]!.child.kill("SIGKILL");
+  ok("after recovery: a later drop is still supervised — one failed catch-up is not the end of the relay", await until(() => h.spawned.length === 3), h.spawned.map((s) => s.child.pid).join(","));
+  ok("after recovery: and it is a NEW blackout, so it is worth the phone again", h.alerts().filter((l) => l.message.includes("DOWN")).length === 2, JSON.stringify(h.alerts().map((l) => l.message)));
+  ok("after recovery: from the base wait — a forwarder that recovered is not still failing", h.lines.flatMap((l) => l.message.match(/respawning in (\d+)ms/)?.[1] ?? []).join(",") === "20,20", JSON.stringify(h.lines.map((l) => l.message)));
+
+  h.forwarders.stop();
+}
+
 // ── stop: every child is signalled, and a stop is not a drop. `gh` removes its own dev
 //    webhook on a clean exit, so a child left behind strands one and every later start
 //    dies on `HTTP 422 … Hook already exists` (constraint 11) ──
@@ -174,6 +315,7 @@ function harness(repos: string[], opts: { dropThrows?: string; retryMs?: number;
   ok("stop: every child is signalled, so gh takes its own webhook down with it", await until(() => children.every((c) => !alive(c))), children.map((c) => `${c.pid}:${alive(c)}`).join(","));
   await new Promise((r) => setTimeout(r, 100)); // several retry windows at retryMs 20
   ok("stop: and nothing comes back — a stop is a stop, not a drop", h.spawned.length === 2, h.spawned.map((s) => s.repo).join(","));
+  ok("stop: and nobody is paged — a deploy must not read as a blackout", h.alerts().length === 0, JSON.stringify(h.alerts().map((l) => l.message)));
 }
 
 // ── a respawn already on the clock is cancelled too: a parent shutting down must not
