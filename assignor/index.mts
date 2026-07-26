@@ -292,13 +292,25 @@ export class Assignor {
       this.record(item, "failed", describeChildFailure(exit));
       return;
     }
+    // A file still on disk for an item ALREADY recorded terminal is a `record()` that was
+    // killed part-way through (ADR-0001: at any instant), between the milestone and the
+    // clear. The issue carries both of its comments already, so recording it again is a
+    // third (constraint 12) — and #35's boot sweep finds exactly this file and applies it.
+    // Leaving it alone is no answer either: the claim, the lock and the file are all still
+    // there, so the item would stay taken forever. Finish the tail, say nothing.
+    const recorded = this.state.get(item.key)?.status;
+    if (recorded === "done" || recorded === "failed") {
+      this.log.info(`· ${item.key} is already ${recorded} — clearing what its interrupted apply left behind`);
+      this.settle(item);
+      return;
+    }
     this.record(item, read.outcome.status, read.outcome.summary);
   }
 
-  /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, the
-   *  result file, the lock, then the claim. A crash part-way through re-applies on the
-   *  next boot rather than losing the outcome — a repeated comment is a visible harmless
-   *  failure, a lost one is silent. */
+  /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, then the
+   *  tail. A crash part-way through is re-applied by the next boot rather than losing the
+   *  outcome — losing one is silent, where the re-apply is caught by the guard above and
+   *  costs the issue nothing. */
   private record(item: WorkItemRef, status: Outcome["status"], summary: string): void {
     this.state.set(item.key, { status });
     // Milestone 2 of exactly two (constraint 12).
@@ -306,10 +318,17 @@ export class Assignor {
       repo: item.repo,
       target: item.issue,
     });
+    this.settle(item);
+  }
+
+  /** The tail of an apply: the result file, the lock, then the claim. Its own method
+   *  because an interrupted record is finished by exactly this and nothing else — the
+   *  state and the comment are already done, and only these three are outstanding.
+   *  The claim is last because it is the most durable of the three: while it is on, a
+   *  delivery arriving in the middle of all this reads the issue as taken. */
+  private settle(item: WorkItemRef): void {
     clearOutcome(this.paths.resultPath(item.key));
     releaseLock(this.paths.pidPath(item.key));
-    // Last, because it is the most durable of the four: while the claim is on, a delivery
-    // arriving in the middle of all this reads the issue as taken.
     this.github.release(item.repo, item.issue);
   }
 }

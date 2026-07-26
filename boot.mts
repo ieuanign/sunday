@@ -96,6 +96,10 @@ export class Boot {
   private readonly parentRoot: string;
   private readonly paths: BootPaths;
   private readonly log: ModuleLogger;
+  /** Has the sequence finished? Read by the re-scheduled auto-resume, which is the one
+   *  thing in this file that fires on a clock rather than in sequence order — and the
+   *  queue is not its to release while the sequence is still running. */
+  private finished = false;
 
   constructor(deps: BootDeps) {
     this.repos = deps.repos;
@@ -121,6 +125,7 @@ export class Boot {
     // and re-derived in that state it reads as work in progress and is left alone — which
     // is the loss this whole sequence exists to prevent.
     await this.step("reconcile", () => this.reconcile());
+    this.finished = true;
     this.lift();
   }
 
@@ -152,14 +157,24 @@ export class Boot {
 
   /** Re-schedule what is LEFT of an open pause window. Clearing the file is half of the
    *  resume: a pause left on disk is re-applied by the next boot, whose window has by
-   *  then closed. */
+   *  then closed.
+   *
+   *  What is LEFT of the window can be shorter than the sequence — a restart minutes
+   *  before a quota reset is an ordinary one — and the scheduler has a SINGLE pause flag,
+   *  which for the length of the sequence is also boot's own hold. So this fires the
+   *  durable half only: it disarms the pause and leaves releasing the queue to `lift`,
+   *  which happens once, at the end, and re-reads the file. Resuming from here mid-
+   *  sequence would un-hold the queue while the images are still building and the sweep
+   *  is still settling locks — the exact race the hold exists to close. */
   private scheduleResume(resumeAt: number, reason: string): void {
     const delay = Math.max(0, resumeAt - Date.now());
     this.log.info(`⟲ pause re-armed (${reason}) until ${new Date(resumeAt).toISOString()}`);
     setTimeout(() => {
       this.pause.clear();
-      this.scheduler.resume();
-      this.log.info(`▶ pause window closed (${reason}) — resuming`);
+      this.log.info(`▶ pause window closed (${reason})`);
+      // Fired after the sequence: nothing else will lift now, so this one does — through
+      // `lift`, which re-reads the file, so a pause armed since (a fresh 403) still wins.
+      if (this.finished) this.lift();
     }, delay);
   }
 

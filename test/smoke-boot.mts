@@ -273,6 +273,31 @@ try {
     ok("re-arm: and resuming disarms the pause, or the next boot re-applies a window that is over", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
   }
 
+  // ── a restart shortly BEFORE that window closes — a real one, since nothing controls
+  //    when the pause was armed. The scheduler has ONE pause flag, and for the length of
+  //    the sequence that flag is also boot's own hold: an auto-resume firing while the
+  //    images are still building (minutes) or the sweep is still settling would un-hold
+  //    the queue early, and an item admitted moments earlier starts against a half-built
+  //    image and a half-finished sweep. Only boot's own lift may release the queue ──
+  {
+    const h = harness({
+      // A real image build takes minutes; this one only has to outlast the window below.
+      buildImages: async () => {
+        await new Promise((r) => setTimeout(r, 150));
+        return [];
+      },
+    });
+    h.pause.write({ reason: "quota exhausted", since: 1_000, resumeAt: Date.now() + 20 });
+    await h.boot.run();
+
+    ok("re-arm: a window closing MID-sequence does not lift boot's hold — the re-derive still runs held", h.reDerive.held === true, JSON.stringify(h.reDerive));
+    ok("re-arm: and the sweep it fires under is finished before anything can start", h.reDerive.ran === 1, JSON.stringify(h.reDerive));
+
+    await new Promise((r) => setTimeout(r, 100));
+    ok("re-arm: the window really did close, though — the queue runs once boot is done", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("re-arm: with the pause disarmed on disk, or the next boot re-applies a window that is over", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
+  }
+
   // ── a repo whose image did not build. Boot REPORTS and does not act (ADR-0002: setup
   //    is repo scope, and stopping that repo is #39's) — but silence here is a repo whose
   //    every run dies mid-agent as a mystery Provider failure, which is exactly how v1
@@ -307,6 +332,27 @@ try {
     ok("sweep: the claim comes off, so the issue is not left taken by a process that no longer exists", h.released.join(",") === key, h.released.join(","));
     ok("sweep: and the humans watching the issue are told what it finished as, exactly once", h.comments.length === 1 && h.comments[0]!.message.includes("opened acme/finance#58"), JSON.stringify(h.comments.map((l) => l.message)));
     ok("sweep: it is finished BEFORE GitHub is re-read — an item still recorded in-flight would be re-derived as work in progress and left where it is", h.reDerive.state?.[key]?.status === "done", JSON.stringify(h.reDerive.state));
+  }
+
+  // ── the same outcome file, one instant later in the apply: the parent was killed
+  //    (ADR-0001 — at any instant) AFTER recording the item and commenting on the issue
+  //    but BEFORE it cleared the file, released the lock and dropped the claim. The
+  //    thread already carries both of its milestones, so applying this again is a THIRD
+  //    comment (constraint 12) — and ignoring the file is a claim nobody ever releases.
+  //    What is left of the interrupted apply is finished, silently ──
+  {
+    const key = "acme/finance#57";
+    const h = harness();
+    h.state.set(key, { status: "done" }); // recorded, and commented on, before the kill
+    writeOutcome(h.paths.resultPath(key), { key, status: "done", summary: "opened acme/finance#58", finishedAt: "2026-07-25T00:00:00.000Z" });
+    acquireLock(h.paths.pidPath(key), spawnSync(process.execPath, ["-e", ""]).pid!); // the lock it never released
+    await h.boot.run();
+
+    ok("interrupted: an item already recorded done is not announced to the issue a second time", h.comments.length === 0, JSON.stringify(h.comments.map((l) => l.message)));
+    ok("interrupted: but the file is cleared — its presence is what makes every later boot apply it again", !existsSync(h.paths.resultPath(key)), h.paths.resultPath(key));
+    ok("interrupted: and the lock the apply never got as far as releasing", readLock(h.paths.pidPath(key)) === undefined, JSON.stringify(readLock(h.paths.pidPath(key))));
+    ok("interrupted: and the claim, or the issue stays taken by a run that finished days ago", h.released.join(",") === key, h.released.join(","));
+    ok("interrupted: the recorded outcome stands — it is the one the humans were told about", h.state.get(key)?.status === "done", JSON.stringify(h.state.get(key)));
   }
 
   // ── the sweep, source B: an item the state file still calls in-flight with no child
