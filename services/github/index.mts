@@ -17,6 +17,11 @@ export const CLAIM_LABEL = "agent-working";
  *  trying to swallow in one pass. */
 const OPEN_ISSUE_LIMIT = 200;
 
+/** The URL `gh webhook forward` registers its own dev webhook against. Matched EXACTLY
+ *  when a stranded one is dropped — the delete is the one genuinely dangerous write in
+ *  the relay, and a looser match would take a child repo's real webhooks with it. */
+const FORWARDER_HOOK_URL = "https://webhook-forwarder.github.com/hook";
+
 /** What the Assignor is allowed to do to GitHub. Narrow deliberately: it is the seam a
  *  test substitutes, and every method on it is a real edit to a real repo. */
 export interface GitHub {
@@ -74,6 +79,16 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
+/** What the forwarder supervisor is allowed to do to GitHub: drop the dev webhook a
+ *  hard-killed `gh webhook forward` left behind, and nothing else. Its own seam, as
+ *  narrow as it gets — the one method is a DELETE against somebody else's repo, and the
+ *  supervisor reaching `gh` any other way would take the smoke offline with it. */
+export interface GitHubForwarder {
+  /** Drop every hook of gh's own forwarder on this repo. Matched on that URL exactly: a
+   *  looser match deletes a child repo's REAL webhooks. */
+  dropForwarderHooks(repo: string): Promise<void>;
+}
+
 /** One issue as a RUN needs to read it: what the agent is told to work on, and what its
  *  pull request is titled. */
 export interface IssueDetail {
@@ -128,7 +143,7 @@ export interface GitHubRun {
  *  Left out of the smokes on purpose, like `githubDestination()`: it needs the CLI, a
  *  token and the network. What CAN be wrong is WHEN Sunday claims, releases and
  *  re-derives, and the Assignor's and Reconciler's smokes drive that over a substitute. */
-export class Gh implements GitHubReconcile, GitHubRun {
+export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder {
   claim(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--add-label", CLAIM_LABEL]);
   }
@@ -226,6 +241,26 @@ export class Gh implements GitHubReconcile, GitHubRun {
       '.[0].url // ""',
     ]);
     return url || undefined;
+  }
+
+  async dropForwarderHooks(repo: string): Promise<void> {
+    // `gh` keeps ONE dev webhook per repo and refuses to register a second, so a hard-
+    // killed forwarder (SIGKILL, crash, power loss) strands one and every later start
+    // dies on `HTTP 422 … Hook already exists` — a blackout no amount of retrying clears.
+    // The read selects on gh's own forwarder URL, ported unchanged from the retired
+    // `scripts/webhook-forward.sh`, so a repo's real webhooks are never in the set.
+    const found = await shA("gh", [
+      "api",
+      `repos/${repo}/hooks`,
+      "--jq",
+      `.[] | select(.config.url == "${FORWARDER_HOOK_URL}") | .id`,
+    ]);
+    // Numeric ids only: everything after this is a DELETE against somebody else's repo,
+    // and the one thing that must not be improvised is what it addresses.
+    for (const id of found.split("\n").map((line) => line.trim())) {
+      if (!/^\d+$/.test(id)) continue;
+      await shA("gh", ["api", "-X", "DELETE", `repos/${repo}/hooks/${id}`]);
+    }
   }
 
   async createPr(pr: NewPullRequest): Promise<string> {
