@@ -8,6 +8,16 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+/** Every way a run can END, spelled ONCE. The type below, the shape guard at the bottom
+ *  of this file and `assignor/state.mts`'s own union all derive from this tuple, so a
+ *  status added here reaches the RUNTIME guard by itself. Hand-written, the guard is what
+ *  the type system cannot check: a fourth status would type-check everywhere and still
+ *  make `readOutcome` call a perfectly good outcome file unreadable, which the parent
+ *  records as a failed work item — a finished run thrown away. */
+export const OUTCOME_STATUSES = ["done", "failed", "awaiting-human"] as const;
+
+export type OutcomeStatus = (typeof OUTCOME_STATUSES)[number];
+
 /** What a work item finished as. */
 export interface Outcome {
   /** The work-item key (`<owner>/<repo>#<issue>`) this outcome belongs to. */
@@ -15,7 +25,7 @@ export interface Outcome {
   /** `awaiting-human` is a FINISHED run too (#36): the agent stopped to ask a question,
    *  so nothing shipped, but nothing failed either and the item is nobody's to retry —
    *  it is the human's to answer. */
-  status: "done" | "failed" | "awaiting-human";
+  status: OutcomeStatus;
   summary: string;
   /** ISO timestamp, stamped by the child as it finishes. */
   finishedAt: string;
@@ -74,7 +84,9 @@ function isOutcome(value: unknown): value is Outcome {
   const o = value as Record<string, unknown>;
   return (
     typeof o.key === "string" &&
-    (o.status === "done" || o.status === "failed" || o.status === "awaiting-human") &&
+    // Widened to compare against an unknown: the check has to come off OUTCOME_STATUSES
+    // rather than re-spell it, or a status added to the type stops being readable here.
+    (OUTCOME_STATUSES as readonly unknown[]).includes(o.status) &&
     typeof o.summary === "string" &&
     typeof o.finishedAt === "string" &&
     // Optional, so absent is fine — but present and not a string is not: the handle is

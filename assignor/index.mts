@@ -89,11 +89,16 @@ export interface AssignorDeps {
  *  Ported from v1's `listener/listen.mts`. */
 const ADMIT_ACTIONS = new Set(["opened", "reopened", "labeled"]);
 
+/** The event a gate resume arrives on, spelled once for both readings of it below: a
+ *  `created` one is routed, and every other action on it is recognised-and-unbuilt. Two
+ *  spellings drift into a comment that routes nowhere while the log calls it recognised. */
+const COMMENT_EVENT = "issue_comment";
+
 /** Event types the pipeline knows and this issue deliberately does not act on, so
  *  "not built yet" and "never heard of it" are different lines in the log: PR-comment
  *  runs are #44, the DAG re-evaluation and restack cascade #42/#43. A created comment is
  *  routed above (a gate resume); every other comment action lands here. */
-const KNOWN_UNBUILT = new Set(["issue_comment", "pull_request", "pull_request_review_comment"]);
+const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", "pull_request_review_comment"]);
 
 /** A spec describes the shape of a feature; its child issues are the work (CONTEXT.md).
  *  The literal is ported from v1's `listener/helper.mts` rather than imported — v1 and
@@ -194,7 +199,7 @@ export class Assignor {
       this.considerIssue(delivery);
       return;
     }
-    if (event === "issue_comment" && action === "created") {
+    if (event === COMMENT_EVENT && action === "created") {
       this.considerReply(delivery);
       return;
     }

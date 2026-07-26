@@ -6,8 +6,12 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { OutcomeStatus } from "#lib/outcome.mts";
 
-export type WorkItemStatus = "in-flight" | "done" | "failed" | "awaiting-human";
+/** Every way an outcome can finish, plus the one status only this file knows: `in-flight`
+ *  is a claim, not a result, so no outcome file ever carries it. Derived rather than
+ *  re-spelled — a status the outcome grows is a status a work item can be recorded as. */
+export type WorkItemStatus = OutcomeStatus | "in-flight";
 
 export interface WorkItemState {
   status: WorkItemStatus;
