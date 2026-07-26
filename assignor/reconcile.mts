@@ -57,31 +57,40 @@ export class Reconciler {
     this.log = deps.log;
   }
 
-  /** Every routed repo, once. Isolated per repo: GitHub is somebody else's service and it
-   *  502s, so one repo that cannot be read must not cost every repo behind it its whole
-   *  backlog. GitHub stays the truth, so the next boot simply tries again. */
+  /** Every routed repo, once. Isolated per repo — inside `repo()` itself, so one repo that
+   *  cannot be read costs that repo its pass and nothing more, whichever caller asked. */
   async run(): Promise<void> {
-    for (const repo of Object.keys(this.repos)) {
-      try {
-        await this.repo(repo);
-      } catch (err) {
-        this.log.error(`✗ ${repo} not re-derived — ${describe(err)}`, { repo });
-      }
-    }
+    for (const repo of Object.keys(this.repos)) await this.repo(repo);
   }
 
   /** One repo's open issues, in one bounded read (`OPEN_ISSUE_LIMIT`) — boot's duration
    *  must not be a function of somebody else's backlog. Isolated per issue as well as per
-   *  repo: reconsidering one reaches GitHub too. */
-  private async repo(repo: string): Promise<void> {
-    const issues = await this.github.listOpenIssues(repo);
-    this.log.info(`⟲ ${repo}: re-deriving from ${issues.length} open issue(s)`);
-    for (const issue of issues) {
-      try {
-        await this.issue(repo, issue);
-      } catch (err) {
-        this.log.error(`✗ ${repo}#${issue.number} not reconsidered — ${describe(err)}`, { repo });
+   *  repo: reconsidering one reaches GitHub too.
+   *
+   *  Public because a blackout is per repo: a forwarder that dropped for one repo missed
+   *  events for that repo alone, and sweeping the whole table to catch it up spends every
+   *  other repo's rate limit on a gap they never had. It is THIS pass rather than a second
+   *  re-derive route, so the recovery path and boot's path cannot drift (constraint 3).
+   *
+   *  It THROWS NOTHING, and that belongs here rather than in `run()`: GitHub is somebody
+   *  else's service and it 502s, and one repo that cannot be read must cost that repo its
+   *  pass and no more — for the sweep, the repos behind it, and for a blackout recovery,
+   *  the parent itself. That caller is a timer with nobody above it, where a rejection is
+   *  an unhandled one and the process dies under `restart: always` (ADR-0001). GitHub
+   *  stays the truth either way, so the next pass simply asks again. */
+  async repo(repo: string): Promise<void> {
+    try {
+      const issues = await this.github.listOpenIssues(repo);
+      this.log.info(`⟲ ${repo}: re-deriving from ${issues.length} open issue(s)`);
+      for (const issue of issues) {
+        try {
+          await this.issue(repo, issue);
+        } catch (err) {
+          this.log.error(`✗ ${repo}#${issue.number} not reconsidered — ${describe(err)}`, { repo });
+        }
       }
+    } catch (err) {
+      this.log.error(`✗ ${repo} not re-derived — ${describe(err)}`, { repo });
     }
   }
 

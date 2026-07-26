@@ -1,12 +1,14 @@
-// main.mts — the V2 parent process. It owns the services, the Assignor and the queue,
-// and it owns no work: every work item runs in a forked child (ADR-0001), so a `gh` or
-// `git` call that blocks blocks only that child and never the socket this process
-// answers on.
+// main.mts — the V2 parent process. It owns the services, the Assignor, the queue and
+// BOTH ends of the event pipe, and it owns no work: every work item runs in a forked
+// child (ADR-0001), so a `gh` or `git` call that blocks blocks only that child and never
+// the socket this process answers on.
 //
+//   devbox services up             # supervised — the one process in process-compose.yaml
 //   npm run v2                     # node --env-file=.env main.mts
-//   gh webhook forward --repo <owner/repo> \
-//     --events issues,issue_comment,pull_request,pull_request_review_comment \
-//     --url "http://localhost:8788/"
+//
+// The `gh webhook forward` per routed repo is started HERE and no longer by hand or by a
+// shell launcher: the process that owns those children is the one that can say something
+// when one dies and catch that repo up (#40).
 //
 // This file is WIRING and nothing else — the decisions are the Assignor's and the
 // smokes drive them there, against injected substitutes. What is here is what cannot be
@@ -34,6 +36,7 @@ import {
   statePath,
 } from "#lib/paths.mts";
 import { createLogger } from "#services/destinations.mts";
+import { Forwarders } from "#services/github/forwarder.mts";
 import { Gh } from "#services/github/index.mts";
 import { createReceiver } from "#services/github/receiver.mts";
 import { SandboxService } from "#services/sandbox.mts";
@@ -105,6 +108,39 @@ const receiver = createReceiver({
 // listening is a pipeline that receives nothing and says nothing about it.
 const bound = await receiver.start();
 log.info(`▶ up on http://localhost:${bound} — routing ${Object.keys(repos).length} repo(s), cap ${maxConcurrency}`);
+
+// The port it ACTUALLY bound, not the one asked for: a forwarder pointed at a socket
+// nothing is listening on is a blackout that looks exactly like a quiet day.
+const forwarders = new Forwarders({
+  repos: Object.keys(repos),
+  port: bound,
+  github,
+  // The existing per-repo pass, so the blackout catch-up and boot's re-derive cannot
+  // drift (#40 constraint 7).
+  reconcile: (repo) => reconciler.repo(repo),
+  log: logger.child("forwarder"),
+});
+
+// Registered BEFORE the first spawn: a stop landing mid-start must still reach the
+// children already up. `gh` removes its own dev webhook on a clean exit and a hard stop
+// strands it, after which every later start dies on `HTTP 422 … Hook already exists` — a
+// blackout no amount of retrying clears. Work-item children are deliberately NOT killed:
+// they outlive the parent by design and the next boot's sweep resolves what they left
+// (ADR-0001).
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    log.info(`· ${signal} — stopping the forwarders`);
+    forwarders.stop();
+    // Explicit, because installing a handler REPLACES Node's default "die on this
+    // signal": without it the supervisor's stop leaves a parent up with no relay.
+    process.exit(0);
+  });
+}
+
+// AFTER the bind and BEFORE the boot (constraint 8). Any other order leaves a window in
+// which GitHub fires events, nothing forwards them, and the reconcile that would have
+// re-derived them has already run — which is the 2026-07-24 blackout in miniature.
+await forwarders.start();
 
 // AFTER the bind, deliberately: images take minutes to build and the sweep reads disk,
 // and a readiness probe that goes unanswered for that long is a SIGKILL/restart loop
