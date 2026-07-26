@@ -262,6 +262,36 @@ try {
     ok("isolation: an issue that fails mid-pass does not strand the ones behind it", h.queued().join(",") === "acme/finance#58", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
     ok("isolation: and it is named, since it is an issue still holding a claim nobody is on", h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance#57")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
   }
+
+  // ── one repo, on demand. A forwarder that was down for a single repo missed events for
+  //    that repo alone: sweeping every routed repo to catch it up spends somebody else's
+  //    rate limit on a gap they never had. The pass is the same one `run()` loops over —
+  //    a second re-derive route is the drift this module exists to prevent (constraint 3) ──
+  {
+    const h = harness({
+      issues: {
+        "acme/finance": [{ number: 57, labels: TRIGGERS }],
+        "acme/ops": [{ number: 12, labels: TRIGGERS }],
+      },
+    });
+    await h.reconciler.repo("acme/finance");
+
+    ok("one repo: the named repo is re-derived through the same admission the sweep uses", h.queued().join(",") === "acme/finance#57", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
+    ok("one repo: and the repos nobody asked about are left alone — their events were never missed", !h.queued().includes("acme/ops#12") && !said(h.lines, "acme/ops"), `${h.queued().join(",")} ${JSON.stringify(h.lines.map((l) => l.message))}`);
+  }
+
+  // ── and the isolation lives INSIDE that pass, so it holds for whoever calls it. The
+  //    sweep has a caller above it; a blackout recovery does not — it runs off a timer in
+  //    the parent, where a rejection nobody catches is an unhandled rejection that kills
+  //    the process under `restart: always`, which is the crash loop ADR-0001 exists to stop ──
+  {
+    const h = harness({ throws: { "acme/finance": "gh issue list failed: HTTP 502" } });
+    let escaped: unknown;
+    await h.reconciler.repo("acme/finance").catch((err) => void (escaped = err));
+
+    ok("one repo: a read that fails throws nothing at the caller — the recovery caller is a timer with nobody above it", escaped === undefined, String(escaped));
+    ok("one repo: and the repo that failed is named at error, since a gap silently not re-derived looks exactly like no gap", h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance") && l.message.includes("502")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
+  }
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
