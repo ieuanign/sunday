@@ -11,6 +11,10 @@ export type WorkItemStatus = "in-flight" | "done" | "failed" | "awaiting-human";
 
 export interface WorkItemState {
   status: WorkItemStatus;
+  /** The agent session a gated item's answer RESUMES (#36). Kept here and not just in
+   *  the outcome file, because the outcome is cleared as it is applied and the human may
+   *  reply weeks later — this file is the only thing left that knows what to resume. */
+  sessionId?: string;
 }
 
 /** The whole file: one record per work-item key. */

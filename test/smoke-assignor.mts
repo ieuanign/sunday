@@ -333,6 +333,43 @@ try {
     );
   }
 
+  // ── the gate (#36): the agent stopped to ask a human something. Nothing shipped and
+  //    nothing failed — the item is the human's now, and their answer resumes the run
+  //    that asked. The question rides the SAME outcome milestone every other finish uses,
+  //    so a gated item still costs the issue exactly two comments (constraint 12) ──
+  {
+    const key = "acme/finance#57";
+    const question = "Which of the two auth flows should this use?";
+    const session = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    const started = h.comments.length;
+    await h.finish(key, { key, status: "awaiting-human", summary: question, finishedAt: "2026-07-25T00:00:00.000Z", sessionId: session });
+
+    ok("gate: recorded awaiting-human — neither finished nor failed, and not left in-flight", h.state.get(key)?.status === "awaiting-human", JSON.stringify(h.state.get(key)));
+    ok(
+      "gate: the session handle is kept, so a reply weeks later resumes the run rather than restarting it",
+      h.state.get(key)?.sessionId === session,
+      JSON.stringify(h.state.get(key)),
+    );
+    ok("gate: exactly one comment for the outcome, like any other finish", h.comments.length - started === 1, JSON.stringify(h.comments.map((l) => l.message)));
+
+    const asked = h.comments.at(-1);
+    ok(
+      "gate: it is a milestone on the issue, carrying the agent's question as the human will read it",
+      asked?.level === "milestone" && asked.context.target === 57 && asked.message.includes(question),
+      JSON.stringify(asked),
+    );
+    ok(
+      "gate: and it does not read as a failure — nothing went wrong, someone is being asked",
+      asked?.message.includes("✗") === false && asked?.message.includes("awaiting-human") === true,
+      JSON.stringify(asked?.message),
+    );
+    ok("gate: the claim comes off, so the human's reply can be taken up as work again", h.released.join(",") === key, h.released.join(","));
+    ok("milestone: two per work item, gated or not — started and the question", h.comments.length === 2, JSON.stringify(h.comments.map((l) => l.message)));
+  }
+
   // ── applied once, whoever asks. #35's boot sweep will call this on every result file
   //    it finds, and a parent that died mid-apply re-applies on its next boot — so apply
   //    has to be safe to call again. The FILE is the guard: gone means done ──
@@ -353,6 +390,39 @@ try {
     h.assignor.handle(delivery()); // the label is still on the issue; GitHub redelivers
     await tick();
     ok("done: a later delivery does not run a finished item again", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+  }
+
+  // ── the gate's interrupted apply, which is exactly what #35's boot sweep finds: the
+  //    state already says awaiting-human and the result file is STILL there, because the
+  //    parent died between the milestone and the clear. Recording it again asks the human
+  //    the same question twice and re-arms an item they are already answering ──
+  {
+    const key = "acme/finance#57";
+    const item = { key, repo: "acme/finance", issue: 57 };
+    const session = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
+    const gate: Outcome = {
+      key,
+      status: "awaiting-human",
+      summary: "Which of the two auth flows should this use?",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      sessionId: session,
+    };
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(key, gate);
+    const settled = h.comments.length;
+
+    writeOutcome(h.paths.resultPath(key), gate); // what the killed apply left on disk
+    h.assignor.applyOutcome(item);
+
+    ok("interrupted gate: the question is not asked a second time", h.comments.length === settled, JSON.stringify(h.comments.map((l) => l.message)));
+    ok("interrupted gate: the file the killed apply left behind is cleared, so nothing keeps finding it", !existsSync(h.paths.resultPath(key)), h.paths.resultPath(key));
+    ok(
+      "interrupted gate: the recorded gate and the session the reply resumes both stand",
+      h.state.get(key)?.status === "awaiting-human" && h.state.get(key)?.sessionId === session,
+      JSON.stringify(h.state.get(key)),
+    );
   }
 
   // ── a child that dies is an exit code, not a dead pipeline (constraint 6). It left no

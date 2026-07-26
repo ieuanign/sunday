@@ -91,6 +91,11 @@ const KNOWN_UNBUILT = new Set(["issue_comment", "pull_request", "pull_request_re
  *  V2 must not cross-import until cutover deletes v1. */
 const SPEC_LABEL = "spec";
 
+/** How each way of finishing opens the comment it is posted as. `⏸` is the same mark
+ *  boot and the scheduler use for "held, awaiting a human" — a gate is that, on one work
+ *  item. */
+const MARK: Record<Outcome["status"], string> = { done: "✓", failed: "✗", "awaiting-human": "⏸" };
+
 /** One work item's IDENTITY, resolved once at admission: what a fork, an outcome and a
  *  comment all have to agree on. (`scheduler.mts`'s `WorkItem` is the other half — the
  *  same item as something to queue, dedup and hold a branch for.) */
@@ -298,23 +303,32 @@ export class Assignor {
     // third (constraint 12) — and #35's boot sweep finds exactly this file and applies it.
     // Leaving it alone is no answer either: the claim, the lock and the file are all still
     // there, so the item would stay taken forever. Finish the tail, say nothing.
+    // `awaiting-human` counts as recorded alongside the other two: a gate is FINISHED
+    // work, so re-recording it asks the human the same question a second time and, worse,
+    // re-writes the state entry their reply is routed on.
     const recorded = this.state.get(item.key)?.status;
-    if (recorded === "done" || recorded === "failed") {
+    if (recorded === "done" || recorded === "failed" || recorded === "awaiting-human") {
       this.log.info(`· ${item.key} is already ${recorded} — clearing what its interrupted apply left behind`);
       this.settle(item);
       return;
     }
-    this.record(item, read.outcome.status, read.outcome.summary);
+    this.record(item, read.outcome.status, read.outcome.summary, read.outcome.sessionId);
   }
 
   /** The apply ORDER, spelled once (constraint 5): durable state, the milestone, then the
    *  tail. A crash part-way through is re-applied by the next boot rather than losing the
    *  outcome — losing one is silent, where the re-apply is caught by the guard above and
-   *  costs the issue nothing. */
-  private record(item: WorkItemRef, status: Outcome["status"], summary: string): void {
-    this.state.set(item.key, { status });
-    // Milestone 2 of exactly two (constraint 12).
-    this.log.milestone(`${status === "done" ? "✓" : "✗"} ${status} — ${summary}`, {
+   *  costs the issue nothing.
+   *
+   *  `sessionId` is carried into durable state because the outcome file is cleared in the
+   *  tail below: a gated item's handle would otherwise be gone before the human it is
+   *  waiting on has read the question. */
+  private record(item: WorkItemRef, status: Outcome["status"], summary: string, sessionId?: string): void {
+    this.state.set(item.key, { status, sessionId });
+    // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
+    // asks the human something, and rendering it as a failure tells them work broke when
+    // what actually happened is that they are being waited on.
+    this.log.milestone(`${MARK[status]} ${status} — ${summary}`, {
       repo: item.repo,
       target: item.issue,
     });
