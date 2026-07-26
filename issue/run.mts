@@ -141,7 +141,15 @@ async function runIssue(): Promise<Outcome> {
 
 /** Hand the notification over, and wait until it is actually on the wire — a child
  *  that exits with its message still buffered leaves the parent holding an exit code
- *  instead of an outcome. */
+ *  instead of an outcome.
+ *
+ *  Never rejects. A parent that has GONE (a hot-reload save, a crash, a deploy) makes
+ *  the send fail for certain, and this is called at module top level where a rejection
+ *  is unhandled: the child would die non-zero AFTER writing its outcome and BEFORE
+ *  releasing its lock, leaving the work item wedged behind a lock nobody will clear
+ *  until its pid stops reading as alive. The outcome is already durable by the time we
+ *  get here and the parent applies it from the FILE, so a message nobody receives costs
+ *  a boot sweep, not the work (ADR-0001). */
 function report(message: Report): Promise<void> {
   const send = process.send?.bind(process);
   // Not forked (someone ran this by hand): the outcome file IS the handoff, and the
@@ -149,7 +157,13 @@ function report(message: Report): Promise<void> {
   if (!send) return Promise.resolve();
   // `settle`, not `resolve`: this file imports `resolve` from `node:path` now, and a
   // promise callback that shadows it is one edit away from a path that never resolves.
-  return new Promise((settle, reject) => {
-    send(message, (err: Error | null) => (err ? reject(err) : settle()));
+  return new Promise((settle) => {
+    send(message, (err: Error | null) => {
+      // Said once, at `info`: nothing here is an incident. `error` would post a comment
+      // on the issue, and the two this pipeline posts are the parent's (work started,
+      // outcome applied).
+      if (err) log.info(`no parent to report to — outcome left on disk (${err.message})`, about);
+      settle();
+    });
   });
 }

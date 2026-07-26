@@ -164,6 +164,45 @@ try {
     );
   }
 
+  // ── the parent that GOES while the child is still working (a hot-reload save, a
+  //    crash, a deploy). Its report then lands on a closed IPC channel, which is what
+  //    `disconnect()` reproduces here: the exact ERR_IPC_CHANNEL_CLOSED path, with no
+  //    process-tree gymnastics. The outcome is durable BEFORE the report (ADR-0001), so
+  //    a message nobody is listening for costs a boot sweep and nothing else — the run
+  //    has to finish anyway ──
+  {
+    const job = jobFor("acme/finance#63", 63);
+    const child = fork(entry, [JSON.stringify(job)], { silent: true });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    // Before the child can possibly report: from here on its channel is closed for good.
+    child.disconnect();
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((settle) => {
+      child.on("exit", (code, signal) => settle({ code, signal }));
+    });
+
+    ok(
+      "a child whose parent has gone still runs to a clean exit",
+      exit.code === 0 && exit.signal === null,
+      `code=${exit.code} signal=${exit.signal}\n    ${stderr}`,
+    );
+    const read = readOutcome(job.resultPath);
+    ok(
+      "its outcome is on disk anyway, saying how the run finished, for the next parent to apply",
+      read.state === "ok" && read.outcome.key === "acme/finance#63" && read.outcome.status === "failed",
+      `${JSON.stringify(read)}\n    ${stderr}`,
+    );
+    ok(
+      "and it still releases its lock, so the item is not wedged for the parent that comes back",
+      readLock(job.pidPath) === undefined,
+      `${JSON.stringify(readLock(job.pidPath))}\n    ${stderr}`,
+    );
+    // A send with nobody on the other end is routine, not an incident: at `error` it
+    // would reach the event log AND post a comment on the issue, which is the parent's
+    // to post (two milestones per work item, neither of them this).
+    ok("the unreachable parent is routine, so the child posts no comment about it", !existsSync(job.eventLogPath), job.eventLogPath);
+  }
+
   // ── the run log: a child shares no memory with the parent, so what it did has to be
   //    durable where the job said. Its Logger is built by the SAME wiring function the
   //    parent uses, so the two cannot drift in which sinks a level reaches ──

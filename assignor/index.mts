@@ -110,6 +110,12 @@ const SPEC_LABEL = "spec";
  *  item. */
 const MARK: Record<Outcome["status"], string> = { done: "✓", failed: "✗", "awaiting-human": "⏸" };
 
+/** How often an ADOPTED child's lock is re-read. Polled and not watched, because the lock
+ *  DISAPPEARING is the one signal covering both ways a survivor can end — it wrote an
+ *  outcome, or it died without writing anything — and it costs one `existsSync` plus one
+ *  signal-0 against a deadline measured in minutes. */
+const ADOPT_POLL_MS = 250;
+
 /** One work item's IDENTITY, resolved once at admission: what a fork, an outcome and a
  *  comment all have to agree on. (`scheduler.mts`'s `WorkItem` is the other half — the
  *  same item as something to queue, dedup and hold a branch for.) */
@@ -244,9 +250,9 @@ export class Assignor {
     // The guard the in-memory queue cannot be: children deliberately outlive the parent
     // (hot-reload, crash, deploy — ADR-0001), so a live lock means someone IS on this
     // item whatever this process remembers.
-    const lock = readLock(this.paths.pidPath(item.key));
-    if (lock?.alive) {
-      this.log.info(`· skip ${item.key} — pid ${lock.pid} is still on it`);
+    const pid = this.liveChild(item.key);
+    if (pid !== undefined) {
+      this.log.info(`· skip ${item.key} — pid ${pid} is still on it`);
       return;
     }
     // Claim BEFORE the queue: the claim is what the NEXT delivery reads, and it may
@@ -353,7 +359,36 @@ export class Assignor {
    *  issue has exactly one reading of it. */
   liveChild(key: string): number | undefined {
     const lock = readLock(this.paths.pidPath(key));
-    return lock?.alive === true ? lock.pid : undefined;
+    return lock?.alive ? lock.pid : undefined;
+  }
+
+  /** Take over a child THIS parent never forked — one that outlived the parent that did
+   *  (a hot-reload save, a crash, a deploy — ADR-0001). #35's boot sweep found it holding
+   *  a live lock and could only leave it alone, which strands the item until some LATER
+   *  boot happens to find it finished; adopting it means the outcome is applied by the
+   *  parent that is up.
+   *
+   *  It goes on the scheduler under the item's own key and branch, so every property this
+   *  needs falls out of seams that already exist rather than a second mechanism: the cap
+   *  counts the survivor (a restart with N of them cannot run `cap + N` agents against one
+   *  quota), its branch stays held for the rest of its life, and its key dedups anything
+   *  else routed to the same item. */
+  adopt(item: WorkItemRef): void {
+    this.scheduler.enqueue({
+      key: item.key,
+      branch: `feat/${item.issue}`,
+      run: async () => {
+        // No timeout, by design: an adopted child that hangs holds its slot exactly as a
+        // locally forked one does, and there is nothing to apply until it lets go. It is
+        // also the whole guard against constraint 6 — while the lock is there, the claim,
+        // the result file, the lock and the state entry are all left alone.
+        while (this.liveChild(item.key) !== undefined) await new Promise((tick) => setTimeout(tick, ADOPT_POLL_MS));
+        // No `ChildExit` to hand over: this parent never watched the child start, so how
+        // it ended is knowable only from what it left on disk — and a survivor that left
+        // nothing is recorded failed by that same path.
+        this.applyOutcome(item);
+      },
+    });
   }
 
   /** Apply a finished work item's outcome, FROM THE FILE the child left (constraint 4).

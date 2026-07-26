@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint-console.mts",
     "test": "node test/run.mts",
-    "v2": "node --env-file=.env main.mts",
+    "v2": "node --watch --env-file=.env main.mts",
     "status": "node listener/status.mts",
     "repo:init": "bash scripts/repo-init.sh"
   },

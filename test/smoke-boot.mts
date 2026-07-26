@@ -9,7 +9,7 @@
 // image build and GitHub — and every path pointing into the case's own dir.
 // $0, no network, no GitHub.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -63,6 +63,15 @@ function capture() {
 /** Did anything say this at all? Constraint 2: boot survives every recoverable failure,
  *  which is only tolerable because each one leaves a line behind. */
 const said = (lines: LogLine[], text: string) => lines.some((l) => l.message.includes(text));
+
+/** Wait for something a POLL notices rather than something that signals: an adopted
+ *  child's exit is seen by the next read of its lock, and nothing resolves on it. Bounded,
+ *  so a regression is a failing assertion and not a smoke that hangs the whole suite. */
+async function until(cond: () => boolean, ms = 5_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  return cond();
+}
 
 /** `lib/paths.mts`'s own key-to-segment rule, so the harness names files the way the real
  *  layout would — the sweep checks a result file against the name its key resolves to. */
@@ -418,7 +427,50 @@ try {
     ok("live child: nothing is commented on the issue by a parent that is not the one working it", h.comments.length === 0, JSON.stringify(h.comments.map((l) => l.message)));
     ok("live child: the outcome is left for whoever is still holding the item", existsSync(h.paths.resultPath(key)), h.paths.resultPath(key));
     ok("live child: and its lock is not cleared out from under it", readLock(h.paths.pidPath(key))?.alive === true, JSON.stringify(readLock(h.paths.pidPath(key))));
-    ok("live child: the skip is accounted for, naming the process that owns the item", said(h.lines, `pid ${process.pid}`), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("live child: the adoption is accounted for, naming the process that owns the item", said(h.lines, `pid ${process.pid}`), JSON.stringify(h.lines.map((l) => l.message)));
+
+    // #41: left alone is not enough — an item nobody is queued for waits for the NEXT
+    // boot to settle it. It is adopted instead, onto the scheduler under its own key and
+    // branch, which is where every property this needs already lives: the cap counts it,
+    // so a restart with N survivors cannot run cap+N agents against one quota, and its
+    // branch stays held for the rest of the child's life.
+    ok("live child: the survivor is adopted onto the queue, so it counts against the cap instead of freeing a slot beside itself", h.scheduler.snapshot().regularInFlight.includes(key), JSON.stringify(h.scheduler.snapshot()));
+
+    let second = false;
+    h.scheduler.enqueue({ key, branch: "feat/57", run: async () => void (second = true) });
+    await new Promise((r) => setTimeout(r, 0));
+    ok("live child: and under the item's REAL key and branch, so anything else routed to it dedups rather than starting a second run", !second, "a second run started on an item a live child is still working");
+  }
+
+  // ── the other half of adoption: the survivor EXITS. Nothing is waiting on that exit —
+  //    the parent that forked it is gone — so the lock DISAPPEARING is the signal, and it
+  //    is the one signal covering both endings (a child that wrote an outcome and a child
+  //    that died without one). A really-spawned process holds the lock here, because "is
+  //    the holder still alive" is a question about a real pid and nothing else ──
+  {
+    const key = "acme/finance#57";
+    const h = harness();
+    // Waits on stdin, so it is alive for exactly as long as this case says it is.
+    const survivor = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
+    h.state.set(key, { status: "in-flight" });
+    acquireLock(h.paths.pidPath(key), survivor.pid!);
+    // Written BEFORE the child releases its lock (ADR-0001), which is why an outcome on
+    // disk is not on its own permission to apply one.
+    writeOutcome(h.paths.resultPath(key), { key, status: "done", summary: "opened acme/finance#58", finishedAt: "2026-07-25T00:00:00.000Z" });
+    await h.boot.run();
+
+    ok("adopted: nothing is applied while the child is still going", h.state.get(key)?.status === "in-flight" && h.comments.length === 0, `${JSON.stringify(h.state.get(key))} ${JSON.stringify(h.comments.map((l) => l.message))}`);
+
+    survivor.kill();
+    await new Promise((r) => survivor.on("exit", r));
+    const applied = await until(() => h.state.get(key)?.status === "done");
+
+    ok("adopted: once its pid is gone the outcome IS applied — by the parent that is up, not by whichever later boot happens to find it", applied, JSON.stringify(h.state.get(key)));
+    ok("adopted: through the one apply path, so the result file is cleared", !existsSync(h.paths.resultPath(key)), h.paths.resultPath(key));
+    ok("adopted: and the lock the child left behind with it", readLock(h.paths.pidPath(key)) === undefined, JSON.stringify(readLock(h.paths.pidPath(key))));
+    ok("adopted: and the claim, so the item is finally free for whatever comes next", h.released.join(",") === key, h.released.join(","));
+    ok("adopted: the humans are told what it finished as, exactly once — the parent that forked it already posted the first milestone", h.comments.length === 1 && h.comments[0]!.message.includes("opened acme/finance#58"), JSON.stringify(h.comments.map((l) => l.message)));
+    ok("adopted: and the slot it was holding comes back, since the item is off the queue for good", h.scheduler.snapshot().regularInFlight.length === 0 && h.scheduler.snapshot().regularQueued.length === 0, JSON.stringify(h.scheduler.snapshot()));
   }
 
   // ── a result file is UNTRUSTED INPUT (constraint 7). Its key becomes a work-item key,
