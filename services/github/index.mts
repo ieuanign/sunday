@@ -74,13 +74,61 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
+/** One issue as a RUN needs to read it: what the agent is told to work on, and what its
+ *  pull request is titled. */
+export interface IssueDetail {
+  title: string;
+  body: string;
+}
+
+/** A pull request to open, fully composed by the caller. `base` is the LOGICAL branch
+ *  name (`main`), not the `origin/…` ref the run started the agent from — GitHub
+ *  resolves it on the remote and knows nothing about a local checkout's refs. */
+export interface NewPullRequest {
+  repo: string;
+  base: string;
+  head: string;
+  title: string;
+  body: string;
+  /** Anything short of the agent saying `ready` opens as a draft: a human decides
+   *  whether a run it is not sure about is worth reviewing. */
+  draft: boolean;
+}
+
+/** What ONE ISSUE RUN performs against GitHub. Separate from `GitHub` for the same
+ *  reason `GitHubReconcile` is: the Assignor's seam stays the two writes it takes, and
+ *  a test substituting a run's GitHub is never made to stub a claim it cannot reach.
+ *  `addLabels` is redeclared rather than inherited — the run applies `awaiting-human`
+ *  and the sweep replays a missed summon, which are different jobs on the same `gh`
+ *  call, and `Gh` still implements it exactly once.
+ *
+ *  All async: a run holds an agent for minutes and awaits it, so nothing here has a
+ *  reason to block a loop (ADR-0001). */
+export interface GitHubRun {
+  /** The issue the run is working on. Read on every run — fresh and on a gate resume —
+   *  because the PR the resume finally opens is titled from it. */
+  readIssue(repo: string, issue: number): Promise<IssueDetail>;
+  /** Apply labels — the run applies `awaiting-human` when the agent gates. */
+  addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** Take labels off — the resuming run removes `awaiting-human` itself, so the
+   *  Assignor never grows a third write for it. */
+  removeLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** The open PR for this head, if there already is one. A retried run whose first
+   *  attempt already opened the PR must ADOPT it: `gh pr create` dies on "a pull
+   *  request already exists", which would turn a recoverable GitHub blip into a
+   *  human-only stop. */
+  openPrForHead(repo: string, head: string): Promise<string | undefined>;
+  /** Open it, and hand back its URL. */
+  createPr(pr: NewPullRequest): Promise<string>;
+}
+
 /** The real one, over the `gh` CLI. `--repo` addresses the issue directly — v1 passed a
  *  child checkout as cwd instead, a field every one of its 39 call sites had to carry.
  *
  *  Left out of the smokes on purpose, like `githubDestination()`: it needs the CLI, a
  *  token and the network. What CAN be wrong is WHEN Sunday claims, releases and
  *  re-derives, and the Assignor's and Reconciler's smokes drive that over a substitute. */
-export class Gh implements GitHubReconcile {
+export class Gh implements GitHubReconcile, GitHubRun {
   claim(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--add-label", CLAIM_LABEL]);
   }
@@ -141,6 +189,64 @@ export class Gh implements GitHubReconcile {
       "--repo",
       repo,
       ...labels.flatMap((label) => ["--add-label", label]),
+    ]);
+  }
+
+  async removeLabels(repo: string, issue: number, labels: string[]): Promise<void> {
+    await shA("gh", [
+      "issue",
+      "edit",
+      String(issue),
+      "--repo",
+      repo,
+      ...labels.flatMap((label) => ["--remove-label", label]),
+    ]);
+  }
+
+  async readIssue(repo: string, issue: number): Promise<IssueDetail> {
+    const out = await shA("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,body"]);
+    return JSON.parse(out) as IssueDetail;
+  }
+
+  async openPrForHead(repo: string, head: string): Promise<string | undefined> {
+    // `--jq` with the `// ""` fallback so "no open PR" is an empty line rather than a
+    // parse of an empty array on every call.
+    const url = await shA("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--head",
+      head,
+      "--state",
+      "open",
+      "--json",
+      "url",
+      "--jq",
+      '.[0].url // ""',
+    ]);
+    return url || undefined;
+  }
+
+  async createPr(pr: NewPullRequest): Promise<string> {
+    // `--head` is passed EXPLICITLY (not left to default): it is what makes `gh` skip
+    // inspecting a local checkout for the branch to push and fork. The forked child's
+    // cwd is Sunday's own repo, so a create that fell back to git context would open
+    // the PR against the wrong repository entirely.
+    return await shA("gh", [
+      "pr",
+      "create",
+      "--repo",
+      pr.repo,
+      "--base",
+      pr.base,
+      "--head",
+      pr.head,
+      ...(pr.draft ? ["--draft"] : []),
+      "--title",
+      pr.title,
+      "--body",
+      pr.body,
     ]);
   }
 }
