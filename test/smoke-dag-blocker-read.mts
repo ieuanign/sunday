@@ -1,123 +1,95 @@
-// test/smoke-dag-blocker-read.mts — the swallowed blocker read, reproduced.
+// test/smoke-dag-blocker-read.mts — the swallowed blocker read, now fixed (#42).
 //   node test/smoke-dag-blocker-read.mts
 //
-// Admission asks GitHub "what blocks this issue?" through `readBlockers` and hands
-// the answer to `decideBase` (listener/dag.mts). Two silent failures in that read
-// compound:
-//   1. the native `.../dependencies/blocked_by` call sits in a bare `catch {}`, so a
-//      transient API failure is indistinguishable from "this repo has no native
-//      dependency links" and falls through to the body text;
-//   2. the body fallback only recognises `#N` refs, so a `## Blocked by` section
-//      listing its blockers as full issue URLs — what GitHub leaves behind when a
-//      link is pasted — yields nothing.
-// Together they return `[]`, which `decideBase` reads as "0 blockers → main". A
-// blocked issue is admitted and starts work on main while its blocker is still open.
+// Admission asks GitHub "what blocks this issue?" and hands the answer to base
+// selection. Two silent failures in v1's read compounded:
+//   1. the native `.../dependencies/blocked_by` call sat in a bare `catch {}`
+//      (`listener/dag.mts:45`), so a transient API failure was indistinguishable
+//      from "this repo has no native dependency links" and fell through to the
+//      body text;
+//   2. the body fallback recognised `#N` refs only (`listener/dag.mts:57`), so a
+//      `## Blocked by` section listing its blockers as full issue URLs — what
+//      GitHub leaves behind when a link is pasted — yielded nothing.
+// Together they returned `[]`, read as "0 blockers → main": a blocked issue was
+// admitted and started work on main while its blocker was still open.
 //
-// Driven through a stub `gh` — no network, no tokens — with controls on either
-// side: the healthy native read, the same body in `#N` form, and `decideBase` over
-// the blocker the read lost all behave, which pins the defect to the read rather
-// than to the fixture.
-//
-// Both defects are still present, so each desired outcome is recorded with
-// `knownDefect`: loud, not counted, and it FAILS the moment a fix lands — which is
-// how it forces promotion to a real `ok`.
+// This file held both as `knownDefect`s against v1. They are `ok`s now, against
+// V2's `resolveBase` over the real `Gh` — the whole path, argv included, driven
+// through the fixture's stub `gh`. No network, no tokens, $0. The decision table
+// itself is `test/smoke-dag.mts`; what is under test HERE is the read.
 
-import { knownDefect, makeFixture, ok, report, stubGhInEffect } from "./git-fixture.mts";
+import { makeFixture, ok, report, stubGhInEffect } from "./git-fixture.mts";
 
-import { decideBase, readBlockers, type Blocker } from "../listener/dag.mts";
+import { resolveBase } from "../assignor/dag.mts";
+import { Gh } from "../services/github/index.mts";
 
 /** The routed repo the scenario pretends to be. Only ever reaches the stub. */
-const FULL_NAME = "sunday-fixture/child";
+const REPO = "sunday-fixture/child";
 /** The dependent under admission, and the issue that blocks it. */
-const ISSUE = "10";
+const ISSUE = 10;
 const BLOCKER = 9;
 
+/** The blocker written the way that lost it: the URL form GitHub leaves behind. */
+const URL_BODY = ["Rework the widget.", "", "## Blocked by", "", `- https://github.com/${REPO}/issues/${BLOCKER}`, ""].join("\n");
+
+/** The blocker's own PR, up and open — stacking's gate. Every case that gets far
+ *  enough to ask needs it, so the stub entry is declared once. */
+const BLOCKER_PR = { [`--head feat/${BLOCKER}`]: `https://github.com/${REPO}/pull/12` };
+
+/** No git history is needed — `Gh` addresses every call with `--repo` — so the
+ *  fixture is here for its stub `gh` and its cleanup, as `smoke-github.mts` uses it. */
 const fx = makeFixture("dag-blocker-read");
-fx.stubGh({ "dependencies/blocked_by": `${BLOCKER}\topen` });
+fx.stubGh({ "dependencies/blocked_by": `${BLOCKER}\topen`, ...BLOCKER_PR });
 ok("the stub gh is in effect before any production code runs", stubGhInEffect());
 
-fx.commit("shared.txt", "base\n", "C0 base");
-fx.push("main");
-const child = fx.cloneChild();
+const gh = new Gh();
 
-// The control: with the native dependencies endpoint answering, the blocker is
-// read correctly — so anything the scenario shows later is the failure path, not
-// a mis-wired fixture.
-const healthy = readBlockers(FULL_NAME, child, ISSUE);
+// The control: with the native dependencies endpoint answering, the blocker is read
+// and stacked on — so anything the scenario shows later is the failure path, not a
+// mis-wired fixture.
+const healthy = await resolveBase(gh, REPO, ISSUE);
 ok(
-  "with the native dependencies read healthy, the blocker is reported open",
-  healthy.length === 1 && healthy[0].number === BLOCKER && healthy[0].state === "open",
-  `readBlockers returned ${JSON.stringify(healthy)}`,
+  "with the native dependencies read healthy, the dependent stacks on its blocker's branch",
+  healthy.admit && healthy.base === `feat/${BLOCKER}`,
+  JSON.stringify(healthy),
 );
 
-// …and now the failure path: the native endpoint 502s and the body lists the
-// blocker as a full URL.
-const BODY = [
-  "Rework the widget.",
-  "",
-  "## Blocked by",
-  "",
-  `- https://github.com/${FULL_NAME}/issues/${BLOCKER}`,
-  "",
-].join("\n");
-
+// Defect 1, promoted: the native endpoint 502s while the body says the issue is
+// unblocked. v1 swallowed the failure and fell through to that body — "0 blockers
+// → main". A read that did not happen is not an answer.
 fx.stubGh({
   "dependencies/blocked_by": { stderr: "gh: Server Error (HTTP 502)", exitCode: 1 },
-  "--json body": BODY,
-  // Only reached if the URL-form ref is ever recognised — stubbed so a fixed
-  // read resolves the blocker's state instead of dying on an unstubbed call.
-  "--json state": "OPEN",
+  "--json title,body": JSON.stringify({ title: "Rework the widget", body: "Rework the widget." }),
 });
-
-console.log(`\n▸ reading #${ISSUE}'s blockers — the \`Server Error\` lines below are the defect, not a suite failure\n`);
-let blockers: Blocker[] | null = null;
-let readError: Error | null = null;
-try {
-  blockers = readBlockers(FULL_NAME, child, ISSUE);
-} catch (err) {
-  readError = err instanceof Error ? err : new Error(String(err));
-}
-
-knownDefect(
-  "a blocker read that failed is not reported as 'this issue has no blockers'",
-  readError !== null || (blockers ?? []).some((b) => b.number === BLOCKER),
-  `the 502 was swallowed and the URL-form ref matched nothing, so readBlockers returned ` +
-    `${JSON.stringify(blockers)} — indistinguishable from an unblocked issue`,
+const read502 = await resolveBase(gh, REPO, ISSUE);
+ok(
+  "a native blocker read that FAILED holds the issue back instead of reading as 'nothing blocks this'",
+  !read502.admit,
+  JSON.stringify(read502),
+);
+ok(
+  "and carries the API's own text, which is the only thing that tells an operator a 502 from a wait",
+  !read502.admit && read502.unreadable === true && read502.reason.includes("HTTP 502"),
+  JSON.stringify(read502),
 );
 
-// The consequence: that empty read is handed straight to base selection, which
-// reads it as "0 blockers → main" and admits an issue whose blocker is still open.
-/** #9's PR is open in this scenario, so a correct read would stack, not defer. */
-const hasOpenPr = (blocker: number): boolean => blocker === BLOCKER;
-
-const decision = blockers ? decideBase(blockers, hasOpenPr) : null;
-knownDefect(
-  "an issue whose blocker read failed is not admitted onto main",
-  decision === null || !(decision.admit && decision.baseBranch === "main"),
-  `decideBase returned ${JSON.stringify(decision)} — #${ISSUE} starts work on main while #${BLOCKER} is still open`,
-);
-
-// It takes BOTH halves: the same body in the `#N` form the fallback recognises
-// resolves the blocker fine, so the swallowed 502 alone is not what loses it.
+// Defect 2, promoted: this repo populates no native links — exit 0 and EMPTY stdout,
+// a real answer rather than a failed one — so the body fallback gets its turn, and
+// the section names its blocker as a pasted URL. v1's `#N`-only fallback matched
+// nothing there and admitted onto main.
 fx.stubGh({
-  "dependencies/blocked_by": { stderr: "gh: Server Error (HTTP 502)", exitCode: 1 },
-  "--json body": BODY.replace(`https://github.com/${FULL_NAME}/issues/${BLOCKER}`, `#${BLOCKER}`),
+  "dependencies/blocked_by": "",
+  "--json title,body": JSON.stringify({ title: "Rework the widget", body: URL_BODY }),
+  // `gh issue view` shouts the state the dependencies endpoint whispers; the body
+  // fallback resolves each ref's state through it, one read per ref.
   "--json state": "OPEN",
+  ...BLOCKER_PR,
 });
-const viaHashRef = readBlockers(FULL_NAME, child, ISSUE);
+const viaUrl = await resolveBase(gh, REPO, ISSUE);
 ok(
-  "the same section written as `#9` does resolve the blocker — the URL form is the other half",
-  viaHashRef.length === 1 && viaHashRef[0].number === BLOCKER && viaHashRef[0].state === "open",
-  `readBlockers returned ${JSON.stringify(viaHashRef)}`,
-);
-
-// …and the decision itself is sound — handed the blocker the read lost, it stacks
-// #10 on its blocker's branch. The whole defect is in the read.
-const sound = decideBase([{ number: BLOCKER, state: "open" }], hasOpenPr);
-ok(
-  "given the blocker the read lost, base selection stacks the dependent on feat/9",
-  sound.admit && sound.baseBranch === `feat/${BLOCKER}`,
-  `decideBase returned ${JSON.stringify(sound)}`,
+  "a `## Blocked by` section written as a pasted issue URL resolves the blocker, and the dependent stacks on it",
+  viaUrl.admit && viaUrl.base === `feat/${BLOCKER}`,
+  JSON.stringify(viaUrl),
 );
 
 report();
