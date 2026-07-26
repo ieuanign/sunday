@@ -13,20 +13,27 @@ import type { ModuleLogger } from "#services/logger.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 
-/** One webhook delivery, normalised — `event`, `action`, and who it is about. The
- *  receiver (`services/github/receiver.mts`) builds these and decides NOTHING; every
- *  decision taken on one is taken here. */
-export interface Delivery {
-  /** The `X-GitHub-Event` header: `issues`, `issue_comment`, `pull_request`, … */
-  event: string;
-  action: string;
+/** One issue, as ADMISSION needs to see it: which repo, which number, and the labels on
+ *  it right now. `Delivery` is a superset of exactly this, which is the point — the live
+ *  route and #35's reconcile hand `considerIssue` the SAME shape, so there is one
+ *  admission path rather than a live one and a recovery one that drift. */
+export interface IssueCandidate {
   /** `repository.full_name` as the payload spelled it — untrusted until it matches a
    *  configured repo, which is what admission does (constraint 14). */
   repo: string;
-  /** The issue or PR number the delivery is about. Likewise untrusted: it becomes a
-   *  work-item key and a path segment. */
+  /** The issue number this is about. Likewise untrusted: it becomes a work-item key and
+   *  a path segment. */
   number: number;
   labels: string[];
+}
+
+/** One webhook delivery, normalised — `event`, `action`, and who it is about. The
+ *  receiver (`services/github/receiver.mts`) builds these and decides NOTHING; every
+ *  decision taken on one is taken here. */
+export interface Delivery extends IssueCandidate {
+  /** The `X-GitHub-Event` header: `issues`, `issue_comment`, `pull_request`, … */
+  event: string;
+  action: string;
 }
 
 /** How a forked child ENDED. Not what it produced — the parent applies that from the
@@ -182,8 +189,15 @@ export class Assignor {
 
   /** Admit an issue, or say why not. Four guards, cheapest and most durable first: is it
    *  Sunday's work at all, is the number one, is the item already somewhere in its life,
-   *  and is a process still on it. */
-  private considerIssue({ repo, number, labels }: Delivery): void {
+   *  and is a process still on it.
+   *
+   *  PUBLIC because it is the admission SEAM (constraint 3): #35's reconcile re-derives
+   *  open issues from GitHub and hands each one straight to this, rather than carrying a
+   *  second copy of these four guards that drifts from this one — which is exactly how
+   *  v1's live and recovery paths came apart. It takes an `IssueCandidate` and not a
+   *  `Delivery` for the same reason: reconcile has no webhook event to name, and a
+   *  synthetic one would put an event in the log that never happened. */
+  considerIssue({ repo, number, labels }: IssueCandidate): void {
     const decision = admitIssue(repo, labels, this.repos);
     if (!decision.admit) {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);

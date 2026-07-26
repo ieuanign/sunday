@@ -20,6 +20,7 @@ import { loadRepos } from "#config/repos.mts";
 import { createForkWorkItem } from "#assignor/fork.mts";
 import { Assignor } from "#assignor/index.mts";
 import { PauseStore } from "#assignor/pause.mts";
+import { Reconciler } from "#assignor/reconcile.mts";
 import { createScheduler } from "#assignor/scheduler.mts";
 import { StateStore } from "#assignor/state.mts";
 import {
@@ -60,16 +61,21 @@ if (!repos) process.exit(1);
 
 const scheduler = createScheduler(maxConcurrency, logger.child("scheduler"));
 const state = new StateStore(statePath);
+// One `Gh`: the Assignor takes the two writes it is allowed (claim, release) and
+// reconcile the wider read seam, off the same CLI and the same token.
+const github = new Gh();
 
 const assignor = new Assignor({
   repos,
-  github: new Gh(),
+  github,
   log: logger.child("assignor"),
   scheduler,
   state,
   fork: createForkWorkItem(),
   paths: { resultPath, pidPath, runLogPath, eventLogPath },
 });
+
+const reconciler = new Reconciler({ repos, github, assignor, log: logger.child("reconcile") });
 
 const sandbox = new SandboxService(logger);
 
@@ -80,6 +86,7 @@ const boot = new Boot({
   state,
   assignor,
   buildImages: (table, parentRoot) => sandbox.buildImages(table, parentRoot),
+  reconcile: () => reconciler.run(),
   // This file sits at the workspace root, which is what the routing table's child paths
   // are relative to.
   parentRoot: import.meta.dirname,

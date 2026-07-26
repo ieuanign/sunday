@@ -12,7 +12,10 @@
 //                           half-built image.
 //   4. recovery sweep     — resolve what the dead parent left: every finished outcome on
 //                           disk and every in-flight item whose child is gone.
-//   5. lift the hold      — only if no pause is armed.
+//   5. reconcile          — re-derive outstanding work from GitHub, which is the truth.
+//                           AFTER the sweep, so what it re-reads is settled state rather
+//                           than a half-resolved item it would read as work in progress.
+//   6. lift the hold      — only if no pause is armed.
 //
 // Constraint 2: the ONLY fatal step is the routing table. Everything else is reported
 // and survived — v1's preflight threw out of boot instead, which under `restart: always`
@@ -47,6 +50,12 @@ export type BuildImages = (
   parentRoot: string,
 ) => Promise<ImageOutcome[]>;
 
+/** Re-derive every outstanding piece of work from GitHub — `assignor/reconcile.mts`'s
+ *  `Reconciler.run`, injected as a function for the same reason the image build is: this
+ *  file is about WHERE in the sequence it happens, and a smoke drives the whole sequence
+ *  with no GitHub anywhere. What it re-derives is that module's own smoke's subject. */
+export type Reconcile = () => Promise<void>;
+
 /** The `var/results/` facts the recovery sweep needs, from `lib/paths.mts`. Injected for
  *  the same reason the Assignor's paths are: a smoke drives the real sweep against a
  *  throwaway dir instead of the real `var/`. */
@@ -67,6 +76,7 @@ export interface BootDeps {
   state: StateStore;
   assignor: Assignor;
   buildImages: BuildImages;
+  reconcile: Reconcile;
   /** The workspace root the routing table's child paths resolve against. */
   parentRoot: string;
   paths: BootPaths;
@@ -82,6 +92,7 @@ export class Boot {
   private readonly state: StateStore;
   private readonly assignor: Assignor;
   private readonly buildImages: BuildImages;
+  private readonly reconcile: Reconcile;
   private readonly parentRoot: string;
   private readonly paths: BootPaths;
   private readonly log: ModuleLogger;
@@ -93,6 +104,7 @@ export class Boot {
     this.state = deps.state;
     this.assignor = deps.assignor;
     this.buildImages = deps.buildImages;
+    this.reconcile = deps.reconcile;
     this.parentRoot = deps.parentRoot;
     this.paths = deps.paths;
     this.log = deps.log;
@@ -105,6 +117,10 @@ export class Boot {
     await this.step("re-arm", () => this.rearm());
     await this.step("images", () => this.images());
     await this.step("sweep", () => this.sweep());
+    // AFTER the sweep: an item the sweep has not settled yet is still recorded in-flight,
+    // and re-derived in that state it reads as work in progress and is left alone — which
+    // is the loss this whole sequence exists to prevent.
+    await this.step("reconcile", () => this.reconcile());
     this.lift();
   }
 

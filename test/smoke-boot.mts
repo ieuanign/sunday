@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { Boot, type BuildImages, readRoutingTable } from "../boot.mts";
+import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "../boot.mts";
 import type { RepoConfig } from "#config/repos.mts";
 import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
 import { PauseStore, rearmAction } from "../assignor/pause.mts";
@@ -74,7 +74,7 @@ let caseNo = 0;
  *  and Logger, with the two things that reach the world substituted — the image build
  *  (docker, minutes) and GitHub (every method is a real write to a real repo). Every path
  *  points into this case's own dir, so the real `var/` is never touched. */
-function harness(over: { buildImages?: BuildImages; releaseThrows?: string } = {}) {
+function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; releaseThrows?: string } = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   const { logger, lines, events, comments } = capture();
 
@@ -122,6 +122,20 @@ function harness(over: { buildImages?: BuildImages; releaseThrows?: string } = {
       return [];
     });
 
+  /** What re-deriving from GitHub saw when it ran. Substituted here the same way the
+   *  build is — the real one (`assignor/reconcile.mts`, driven by its own smoke) reads
+   *  GitHub for every routed repo, and what THIS file is about is where in the sequence it
+   *  happens: under whose pause, and with the sweep already finished or not. */
+  const reDerive: { ran: number; held?: boolean; pauseReason?: string; state?: Record<string, { status: string }> } = { ran: 0 };
+  const reconcile: Reconcile =
+    over.reconcile ??
+    (async () => {
+      reDerive.ran++;
+      reDerive.held = scheduler.isPaused();
+      reDerive.pauseReason = scheduler.snapshot().pauseReason;
+      reDerive.state = state.all();
+    });
+
   const boot = new Boot({
     repos: TABLE,
     scheduler,
@@ -129,12 +143,13 @@ function harness(over: { buildImages?: BuildImages; releaseThrows?: string } = {
     state,
     assignor,
     buildImages,
+    reconcile,
     parentRoot: caseDir,
     paths: { resultsDir: resolve(caseDir, "results"), resultPath: paths.resultPath },
     log: logger.child("boot"),
   });
 
-  return { boot, scheduler, state, pause, paths, lines, events, comments, claimed, released, build, forked };
+  return { boot, scheduler, state, pause, paths, lines, events, comments, claimed, released, build, reDerive, forked };
 }
 
 try {
@@ -211,6 +226,7 @@ try {
 
     ok("hold: the queue is held while the images build — a delivery arriving mid-build must not start on one that is half-built", h.build.held === true, JSON.stringify(h.build));
     ok("hold: every routed repo's image is (re)built, from the workspace root the children hang off", h.build.repos?.join(",") === "acme/finance" && h.build.root !== undefined, JSON.stringify(h.build));
+    ok("hold: outstanding work is re-derived from GitHub — once, and still under the hold, so a re-derived item is QUEUED rather than started mid-sweep", h.reDerive.ran === 1 && h.reDerive.held === true, JSON.stringify(h.reDerive));
     ok("hold: and the hold is lifted once boot is done, with nothing armed to keep it", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
   }
 
@@ -227,6 +243,7 @@ try {
     ok("re-arm: and it survives boot — the hold lifts, the halt does not", h.pause.read()?.reason.includes("403") === true, JSON.stringify(h.pause.read()));
     ok("re-arm: a halt awaiting a human reaches the operator, not just the log file", h.events.some((l) => l.level === "alert" && l.message.includes("403")), JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
     ok("re-arm: it happens BEFORE anything is re-derived, so what boot finds is held rather than run into the same wall", h.build.held === true, JSON.stringify(h.build));
+    ok("re-arm: and the re-derive runs under THAT pause, not boot's own — every issue it finds is held by the reason the pipeline stopped for", h.reDerive.pauseReason?.includes("403") === true, JSON.stringify(h.reDerive));
   }
 
   // ── the common case: the pipeline was down for longer than the window it was waiting
@@ -289,6 +306,7 @@ try {
     ok("sweep: the result file is cleared — its presence is what stops a second apply", !existsSync(h.paths.resultPath(key)), h.paths.resultPath(key));
     ok("sweep: the claim comes off, so the issue is not left taken by a process that no longer exists", h.released.join(",") === key, h.released.join(","));
     ok("sweep: and the humans watching the issue are told what it finished as, exactly once", h.comments.length === 1 && h.comments[0]!.message.includes("opened acme/finance#58"), JSON.stringify(h.comments.map((l) => l.message)));
+    ok("sweep: it is finished BEFORE GitHub is re-read — an item still recorded in-flight would be re-derived as work in progress and left where it is", h.reDerive.state?.[key]?.status === "done", JSON.stringify(h.reDerive.state));
   }
 
   // ── the sweep, source B: an item the state file still calls in-flight with no child
@@ -393,6 +411,22 @@ try {
 
     ok("images: a build that throws does not take boot down with it", said(h.lines, "ENOENT"), JSON.stringify(h.lines.map((l) => l.message)));
     ok("images: and boot still finishes — the queue is released, not stranded held", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+  }
+
+  // ── nor does a re-derive that throws. It is the step that reads GitHub for every routed
+  //    repo, so it is the step most likely to fail on somebody else's outage — and a
+  //    parent that dies there comes back up, reads GitHub, dies again: a restart loop that
+  //    never answers a webhook, for a step whose whole job is to be re-runnable ──
+  {
+    const h = harness({
+      reconcile: async () => {
+        throw new Error("gh issue list failed: HTTP 502");
+      },
+    });
+    await h.boot.run();
+
+    ok("reconcile: a re-derive that throws does not take boot down with it", said(h.lines, "502"), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("reconcile: and the queue is released — a pipeline held for a failed re-derive runs nothing at all", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });
