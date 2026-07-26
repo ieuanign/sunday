@@ -4,11 +4,14 @@
 // killed at any instant without losing finished work or double-starting an orphan.
 //   devbox run node test/smoke-spine-fork.mts
 // Every path the child writes comes from the job, so this drives the real entry point
-// against a throwaway dir and never the real `var/`. $0, no network, no GitHub.
+// against a throwaway dir and never the real `var/`. $0, no network, no GitHub — the
+// child really runs an agent now (#36), so the job below points at a repo config that
+// cannot resolve and the run fails before it can reach docker, `gh` or the network.
+// What a run DECIDES once it is set up is test/smoke-issue-run.mts's.
 
 import { fork } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import { createForkWorkItem } from "../assignor/fork.mts";
 // Type-only, so the entry point stays OUT of this process's module graph exactly as it
@@ -18,8 +21,15 @@ import { readLock, type Lock } from "../lib/lock.mts";
 import { readOutcome } from "../lib/outcome.mts";
 import { pidPath, resultPath } from "../lib/paths.mts";
 
-const entry = resolve(import.meta.dirname, "..", "issue", "run.mts");
-const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-spine-fork-${process.pid}`);
+const root = resolve(import.meta.dirname, "..");
+const entry = resolve(root, "issue", "run.mts");
+const dir = resolve(root, ".scratch", `smoke-spine-fork-${process.pid}`);
+/** The baseline prompt the child reads before it runs anything, named the way a repo
+ *  config names it: RELATIVE to the workspace root. Pointed inside this smoke's own
+ *  throwaway dir and never created, so the run fails on its first act — offline, with no
+ *  docker, no `gh` and no quota — while still proving the child resolved its repo config
+ *  against the root and reported the real reason. */
+const missingPrompt = relative(root, resolve(dir, "no-such-prompt.md"));
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {
@@ -35,7 +45,9 @@ function jobFor(key: string, issue: number): Job {
     key,
     repo: "acme/finance",
     issue,
-    config: { path: "repos/finance", imageName: "sunday-finance", promptFile: "docs/prompt.md", triggerLabels: ["sunday"] },
+    // A child checkout that cannot be there and a prompt file that is not either:
+    // `repos/` holds REAL clones, so a job naming a real one would fetch from the origin.
+    config: { path: "repos/not-a-child", imageName: "sunday-finance", promptFile: missingPrompt, triggerLabels: ["sunday"] },
     resultPath: resolve(dir, "results", `${slug}.json`),
     pidPath: resolve(dir, "running", `${slug}.pid`),
     runLogPath: resolve(dir, "log", "acme", "finance", String(issue), "run.log"),
@@ -94,8 +106,11 @@ function runChild(job: Job): Promise<Observed> {
 }
 
 try {
-  // ── the round trip: what the child wrote is what the parent applies. The spine has
-  //    no agent in it yet (#36), so a run that does nothing still finishes honestly ──
+  // ── the round trip: what the child wrote is what the parent applies. This job names a
+  //    baseline prompt that is not there, which is a real misconfiguration and the one
+  //    kind of failure this smoke can reach offline — and the child's whole bargain is
+  //    that it leaves a durable outcome SAYING SO rather than an exit code the parent has
+  //    to guess a reason for ──
   {
     const job = jobFor("acme/finance#57", 57);
     const observed = await runChild(job);
@@ -120,12 +135,12 @@ try {
     ok("the outcome is on disk where the job said to put it", read.state === "ok", `${JSON.stringify(read)}\n    ${observed.stderr}`);
     ok(
       "it names the work item it belongs to and how the run finished",
-      read.state === "ok" && read.outcome.key === "acme/finance#57" && read.outcome.status === "done",
+      read.state === "ok" && read.outcome.key === "acme/finance#57" && read.outcome.status === "failed",
       JSON.stringify(read),
     );
     ok(
-      "it says plainly that no work ran, rather than claiming an agent did any",
-      read.state === "ok" && read.outcome.summary.length > 0 && !Number.isNaN(Date.parse(read.outcome.finishedAt)),
+      "a run that could not even be set up says WHY, rather than claiming an agent did any work",
+      read.state === "ok" && read.outcome.summary.includes("no-such-prompt.md") && !Number.isNaN(Date.parse(read.outcome.finishedAt)),
       JSON.stringify(read),
     );
   }
