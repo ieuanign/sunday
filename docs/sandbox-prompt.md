@@ -83,9 +83,10 @@ the very last thing you output**:
     your `question` to the issue, and waits. Your session is resumed with the human's reply.
   - **fail** — you could not reach green within the fix bounds (§7); commit WIP first. → host
     pushes and opens a **draft** PR labelled for a human to retry.
-- **`description`** — plain English: what changed, and what a reviewer needs to know first. The
-  host composes the PR body from it and the fields below (ready/draft), or reads it as the failure
-  diagnosis (fail). For a gate, one line of context.
+- **`description`** — plain English: what changed, and what a reviewer needs to know first — enough
+  to follow the change without opening the diff, in a few sentences. The host composes the PR body
+  from it and the fields below (ready/draft), or reads it as the failure diagnosis (fail). For a
+  gate, one line of context.
 - **`question`** — **required when `signal` is `gate`**: the exact question the host posts to the
   issue for the human. Omit otherwise.
 
@@ -98,12 +99,17 @@ as "not provided", so emit what you actually know and never invent the rest:
   `"docs"`. Other words are not accepted.
 - **`risk`** — exactly one of `"low"`, `"medium"`, `"high"`, so a reviewer can triage.
 - **`verification`** — what you actually ran and what it said (the commands, the suite, the manual
-  check) — not what you intended to run.
+  check) — not what you intended to run. Commands and results, not a narrative.
 - **`relatedIssues`** — issue **numbers** only, e.g. `[12, 34]`. The host renders the references.
 - **`review`** — your review phase's (§2 step 3) `verdict` plus a `body` of its findings: what it
   fixed, and what it **accepted and why**, so a human can disagree with an accepted finding instead
-  of never learning it existed. Omitting `review` is read as `NOT_RUN`; a review that did not run or
-  that errored is **never** reported as `APPROVED`.
+  of never learning it existed. The findings and their disposition — not a retelling of the review.
+  Omitting `review` is read as `NOT_RUN`; a review that did not run or that errored is **never**
+  reported as `APPROVED`.
+
+**Write these to be read fast.** A human reads every prose field above beside the diff: never
+restate the diff, never pad to look thorough, never invent. Prefer a missing field over filler —
+a missing one already renders as "not provided".
 
 **Never write a closing keyword.** The host writes `Closes #<issue>` itself on every PR it opens,
 and neutralises any `Closes #12` / `Fixes #9` / `Resolves #4` in your prose before rendering it —
