@@ -11,6 +11,7 @@ import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
 import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
 import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
+import { resolveBase, type BaseDecision } from "./dag.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 
@@ -96,9 +97,16 @@ const COMMENT_EVENT = "issue_comment";
 
 /** Event types the pipeline knows and this issue deliberately does not act on, so
  *  "not built yet" and "never heard of it" are different lines in the log: PR-comment
- *  runs are #44, the DAG re-evaluation and restack cascade #42/#43. A created comment is
- *  routed above (a gate resume); every other comment action lands here. */
+ *  runs are #44 and the restack cascade #43. A created comment is routed above (a gate
+ *  resume), and a `pull_request` action that could have changed a blocker's state is
+ *  routed below (#42); every other action on either lands here. */
 const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", "pull_request_review_comment"]);
+
+/** The actions after which a deferred item's answer could be different: a blocker's PR
+ *  appearing is what a dependent with nothing to stack on is waiting for, and one closing
+ *  or merging changes what it should stack on. `closed` covers a merge — GitHub sends no
+ *  `merged` action. Ported from v1's `PR_REEVAL_ACTIONS`. */
+const PR_REEVAL_ACTIONS = new Set(["opened", "reopened", "closed"]);
 
 /** A spec describes the shape of a feature; its child issues are the work (CONTEXT.md).
  *  The literal is ported from v1's `listener/helper.mts` rather than imported — v1 and
@@ -152,6 +160,18 @@ export function parseWorkItemKey(key: string, table: Record<string, RepoConfig>)
 
 export type Admission = { admit: true } | { admit: false; reason: string };
 
+/** One item admitted in principle and held back until its blockers change (CONTEXT.md
+ *  — "Deferred"). The candidate is kept whole so a re-evaluation re-runs the SAME
+ *  admission the delivery got, and the reason is kept so a repeat of it can be said
+ *  quietly (constraint 5). */
+interface Deferred {
+  candidate: IssueCandidate;
+  reason: string;
+}
+
+/** Why a deferred item is waiting, as `assignor/dag.mts` answered it. */
+type Refusal = Extract<BaseDecision, { admit: false }>;
+
 /** Is this issue Sunday's to work? Its repo must be routed, it must not already be
  *  claimed, it must not be a spec, and ALL of its repo's trigger labels must be present.
  *
@@ -183,6 +203,11 @@ export class Assignor {
   private readonly state: StateStore;
   private readonly fork: ForkWorkItem;
   private readonly paths: Paths;
+  /** Items waiting on a blocker, by work-item key. IN MEMORY ONLY (constraint 6):
+   *  GitHub is the truth and #35's reconcile hands every open issue back to admission,
+   *  so a restart rebuilds this map from the world rather than from a file that could
+   *  disagree with it. */
+  private readonly deferred = new Map<string, Deferred>();
 
   constructor(deps: AssignorDeps) {
     this.repos = deps.repos;
@@ -202,23 +227,42 @@ export class Assignor {
     const what = `${event}${action ? `.${action}` : ""}`;
     this.log.info(`← ${what} ${repo}#${number}${labels.length > 0 ? ` [${labels.join(", ")}]` : ""}`);
     if (event === "issues" && ADMIT_ACTIONS.has(action)) {
-      this.considerIssue(delivery);
+      // Fired, not awaited, and with its OWN catch: this method stays `void` because the
+      // receiver calls it synchronously inside a try/catch that cannot see a rejection —
+      // an admission that throws would be an unhandled one and take the parent down
+      // (ADR-0001). Admission reaches GitHub now (#42), so it really can reject.
+      void this.considerIssue(delivery).catch((err: unknown) =>
+        this.log.error(`✗ ${repo}#${number} not considered — ${describe(err)}`, { repo }),
+      );
       return;
     }
     if (event === COMMENT_EVENT && action === "created") {
       this.considerReply(delivery);
       return;
     }
+    // A blocker's PR appeared or its issue closed, so what an item deferred on may have
+    // changed (#42). Fired with its own catch for the same reason admission is.
+    if ((event === "pull_request" && PR_REEVAL_ACTIONS.has(action)) || (event === "issues" && action === "closed")) {
+      void this.reevaluate(repo).catch((err: unknown) =>
+        this.log.error(`✗ ${repo} deferred items not re-evaluated — ${describe(err)}`, { repo }),
+      );
+      return;
+    }
     this.log.info(
       KNOWN_UNBUILT.has(event)
-        ? `· ${what} — recognised, and not the spine's to handle (#42/#43/#44)`
+        ? `· ${what} — recognised, and not the spine's to handle (#43/#44)`
         : `· ${what} — no route`,
     );
   }
 
-  /** Admit an issue, or say why not. Four guards, cheapest and most durable first: is it
+  /** Admit an issue, or say why not. Five guards, cheapest and most durable first: is it
    *  Sunday's work at all, is the number one, is the item already somewhere in its life,
-   *  and is a process still on it.
+   *  is a process still on it — and only then, does anything still BLOCK it (#42). That
+   *  last one is the only question this method asks the network, which is why it goes
+   *  last (constraint 4): ahead of the others, every unlabelled issue in a 200-issue
+   *  reconcile pass would pay for a `gh` round-trip to be told it was never Sunday's
+   *  work. It is also the one that can answer "not yet" rather than "no" — a deferred
+   *  item is held in memory and re-asked when a blocker's state could have changed.
    *
    *  PUBLIC because it is the admission SEAM (constraint 3): #35's reconcile re-derives
    *  open issues from GitHub and hands each one straight to this, rather than carrying a
@@ -226,7 +270,7 @@ export class Assignor {
    *  v1's live and recovery paths came apart. It takes an `IssueCandidate` and not a
    *  `Delivery` for the same reason: reconcile has no webhook event to name, and a
    *  synthetic one would put an event in the log that never happened. */
-  considerIssue({ repo, number, labels }: IssueCandidate): void {
+  async considerIssue({ repo, number, labels }: IssueCandidate): Promise<void> {
     const decision = admitIssue(repo, labels, this.repos);
     if (!decision.admit) {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);
@@ -255,12 +299,66 @@ export class Assignor {
       this.log.info(`· skip ${item.key} — pid ${pid} is still on it`);
       return;
     }
+    const base = await resolveBase(this.github, item.repo, item.issue);
+    if (!base.admit) {
+      this.defer(item, labels, base);
+      return;
+    }
+    this.deferred.delete(item.key);
     // Claim BEFORE the queue: the claim is what the NEXT delivery reads, and it may
     // arrive long before this item reaches the front of a full lane.
     this.github.claim(item.repo, item.issue);
-    this.state.set(item.key, { status: "in-flight" });
+    this.state.set(item.key, { status: "in-flight", base: base.base });
     const cfg = this.repos[item.repo]; // admission passed, so the repo is routed
-    this.scheduler.enqueue({ key: item.key, branch: `feat/${item.issue}`, run: () => this.run(item, cfg) });
+    this.scheduler.enqueue({ key: item.key, branch: `feat/${item.issue}`, run: () => this.run(item, cfg, base.base) });
+  }
+
+  /** Re-run admission for everything this repo is holding back, because a blocker's PR
+   *  just appeared or its issue closed. FORWARD edge, like v1's `reevaluateDeferred`:
+   *  GitHub's `dependencies/blocks` endpoint 404s, so nobody can ask "what does this
+   *  unblock?" — each deferred item re-asks its own blockers instead.
+   *
+   *  SERIALLY, and per repo: a repo with a queue of deferred items would otherwise fire a
+   *  burst of `gh` reads at once on every PR event in it. Nothing here starts a run
+   *  directly — `considerIssue` re-applies every guard, on the labels captured when the
+   *  item was deferred (a trigger removed while it waited is #38's precondition, not
+   *  this).
+   *
+   *  Start-up needs none of this: #35's reconcile hands every open issue to the same
+   *  admission seam, so the map rebuilds itself from GitHub on every boot. */
+  private async reevaluate(repo: string): Promise<void> {
+    for (const [key, held] of [...this.deferred]) {
+      if (held.candidate.repo !== repo) continue;
+      // Somewhere in its life already — in-flight, done, or waiting on a human. Whatever
+      // it is, it is no longer waiting on a blocker, so it stops being tracked as such.
+      const prior = this.state.get(key);
+      if (prior && prior.status !== "failed") {
+        this.deferred.delete(key);
+        continue;
+      }
+      await this.considerIssue(held.candidate);
+    }
+  }
+
+  /** Hold an item back, and remember it so a blocker's state changing can pick it up
+   *  again. Nothing else happens: not claimed, not queued, nothing durable written
+   *  (constraint 6) — a deferred issue is exactly as available as it was before.
+   *
+   *  How LOUD it is said is the whole of constraint 5. A blocker that has not landed is
+   *  the mechanism working, so it is `info`. A read Sunday could not perform is somebody
+   *  else's service being down and only an operator can act on it — but it carries the
+   *  repo and NO target, so it reaches the phone and never the issue: a work item gets
+   *  exactly two comments and a deferred one has not started. The same reason repeating
+   *  drops back to `info`, so a re-evaluation storm across one repo's PR events cannot
+   *  page anybody once per event for a single outage. */
+  private defer(item: WorkItemRef, labels: string[], refusal: Refusal): void {
+    const held = this.deferred.get(item.key);
+    // Built from the VALIDATED item rather than kept from the payload (constraint 14):
+    // this candidate is what a re-evaluation minutes later admits on.
+    this.deferred.set(item.key, { candidate: { repo: item.repo, number: item.issue, labels }, reason: refusal.reason });
+    const line = `⏸ defer ${item.key} — ${refusal.reason}`;
+    if (refusal.unreadable && held?.reason !== refusal.reason) this.log.error(line, { repo: item.repo });
+    else this.log.info(line);
   }
 
   /** A comment on an issue, which is how a gated run gets its answer. The item is picked
@@ -315,28 +413,34 @@ export class Assignor {
       this.log.info(`· skip ${key} — awaiting-human with no session to resume`);
       return;
     }
+    // What the item was admitted on. A resume decides no base of its own: the branch is
+    // already there and the blockers are re-read for FRESH work only — what this run
+    // still does is open the PR the gate never opened, and that targets where the work
+    // was stacked (#42 constraint 8). Absent for an item admitted before this existed.
+    const base = prior.base ?? "main";
     this.github.claim(repo, number);
-    // The whole record is replaced, so the handle is written back deliberately
-    // (constraint 12): dropped here, a run that dies mid-resume leaves a gated item with
-    // nothing left to resume from.
-    this.state.set(key, { status: "in-flight", sessionId: session });
+    // The whole record is replaced, so the handle and the base are written back
+    // deliberately (constraint 12): dropped here, a run that dies mid-resume leaves a
+    // gated item with nothing left to resume from and no base to resume onto.
+    this.state.set(key, { status: "in-flight", sessionId: session, base });
     const item: WorkItemRef = { key, repo, issue: number };
     this.scheduler.enqueue({
       key,
       branch: `feat/${number}`,
-      run: () => this.run(item, cfg, { sessionId: session, reply: comment }),
+      run: () => this.run(item, cfg, base, { sessionId: session, reply: comment }),
     });
   }
 
   /** One work item, from the fork to its applied outcome. Handed to the scheduler, and
    *  it settles when the CHILD exits — so the cap and the branch lock hold for the
    *  child's whole life rather than just for the fork call. */
-  private async run(item: WorkItemRef, cfg: RepoConfig, resume?: Job["resume"]): Promise<void> {
+  private async run(item: WorkItemRef, cfg: RepoConfig, base: string, resume?: Job["resume"]): Promise<void> {
     const job: Job = {
       key: item.key,
       repo: item.repo,
       issue: item.issue,
       config: cfg,
+      base,
       // Every path the child writes is resolved HERE (constraint 7). The child derives
       // none, which is what lets a smoke fork the real entry point into a temp dir.
       resultPath: this.paths.resultPath(item.key),
@@ -447,7 +551,10 @@ export class Assignor {
    *  tail below: a gated item's handle would otherwise be gone before the human it is
    *  waiting on has read the question. */
   private record(item: WorkItemRef, status: Outcome["status"], summary: string, sessionId?: string): void {
-    this.state.set(item.key, { status, sessionId });
+    // The base is carried forward rather than re-derived: the whole record is replaced,
+    // and a gated item that loses it resumes onto `main` — which would open a stacked
+    // item's PR against the wrong branch, carrying its blocker's commits as its own.
+    this.state.set(item.key, { status, sessionId, base: this.state.get(item.key)?.base });
     // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
     // asks the human something, and rendering it as a failure tells them work broke when
     // what actually happened is that they are being waited on.
@@ -468,6 +575,10 @@ export class Assignor {
     releaseLock(this.paths.pidPath(item.key));
     this.github.release(item.repo, item.issue);
   }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** How a child failed its work item, for the human reading the comment. A signal is not

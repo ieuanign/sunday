@@ -73,7 +73,7 @@ function reply(body: string, over: Partial<Delivery> = {}): Delivery {
  *  that reach the world substituted: GitHub (every method is a real write to a real
  *  repo) and the fork (a child process). Every path it uses points into this case's own
  *  dir, so the real `var/` is never touched. */
-function harness() {
+function harness(reads: Partial<GitHub> = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   /** Every line either module emits, at any level — the run log is the one destination
    *  every level routes to. */
@@ -101,6 +101,8 @@ function harness() {
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // …and a case about dependencies says so, one read at a time.
+    ...reads,
   };
 
   const paths: Paths = {
@@ -248,6 +250,7 @@ try {
   {
     const h = harness();
     h.assignor.handle(delivery());
+    await tick();
     h.assignor.handle(delivery()); // the same label landing again
     await tick();
 
@@ -261,6 +264,11 @@ try {
       "fork: the job names the work item and the routed repo, never the raw payload's spelling",
       job?.key === "acme/finance#57" && job.repo === "acme/finance" && job.issue === 57,
       JSON.stringify(job),
+    );
+    ok(
+      "fork: and the base the Assignor chose for it — an issue nothing blocks runs on main",
+      job?.base === "main",
+      JSON.stringify(job?.base),
     );
     ok(
       "fork: it carries how the repo is run, resolved from the table the delivery routed against",
@@ -282,6 +290,169 @@ try {
       h.comments[0]?.level === "milestone" && h.comments[0].context.repo === "acme/finance" && h.comments[0].context.target === 57,
       JSON.stringify(h.comments[0]),
     );
+  }
+
+  // ── two deliveries for one issue can now BOTH cross admission's blocker read, which
+  //    is an `await` where there was none (#42 constraint 13). Nothing new guards it: the
+  //    scheduler's key dedup is what makes it one run, and the second claim is the same
+  //    label applied to the same issue twice ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    h.assignor.handle(delivery()); // in the same tick, before the first can claim
+    await tick();
+
+    ok("race: one child for the item, whichever delivery got there first", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+    ok("race: and one work item recorded, not two", h.state.get(KEY)?.status === "in-flight", JSON.stringify(h.state.get(KEY)));
+  }
+
+  // ── #42: an issue whose blocker has not landed is admitted in principle and HELD.
+  //    Deferred is not a durable status (constraint 6): a claim says a run is on it, and
+  //    a state entry the machine does not know would make the prior-state guard skip the
+  //    item forever. GitHub is the truth, and reconcile rebuilds the map ──
+  {
+    const h = harness({ blockedBy: async () => [{ number: 9, state: "open" }] });
+    h.assignor.handle(delivery());
+    await tick();
+
+    ok("defer: no child is forked for an issue whose blocker is still open", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+    ok("defer: the issue is not claimed — `agent-working` means a run is on it, and none is", h.claimed.length === 0, h.claimed.join(","));
+    ok("defer: nothing durable is written, so the item stays admissible", h.state.get(KEY) === undefined, JSON.stringify(h.state.get(KEY)));
+    ok("defer: the reason names the blocker being waited on", said(h.lines, "#9"), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("defer: and it costs the issue no comment — a deferred item has not started", h.comments.length === 0, JSON.stringify(h.comments.map((l) => l.message)));
+  }
+
+  // ── …and the other half: a blocker with a PR already open has a branch worth forking
+  //    from, so the dependent starts NOW, stacked on it (ADR-0003 — human review latency
+  //    stays off the critical path). The Assignor decides the base; the child never
+  //    recomputes it (constraint 8), so it travels in the job ──
+  {
+    const h = harness({
+      blockedBy: async () => [{ number: 9, state: "open" }],
+      openPrForHead: async () => "https://github.com/acme/finance/pull/12",
+    });
+    h.assignor.handle(delivery());
+    await tick();
+
+    ok("stack: the item runs rather than waiting for its blocker to merge", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+    ok("stack: on the blocker's own branch, which is what the job carries", h.forked[0]?.base === "feat/9", JSON.stringify(h.forked[0]?.base));
+    ok("stack: and it is claimed and recorded like any other admitted item", h.claimed.join(",") === KEY && h.state.get(KEY)?.status === "in-flight", h.claimed.join(","));
+  }
+
+  // ── …and a stacked item that GATES has to come back onto the same base. The branch is
+  //    already there, so a resume decides nothing — but the PR it finally opens targets
+  //    the base the job names, and `main` there would ship the blocker's commits as this
+  //    item's own. The base rides durable state exactly as the session handle does,
+  //    because the human may answer weeks and one restart later ──
+  {
+    const h = harness({
+      blockedBy: async () => [{ number: 9, state: "open" }],
+      openPrForHead: async () => "https://github.com/acme/finance/pull/12",
+    });
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(KEY, { key: KEY, status: "awaiting-human", summary: QUESTION, finishedAt: "2026-07-25T00:00:00.000Z", sessionId: SESSION });
+
+    h.assignor.handle(reply("Use the OAuth flow — the SAML one is being retired."));
+    await tick();
+
+    ok("stacked resume: the run picks up where it left off", h.forked.length === 2 && h.forked[1]?.resume?.sessionId === SESSION, JSON.stringify(h.forked.map((j) => j.resume)));
+    ok("stacked resume: on the base the item was admitted on, not on main", h.forked[1]?.base === "feat/9", JSON.stringify(h.forked[1]?.base));
+  }
+
+  // ── a blocker read that FAILED is the defect this issue exists to kill: v1 swallowed
+  //    it into an empty list, which reads as "nothing blocks this" and starts a real
+  //    agent run on main. It defers instead — and loudly, because only an operator can
+  //    do anything about somebody else's 502 (constraint 5) ──
+  {
+    const h = harness({
+      blockedBy: async () => {
+        throw new Error("gh: Server Error (HTTP 502)");
+      },
+    });
+    h.assignor.handle(delivery());
+    await tick();
+
+    ok("read failure: the issue is not admitted onto main on the strength of a read that never happened", h.forked.length === 0 && h.claimed.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+    const about502 = h.lines.filter((l) => l.message.includes("HTTP 502"));
+    ok("read failure: it is an ERROR — a wait nobody can end by working is an operator's problem", about502.some((l) => l.level === "error"), JSON.stringify(about502));
+    ok(
+      "read failure: addressed at the repo and NOT at the issue, so it reaches the operator and never the thread",
+      about502.length > 0 && about502.every((l) => l.context.repo === "acme/finance" && l.context.target === undefined),
+      JSON.stringify(about502.map((l) => l.context)),
+    );
+    ok("read failure: so the issue gets no comment — a deferred item has not started", h.comments.length === 0, JSON.stringify(h.comments.map((l) => l.message)));
+
+    // The same outage, re-read once per PR event in a busy repo.
+    for (const number of [12, 13, 14]) {
+      h.assignor.handle(delivery({ event: "pull_request", action: "opened", number, labels: [] }));
+      await tick();
+    }
+    ok(
+      "read failure: the same reason repeating drops to info — one outage must not page the operator once per event",
+      h.lines.filter((l) => l.level === "error").length === 1,
+      JSON.stringify(h.lines.filter((l) => l.level === "error").map((l) => l.message)),
+    );
+    ok("read failure: and it is still being retried, so nothing is lost when the API comes back", h.lines.filter((l) => l.message.includes("HTTP 502")).length === 4, String(about502.length));
+  }
+
+  // ── a deferred item is re-evaluated when a blocker's state COULD have changed: its
+  //    PR opening is exactly what a dependent with nothing to stack on was waiting for.
+  //    Forward edge only — GitHub's `dependencies/blocks` 404s, so nobody can ask "who
+  //    does this unblock?"; each deferred item re-asks its own blockers ──
+  {
+    let prOpen = false;
+    const h = harness({
+      blockedBy: async () => [{ number: 9, state: "open" }],
+      openPrForHead: async () => (prOpen ? "https://github.com/acme/finance/pull/12" : undefined),
+    });
+    h.assignor.handle(delivery());
+    await tick();
+    ok("promote: nothing starts while the blocker has no branch to stack on", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+
+    prOpen = true;
+    h.assignor.handle(delivery({ event: "pull_request", action: "opened", number: 12, labels: [] }));
+    await tick();
+
+    ok("promote: the blocker's PR opening starts the dependent that was waiting on it", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+    ok("promote: stacked on the branch that just got its PR", h.forked[0]?.base === "feat/9", JSON.stringify(h.forked[0]?.base));
+    ok("promote: and it is claimed now, at the moment it actually starts", h.claimed.join(",") === KEY, h.claimed.join(","));
+  }
+
+  // ── the other trigger: the blocker CLOSING. Its work is on main, so the dependent no
+  //    longer stacks on anything ──
+  {
+    let blockerState = "open";
+    const h = harness({ blockedBy: async () => [{ number: 9, state: blockerState }] });
+    h.assignor.handle(delivery());
+    await tick();
+    ok("promote: held while the blocker is open with no PR", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+
+    blockerState = "closed";
+    h.assignor.handle(delivery({ action: "closed", number: 9, labels: [] }));
+    await tick();
+
+    ok("promote: a blocker closing releases the dependent", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+    ok("promote: onto main — there is nothing left to stack on", h.forked[0]?.base === "main", JSON.stringify(h.forked[0]?.base));
+  }
+
+  // ── a re-evaluation is per REPO: another repo's PR events say nothing about this
+  //    repo's dependencies, and re-reading every deferred item on each one spends a rate
+  //    limit on a question nobody asked ──
+  {
+    let prOpen = false;
+    const h = harness({
+      blockedBy: async () => [{ number: 9, state: "open" }],
+      openPrForHead: async () => (prOpen ? "https://github.com/acme/finance/pull/12" : undefined),
+    });
+    h.assignor.handle(delivery());
+    await tick();
+
+    prOpen = true;
+    h.assignor.handle(delivery({ event: "pull_request", action: "opened", repo: "acme/other", number: 12, labels: [] }));
+    await tick();
+
+    ok("promote: a PR in another repo does not re-evaluate this one's deferred items", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
   }
 
   // ── the work-item key and the paths built from it become FILENAMES, so the number

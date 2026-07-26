@@ -19,11 +19,6 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** The branch every run bases on, and the base every PR targets. Stacking a dependent on
- *  its blocker's branch is #42's, and so is the pre-ship re-check that a stacked base
- *  still exists. */
-const BASE = "main";
-
 /** The label that says this run stopped to ask, and the item is the human's now. */
 const AWAITING_HUMAN = "awaiting-human";
 
@@ -39,6 +34,11 @@ export interface IssueRunInput {
   issue: number;
   /** The child checkout this run happens against, absolute. */
   childDir: string;
+  /** The branch this run bases on and its PR targets — `main`, or `feat/<blocker>` when
+   *  the Assignor stacked this item on a blocker whose PR is already open (#42). The
+   *  ASSIGNOR decided it and this run recomputes none of it (constraint 8); re-asserting
+   *  that a stacked base still exists before shipping is #38's. */
+  base: string;
   /** The pre-built sandbox image for this repo. */
   imageName: string;
   /** The repo's baseline prompt, already read — its `{{REPO}}`/`{{ISSUE}}` placeholders
@@ -110,7 +110,7 @@ export class IssueModule {
         branch,
         // RESOLVED, never a bare branch name: handed one, the library prefers a stale
         // local branch over the origin's (#33's contract).
-        startPoint: `origin/${BASE}`,
+        startPoint: `origin/${input.base}`,
         logPath: input.logPath,
         output: { tag: RESULT_TAG, schema: resultSchema },
         ...(input.resume ? { resumeSession: input.resume.sessionId } : {}),
@@ -131,11 +131,11 @@ export class IssueModule {
 
       // Asked of git rather than taken from the agent's own commit list: on a resume the
       // commits that matter were made by the run that gated, and this run may add none.
-      const ahead = await this.git.aheadCount(input.childDir, `origin/${BASE}`, branch);
+      const ahead = await this.git.aheadCount(input.childDir, `origin/${input.base}`, branch);
       if (ahead === 0) {
         // An honest nothing-to-ship, not a crash — and not a success either: whatever the
         // agent signalled, no work reached the origin.
-        this.log.info(`${signal} — no commits ahead of ${BASE}, nothing to ship`, about);
+        this.log.info(`${signal} — no commits ahead of ${input.base}, nothing to ship`, about);
         return this.outcome(input.key, "failed", `${description}\n\nsignal ${signal}, but no commits — nothing to ship.`);
       }
       await this.git.push(input.childDir, branch);
@@ -204,7 +204,7 @@ export class IssueModule {
     const stat = await this.fileStat(input, branch);
     return await this.github.createPr({
       repo: input.repo,
-      base: BASE,
+      base: input.base,
       head: branch,
       title,
       // Composed, never concatenated here: the closing keyword, the defusing of the
@@ -212,7 +212,7 @@ export class IssueModule {
       // (`issue/body.mts`), and this class reads no file and resolves no path.
       body: composeBody(result.output, {
         issue: input.issue,
-        base: BASE,
+        base: input.base,
         // What GIT counted, not `result.commits`: on a gate resume the agent's own list
         // names only the resuming session's commits.
         commits,
@@ -232,7 +232,7 @@ export class IssueModule {
    *  work item (ADR-0001). The footer degrades that one fact instead, and says so. */
   private async fileStat(input: IssueRunInput, branch: string): Promise<DiffStat | undefined> {
     try {
-      return await this.git.diffStat(input.childDir, `origin/${BASE}`, branch);
+      return await this.git.diffStat(input.childDir, `origin/${input.base}`, branch);
     } catch (err) {
       this.log.info(`file stats unavailable — ${describe(err)}`, { repo: input.repo, target: input.issue });
       return undefined;

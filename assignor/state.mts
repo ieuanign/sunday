@@ -19,6 +19,11 @@ export interface WorkItemState {
    *  the outcome file, because the outcome is cleared as it is applied and the human may
    *  reply weeks later — this file is the only thing left that knows what to resume. */
   sessionId?: string;
+  /** The branch this item was ADMITTED on: `main`, or `feat/<blocker>` when the Assignor
+   *  stacked it (#42). Here for the same reason `sessionId` is — a gate resume opens the
+   *  PR the gate never did, and it has to target the base the item started from. Absent
+   *  on every item admitted before this existed, which reads as `main`. */
+  base?: string;
 }
 
 /** The whole file: one record per work-item key. */

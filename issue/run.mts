@@ -37,6 +37,11 @@ export interface Job {
    *  child works from the same config the delivery was routed with. The run resolves its
    *  child checkout, its image and its baseline prompt out of it. */
   config: RepoConfig;
+  /** The branch this run bases on and its PR targets: `main`, or `feat/<blocker>` when
+   *  the Assignor stacked it on a blocker whose PR is already open (#42). Decided by the
+   *  ASSIGNOR and carried here rather than recomputed: the child would be asking GitHub
+   *  the same question minutes later and could get a different answer (constraint 8). */
+  base: string;
   /** Where the child drops its result for the parent to apply. */
   resultPath: string;
   /** The PID lock the child holds while it is alive. */
@@ -118,6 +123,8 @@ async function runIssue(): Promise<Outcome> {
       repo: job.repo,
       issue: job.issue,
       childDir: resolve(parentRoot, job.config.path),
+      // The Assignor's decision, carried through untouched (#42 constraint 8).
+      base: job.base,
       imageName: job.config.imageName,
       // Read HERE, not in there: the module resolves no path and opens no file, which is
       // the only reason its decisions can be driven with nothing on disk.

@@ -49,7 +49,7 @@ let caseNo = 0;
  *  with GitHub substituted — every method on it is either a real edit to a real repo or a
  *  network read, and the whole point of the class is WHAT it asks GitHub and what it does
  *  with the answer. Paths point into this case's own dir, so the real `var/` is untouched. */
-function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<string, string>; comments?: Record<string, IssueComment[]>; releaseThrows?: string } = {}) {
+function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<string, string>; comments?: Record<string, IssueComment[]>; releaseThrows?: string; claimThrows?: string } = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   const lines: LogLine[] = [];
   const comments: LogLine[] = [];
@@ -72,7 +72,12 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   const releasedSync: string[] = [];
   const labelled: string[] = [];
   const github: GitHubReconcile = {
-    claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
+    claim: (repo, issue) => {
+      // `gh issue edit` against somebody else's service, on the admission path this pass
+      // hands every open issue to.
+      if (over.claimThrows === `${repo}#${issue}`) throw new Error("gh issue edit failed: HTTP 502");
+      claimed.push(`${repo}#${issue}`);
+    },
     release: (repo, issue) => void releasedSync.push(`${repo}#${issue}`),
     releaseAsync: async (repo, issue) => {
       if (over.releaseThrows === `${repo}#${issue}`) throw new Error("gh issue edit failed: HTTP 502");
@@ -170,6 +175,9 @@ try {
 
     const live = harness();
     live.assignor.handle({ event: "issues", action: "labeled", repo: "acme/finance", number: 57, labels, onPullRequest: false });
+    // The live route fires admission and does not wait for it — it reaches GitHub now
+    // (#42), and the receiver calling it cannot see a rejection. The sweep awaits its own.
+    await new Promise((settle) => setTimeout(settle, 0));
 
     ok("seam: an open issue carrying its triggers is claimed, exactly as a delivery for it would be", rederived.claimed.join(",") === live.claimed.join(",") && rederived.claimed.join(",") === "acme/finance#57", `${rederived.claimed.join(",")} vs ${live.claimed.join(",")}`);
     ok("seam: recorded in the same state", rederived.state.get("acme/finance#57")?.status === live.state.get("acme/finance#57")?.status, `${JSON.stringify(rederived.state.get("acme/finance#57"))} vs ${JSON.stringify(live.state.get("acme/finance#57"))}`);
@@ -267,6 +275,26 @@ try {
 
     ok("isolation: an issue that fails mid-pass does not strand the ones behind it", h.queued().join(",") === "acme/finance#58", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
     ok("isolation: and it is named, since it is an issue still holding a claim nobody is on", h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance#57")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
+  }
+
+  // ── ADMISSION reaches GitHub now too (#42 asks what blocks each issue), so it is the
+  //    other thing here that can fail per issue — and it is only inside this pass's
+  //    per-issue try/catch if the pass actually WAITS for it. An admission left floating
+  //    rejects where nothing is listening, which is an unhandled rejection and the whole
+  //    parent under `restart: always` (ADR-0001) ──
+  {
+    const h = harness({
+      issues: { "acme/finance": [{ number: 57, labels: TRIGGERS }, { number: 58, labels: TRIGGERS }] },
+      claimThrows: "acme/finance#57",
+    });
+    await h.reconciler.run();
+
+    ok("isolation: an admission that throws costs that issue its pass and nothing more", h.queued().join(",") === "acme/finance#58", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
+    ok(
+      "isolation: and the failure is caught and named, rather than escaping the sweep entirely",
+      h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance#57") && l.message.includes("502")),
+      JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)),
+    );
   }
 
   // ── one repo, on demand. A forwarder that was down for a single repo missed events for

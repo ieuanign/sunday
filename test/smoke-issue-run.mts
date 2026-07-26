@@ -29,6 +29,8 @@ const PR_URL = "https://github.com/acme/finance/pull/99";
 /** What this case's fakes answer with. Everything else is the ordinary happy path: an
  *  agent that says `ready`, a branch one commit ahead, and no PR open yet. */
 interface Scenario {
+  /** The base the Assignor chose for this item — `feat/<blocker>` when it stacked it. */
+  base?: string;
   result?: IssueResult;
   /** The agent fails instead of answering. */
   agentError?: string;
@@ -152,6 +154,7 @@ function harness(s: Scenario = {}) {
     repo: "acme/finance",
     issue: 57,
     childDir: "/repos/finance",
+    base: s.base ?? "main",
     imageName: "sunday-finance",
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
@@ -494,6 +497,37 @@ function harness(s: Scenario = {}) {
     "log: every line the child emits is addressed to its issue, and none of them reaches GitHub",
     h.lines.length > 0 && h.lines.every((l) => l.level === "info" && l.context.repo === "acme/finance" && l.context.target === 57),
     h.lines.map((l) => `${l.level} ${JSON.stringify(l.context)}`).join(" | "),
+  );
+}
+
+// ── a STACKED run (#42): the Assignor decided this item bases on its blocker's branch,
+//    so every ref the run measures against follows it — and the run recomputes none of
+//    it (constraint 8), because the answer minutes later may not be the same one ──
+{
+  const h = harness({ base: "feat/9" });
+  await h.run();
+
+  ok(
+    "stacked: the agent branches off the BLOCKER's branch as the origin has it, not off main",
+    h.requests[0]?.startPoint === "origin/feat/9",
+    h.requests[0]?.startPoint ?? "",
+  );
+  ok("stacked: commits are counted from that base — against main they would include the blocker's", h.counted.join(", ") === "origin/feat/9..feat/57", h.counted.join(", "));
+  ok("stacked: and the diff the footer states is measured from it too", h.statted.join(", ") === "origin/feat/9...feat/57", h.statted.join(", "));
+  ok(
+    "stacked: the PR targets the blocker's BRANCH NAME — GitHub resolves it on the remote and knows nothing about a local checkout's refs",
+    h.created[0]?.base === "feat/9",
+    h.created[0]?.base ?? "",
+  );
+  ok("stacked: the footer says which base the PR went to", h.created[0]?.body.includes("base `feat/9`") === true, h.created[0]?.body ?? "");
+}
+{
+  const h = harness({ base: "feat/9", ahead: 0 });
+  const outcome = await h.run();
+  ok(
+    "stacked: an empty run says what it is empty against — 'no commits ahead of main' would be a lie",
+    outcome.summary.includes("no commits") && h.lines.some((l) => l.message.includes("feat/9")),
+    `${outcome.summary} | ${h.lines.map((l) => l.message).join(" | ")}`,
   );
 }
 
