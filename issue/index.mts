@@ -117,7 +117,7 @@ export class IssueModule {
       });
       preserved = result.preservedWorktreePath;
 
-      const { signal, summary, question } = result.output;
+      const { signal, description, question } = result.output;
       if (signal === "gate") {
         gated = true;
         await this.github.addLabels(input.repo, input.issue, [AWAITING_HUMAN]);
@@ -126,7 +126,7 @@ export class IssueModule {
         // the one comment this work item gets, and it reaches the human even if the parent
         // dies before it can. The handle travels with it or the answer starts over from
         // nothing — the child holding the session is gone by the time anyone reads this.
-        return this.outcome(input.key, "awaiting-human", question ?? summary, result.sessionId);
+        return this.outcome(input.key, "awaiting-human", question ?? description, result.sessionId);
       }
 
       // Asked of git rather than taken from the agent's own commit list: on a resume the
@@ -136,11 +136,11 @@ export class IssueModule {
         // An honest nothing-to-ship, not a crash — and not a success either: whatever the
         // agent signalled, no work reached the origin.
         this.log.info(`${signal} — no commits ahead of ${BASE}, nothing to ship`, about);
-        return this.outcome(input.key, "failed", `${summary}\n\nsignal ${signal}, but no commits — nothing to ship.`);
+        return this.outcome(input.key, "failed", `${description}\n\nsignal ${signal}, but no commits — nothing to ship.`);
       }
       await this.git.push(input.childDir, branch);
       const draft = signal !== "ready";
-      const url = await this.openPr(input, branch, detail.title, summary, draft);
+      const url = await this.openPr(input, branch, detail.title, description, draft);
       this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about);
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
       // human to read, not because the run succeeded. Classifying it (and the
@@ -148,7 +148,7 @@ export class IssueModule {
       return this.outcome(
         input.key,
         signal === "fail" ? "failed" : "done",
-        `${summary}\n\n${draft ? "draft " : ""}PR: ${url}`,
+        `${description}\n\n${draft ? "draft " : ""}PR: ${url}`,
       );
     } catch (err) {
       // NOTHING escapes this method. The child's whole job is to leave exactly one durable
@@ -193,7 +193,7 @@ export class IssueModule {
     input: IssueRunInput,
     branch: string,
     title: string,
-    summary: string,
+    description: string,
     draft: boolean,
   ): Promise<string> {
     const open = await this.github.openPrForHead(input.repo, branch);
@@ -206,7 +206,7 @@ export class IssueModule {
       // The closing keyword is UNCONDITIONAL (AC7): v1 omitted it on a failed run, and
       // every one of those PRs merged leaving its issue open and its dependents deferred
       // forever.
-      body: `${summary}\n\nCloses #${input.issue}.\n\n---\n${SUNDAY_SIGN} opened this PR.`,
+      body: `${description}\n\nCloses #${input.issue}.\n\n---\n${SUNDAY_SIGN} opened this PR.`,
       draft,
     });
   }

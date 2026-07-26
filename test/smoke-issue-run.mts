@@ -72,7 +72,7 @@ function harness(s: Scenario = {}) {
       requests.push(request as unknown as AgentRunRequest<IssueResult>);
       if (s.agentError) throw new Error(s.agentError);
       return {
-        output: (s.result ?? { signal: "ready", summary: "shipped it" }) as unknown as T,
+        output: (s.result ?? { signal: "ready", description: "shipped it" }) as unknown as T,
         sessionId: s.sessionId,
         commits: [],
         preservedWorktreePath: s.preservedWorktreePath,
@@ -162,7 +162,7 @@ function harness(s: Scenario = {}) {
 
 // ── ready + commits: the whole point — one push, one PR, and the issue gets closed ──
 {
-  const h = harness({ result: { signal: "ready", summary: "Added the guard and a test." } });
+  const h = harness({ result: { signal: "ready", description: "Added the guard and a test." } });
   const outcome = await h.run();
 
   ok("ready: the branch is pushed exactly once", h.pushed.length === 1 && h.pushed[0] === "feat/57", h.pushed.join(", "));
@@ -174,7 +174,7 @@ function harness(s: Scenario = {}) {
     h.created[0]?.body.includes("Closes #57") === true,
     h.created[0]?.body ?? "",
   );
-  ok("ready: the body carries the agent's own summary", h.created[0]?.body.includes("Added the guard and a test.") === true, h.created[0]?.body ?? "");
+  ok("ready: the body carries the agent's own description", h.created[0]?.body.includes("Added the guard and a test.") === true, h.created[0]?.body ?? "");
   ok("ready: the PR bases on main, not on the resolved ref the agent started from", h.created[0]?.base === "main", h.created[0]?.base ?? "");
   ok("ready: the outcome is done and carries the PR url", outcome.status === "done" && outcome.summary.includes(PR_URL), JSON.stringify(outcome));
   ok("ready: the outcome is named back with the work-item key", outcome.key === "acme/finance#57", outcome.key);
@@ -182,7 +182,7 @@ function harness(s: Scenario = {}) {
 
 // ── draft and fail ship too — as a DRAFT, and still closing the issue ──
 {
-  const h = harness({ result: { signal: "draft", summary: "Works, but the migration wants eyes." } });
+  const h = harness({ result: { signal: "draft", description: "Works, but the migration wants eyes." } });
   const outcome = await h.run();
 
   ok("draft: opens a draft PR", h.created[0]?.draft === true, String(h.created[0]?.draft));
@@ -190,7 +190,7 @@ function harness(s: Scenario = {}) {
   ok("draft: a shipped draft is a done work item", outcome.status === "done", JSON.stringify(outcome));
 }
 {
-  const h = harness({ result: { signal: "fail", summary: "Could not make the integration test pass." } });
+  const h = harness({ result: { signal: "fail", description: "Could not make the integration test pass." } });
   const outcome = await h.run();
 
   ok("fail: opens a draft PR rather than shipping nothing", h.created[0]?.draft === true, String(h.created[0]?.draft));
@@ -205,7 +205,7 @@ function harness(s: Scenario = {}) {
 
 // ── an agent that committed nothing: say so, ship nothing, and do not read as a crash ──
 {
-  const h = harness({ result: { signal: "ready", summary: "Nothing needed changing." }, ahead: 0 });
+  const h = harness({ result: { signal: "ready", description: "Nothing needed changing." }, ahead: 0 });
   const outcome = await h.run();
 
   ok("nothing to ship: the branch is never pushed", h.pushed.length === 0, h.pushed.join(", "));
@@ -264,7 +264,7 @@ function harness(s: Scenario = {}) {
 // ── gate: ask the human, ship nothing, and keep the only copy of the commits (AC3) ──
 {
   const h = harness({
-    result: { signal: "gate", summary: "Blocked on a product call.", question: "Should deleted accounts keep their invoices?" },
+    result: { signal: "gate", description: "Blocked on a product call.", question: "Should deleted accounts keep their invoices?" },
     sessionId: "sess-abc123",
     preservedWorktreePath: "/repos/finance/.worktrees/feat-57",
   });
@@ -289,9 +289,9 @@ function harness(s: Scenario = {}) {
 }
 {
   // An agent that gated without filling in `question` still has to ask something.
-  const h = harness({ result: { signal: "gate", summary: "Which of the two schemas should win?" } });
+  const h = harness({ result: { signal: "gate", description: "Which of the two schemas should win?" } });
   const outcome = await h.run();
-  ok("gate: with no question field, the summary is what the human is asked", outcome.summary === "Which of the two schemas should win?", outcome.summary);
+  ok("gate: with no question field, the description is what the human is asked", outcome.summary === "Which of the two schemas should win?", outcome.summary);
 }
 
 // ── resume: the human answered, so continue the same session rather than start over ──
