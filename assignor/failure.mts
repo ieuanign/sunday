@@ -228,6 +228,21 @@ export function classify(text: string, options: ClassifyOptions = {}): Failure {
  *  clock skew straight back into the wall — which re-arms the pause for another window. */
 const RESUME_GRACE_MS = 60_000;
 
+/** Does an incoming halt say anything the ARMED one does not? Compared on the only thing a
+ *  halt decides — whether the pipeline lifts itself, and when — rather than on the reason
+ *  text: three agents hitting the same wall a second apart word it identically, and an auth
+ *  failure landing inside a quota window words it differently but must still get through.
+ *
+ *  So a halt supersedes when it takes the auto-resume AWAY (auth during a quota window: a
+ *  credential does not fix itself when somebody's window closes) or pushes it LATER.
+ *  Nothing supersedes a pause that already waits for a human — a quota window arriving on
+ *  an armed auth halt would otherwise hand a broken credential a resume it never had, and
+ *  the pipeline lifts itself into the 403 and fails every queued item. */
+function supersedes(resumeAt: number | undefined, armed: PauseState): boolean {
+  if (armed.resumeAt === undefined) return false;
+  return resumeAt === undefined || resumeAt > armed.resumeAt;
+}
+
 /** Start this work item again, carrying the error the last run died on when there is one
  *  to carry. Handed to `failed()` BY THE CALLER rather than held as a dependency: the
  *  Assignor owns every (re)start of a work item and takes this policy in its constructor,
@@ -532,8 +547,24 @@ export class FailurePolicy {
    *  is what breaks — and the file is what makes the pause survive the restart that would
    *  otherwise spend the quota it is waiting on (`assignor/pause.mts`). */
   private halt(failure: Failure): void {
-    this.scheduler.pause(failure.summary);
     const resumeAt = failure.resetAt === undefined ? undefined : failure.resetAt + this.resumeGrace;
+    // Deduplicated for the same reason a repo stop is, and harder: the wall is
+    // PROCESS-WIDE, so every agent in flight hits it within seconds of the first and each
+    // failed outcome reaches here on its own. `alert`/`error` route to the phone with no
+    // debounce of their own (`services/destinations.mts`), so an unguarded second halt
+    // pages a human once per in-flight item for ONE event — and re-arms the file under the
+    // auto-resume timer that is matched against exactly what it replaced.
+    // Read only when the pipeline is ALREADY held: an unreadable pause file then throws
+    // into `failed()`'s guard, which is safe here because the thing this halt would do —
+    // stop the pipeline — is already true. Nothing is read on the path that arms it.
+    if (this.scheduler.isPaused()) {
+      const held = this.pause.read();
+      if (held && !supersedes(resumeAt, held)) {
+        this.log.info(`· the pipeline is already halted (${held.reason}) — ${failure.summary}`);
+        return;
+      }
+    }
+    this.scheduler.pause(failure.summary);
     const armed: PauseState = { reason: failure.summary, since: Date.now(), resumeAt };
     this.pause.write(armed);
     // What Sunday is DOING about it — the failure's own text is already on the work item's

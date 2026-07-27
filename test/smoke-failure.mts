@@ -813,6 +813,47 @@ try {
     ok("a later halt wins: and the auth halt is still armed on disk", h.pause.read()?.reason.includes("auth") === true, JSON.stringify(h.pause.read()));
   }
 
+  // ── one wall, one page. The wall is process-wide, so every agent in flight hits it
+  //    within seconds of the first — `maxConcurrency` failed outcomes, each reaching the
+  //    policy on its own. Deduplicated exactly as a repo stop is: the pipeline is already
+  //    halted on the same terms, so the rest are accounted for at `info` and page nobody,
+  //    and the armed pause is left alone rather than re-written under its own timer ──
+  {
+    const h = harness({ resumeGraceMs: 5 });
+    const text = `Usage limit reached. Your limit resets at ${new Date(Date.now() + 10_000).toISOString()}`;
+    h.policy.failed({ text, repo: ITEM.repo, item: ITEM });
+    const armed = JSON.stringify(h.pause.read());
+    h.policy.failed({ text, repo: "acme/ops", item: { key: "acme/ops#1", repo: "acme/ops", issue: 1 } });
+    h.policy.failed({ text, repo: ITEM.repo, item: { key: "acme/finance#58", repo: ITEM.repo, issue: 58 } });
+
+    const paged = h.lines.filter((l) => l.level === "alert" || l.level === "error");
+    ok("one wall: three items on the same wall page a human once", paged.length === 1, JSON.stringify(paged.map((l) => l.message)));
+    ok("one wall: and the armed pause is untouched, so the auto-resume it scheduled still lifts it", JSON.stringify(h.pause.read()) === armed, JSON.stringify(h.pause.read()));
+    ok("one wall: with the duplicates still accounted for", h.lines.filter((l) => l.message.includes("already halted")).length === 2, JSON.stringify(h.lines.map((l) => l.message)));
+
+    // …and a halt that says something NEW is not a duplicate: an auth failure landing in
+    // the window takes the auto-resume away, and a human has to hear that.
+    h.policy.failed({ text: "Request failed: 403 Forbidden — invalid API key", repo: ITEM.repo });
+    ok(
+      "one wall: an auth halt arriving during it still pages, because it changes the answer",
+      h.lines.filter((l) => l.level === "alert" || l.level === "error").length === 2,
+      JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)),
+    );
+    ok("one wall: and re-arms the pause with nothing to lift itself on", h.pause.read()?.resumeAt === undefined, JSON.stringify(h.pause.read()));
+  }
+
+  // ── the same rule the other way round, which is the one that would be dangerous: a quota
+  //    window landing on an armed AUTH halt must not hand a broken credential an auto-resume
+  //    it never had — the pipeline would lift itself into a 403 and fail every queued item ──
+  {
+    const h = harness({ resumeGraceMs: 5 });
+    h.policy.failed({ text: "Request failed: 403 Forbidden — invalid API key", repo: ITEM.repo });
+    h.policy.failed({ text: `Usage limit reached. Your limit resets at ${new Date(Date.now() + 10).toISOString()}`, repo: ITEM.repo });
+    await new Promise((r) => setTimeout(r, 40)); // past the quota window
+
+    ok("a quota window does not lift an auth halt", h.scheduler.isPaused() && h.pause.read()?.reason.includes("auth") === true, JSON.stringify(h.pause.read()));
+  }
+
   // ── constraint 9: the policy NEVER throws. It sits on every failure path and is reached
   //    from timers with nobody above them, so a throw is either a work item that dies
   //    twice or an unhandled rejection that takes the parent down under `restart: always`.
