@@ -8,7 +8,7 @@
 # a failed probe, which is how the 2026-07-24 outage ran 8h44m unnoticed.
 #
 # Runs as a supervised HOST process (not a container). It spawns sandcastle Docker
-# sandboxes on the host daemon directly, exactly as a hand-run `npm run v2` does — so
+# sandboxes on the host daemon directly, exactly as a hand-run `npm run sunday` does — so
 # there is no docker-out-of-docker path translation to get right.
 #
 #   devbox services up            # foreground, the process + a TUI
@@ -37,14 +37,14 @@ processes:
     # sequence runs — image builds take minutes and a probe unanswered for that long is
     # the SIGKILL/restart loop ADR-0001 exists to stop. process-compose probes support
     # http_get / exec (NOT k8s-style tcp_socket — that leaves a process forever
-    # un-Ready). Keep the port in sync with V2_PORT (.env, default 8788) — probe ports
-    # are ints, so it can't read the env var here.
+    # un-Ready). Keep the port in sync with LISTENER_PORT (.env, default 8787) — probe
+    # ports are ints, so it can't read the env var here.
     readiness_probe:
       http_get:
         host: "127.0.0.1"
         scheme: http
         path: "/"
-        port: 8788
+        port: 8787
       initial_delay_seconds: 1
       period_seconds: 5
       timeout_seconds: 3

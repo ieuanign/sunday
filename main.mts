@@ -4,7 +4,7 @@
 // the socket this process answers on.
 //
 //   devbox services up             # supervised — the one process in process-compose.yaml
-//   npm run v2                     # node --env-file=.env main.mts
+//   npm run sunday                 # node --env-file=.env main.mts
 //
 // The `gh webhook forward` per routed repo is started HERE and no longer by hand or by a
 // shell launcher: the process that owns those children is the one that can say something
@@ -48,9 +48,10 @@ import { SandboxService } from "#services/sandbox.mts";
 // subpath alias of its own (package.json `imports`).
 import { Boot, readRoutingTable } from "./boot.mts";
 
-// Its own port for as long as v1 owns `LISTENER_PORT`: both pipelines are supervised
-// side by side until cutover (#45), and sharing the number is an EADDRINUSE crash loop.
-const port = Number(process.env.V2_PORT ?? 8788);
+// One pipeline, one port (#45): `gh webhook forward --url http://localhost:8787/` delivers
+// here. `process-compose.yaml`'s readiness probe is a literal int that cannot read the env,
+// so it carries this number by hand — move the two together or the process never goes Ready.
+const port = Number(process.env.LISTENER_PORT ?? 8787);
 // One global cap across every repo, because there is one shared agent quota.
 const maxConcurrency = Number(process.env.MAX_CONCURRENCY ?? 3);
 

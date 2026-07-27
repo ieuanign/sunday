@@ -142,16 +142,16 @@ function walkGraph(entry: string, root: string): string[] {
   ok("no file in it registers a SIGTERM/SIGINT handler", handlers.length === 0, handlers.join(" "));
 }
 
-// ── the flag itself: `npm run v2` IS the save-to-restart loop ──
+// ── the flag itself: `npm run sunday` IS the save-to-restart loop ──
 {
   const pkg = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
     scripts: Record<string, string>;
   };
-  const v2 = pkg.scripts.v2 ?? "";
-  ok("the v2 script runs the parent under --watch", /(?:^|\s)--watch(?:\s|$)/.test(v2), v2);
+  const sunday = pkg.scripts.sunday ?? "";
+  ok("the sunday script runs the parent under --watch", /(?:^|\s)--watch(?:\s|$)/.test(sunday), sunday);
   // --watch-path is macOS/Windows-only AND watches a whole dir, which would put `issue/`
   // back in the watched set — the exact thing default watch mode excludes by construction.
-  ok("and not --watch-path, which would over-watch", !v2.includes("--watch-path"), v2);
+  ok("and not --watch-path, which would over-watch", !sunday.includes("--watch-path"), sunday);
 }
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
