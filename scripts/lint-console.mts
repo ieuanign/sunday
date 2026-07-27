@@ -7,11 +7,10 @@ import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Dirs the check does not enter. Exclusion-based, so a NEW V2 module is covered the
- *  moment it exists: `listener/` is v1 and gets deleted at cutover (#45), `test/` holds
- *  smokes that print their own results, `scripts/` are CLIs, `repos/` holds child repo
- *  clones that are not this repo's code. Any dot dir (`.scratch/`, `.git/`) is skipped
- *  too — `.scratch/` is throwaway by CLAUDE.md §6. */
-const SKIP = new Set(["node_modules", "listener", "test", "scripts", "repos"]);
+ *  moment it exists: `test/` holds smokes that print their own results, `scripts/` are
+ *  CLIs, `repos/` holds child repo clones that are not this repo's code. Any dot dir
+ *  (`.scratch/`, `.git/`) is skipped too — `.scratch/` is throwaway by CLAUDE.md §6. */
+const SKIP = new Set(["node_modules", "test", "scripts", "repos"]);
 
 /** A bare write to the screen. `console.` and `process.stdout/stderr.write` with no
  *  space around the dot — prose that ends a sentence on "…the console." is not a call. */
@@ -65,7 +64,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
         ` (services/logger.mts), or mark the line \`// ${PRAGMA}\` if it really is a sanctioned writer.`,
     );
   } else {
-    console.log("✓ no bare console writes outside listener/ (v1), test/ and scripts/");
+    console.log("✓ no bare console writes outside test/ and scripts/");
   }
   process.exit(findings.length === 0 ? 0 : 1);
 }

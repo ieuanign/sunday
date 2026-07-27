@@ -75,7 +75,6 @@ const ok = (label: string, cond: boolean, detail = "") => {
   };
   write("services/thing.mts", 'console.log("stray");\n');
   write("services/nested/deep.mts", 'process.stdout.write("stray");\n');
-  write("listener/v1.mts", 'console.log("v1 is exempt until cutover");\n');
   write("test/smoke-thing.mts", 'console.log("smokes print their own results");\n');
   write("scripts/tool.mts", 'console.log("scripts are CLIs");\n');
   write("node_modules/dep/index.mts", 'console.log("not ours");\n');
@@ -85,7 +84,7 @@ const ok = (label: string, cond: boolean, detail = "") => {
   try {
     const found = scanTree(tmp).map((f) => f.file).sort();
     ok(
-      "walks every .mts under the root, skipping listener/, test/, scripts/, node_modules/ and dot dirs",
+      "walks every .mts under the root, skipping test/, scripts/, node_modules/ and dot dirs",
       found.length === 2 && found[0] === "services/nested/deep.mts" && found[1] === "services/thing.mts",
       found.join(", "),
     );

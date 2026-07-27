@@ -125,9 +125,8 @@ const rejection = async (promise: Promise<unknown>): Promise<string> => {
   /** The two files plan.md gives the library to: the implementation, and the service
    *  that owns containers and images. */
   const ALLOWED = ["services/agent/claude.mts", "services/sandbox.mts"];
-  /** `listener/` is v1, which imports it and is deleted at cutover (#45); `repos/` holds
-   *  child clones that are not this repo's code. */
-  const SKIP = new Set(["node_modules", "listener", "repos"]);
+  /** `repos/` holds child clones that are not this repo's code. */
+  const SKIP = new Set(["node_modules", "repos"]);
   const IMPORTS_LIBRARY = /(?:from|import|require)\s*\(?\s*["']@ai-hero\/sandcastle/;
 
   const importers: string[] = [];
