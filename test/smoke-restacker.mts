@@ -510,6 +510,85 @@ function isAncestor(fx: Fixture, dir: string, maybeAncestor: string, ref: string
   );
 }
 
+// ── the cascade carries its OWN anchor: the parent's PRE-REBASE tip ──────────
+//
+// The other recovery route, and the only one a cascaded dependent has: `refs/pull/<n>/head`
+// answers for the MERGED blocker, and feat/11 never forked from that — it forked from
+// feat/10, whose tip is what the force-push is about to make unfindable. So the parent's
+// step captures that tip before it moves and hands it down. Here feat/11's record predates
+// the fork point being written at all (#42), which is exactly the state file a running
+// Sunday was upgraded on, and this is a FORCE-PUSHING path: an anchor guessed one commit
+// too early replays its parent's commits into it under its own name.
+{
+  const fx = makeFixture("restacker-cascaded-recovery");
+  fx.stubGh({});
+  ok("cascaded recovery: the stub gh is in effect before any production code runs", stubGhInEffect());
+
+  fx.commit("shared.txt", "base\n", "C0 base");
+  fx.push("main");
+  fx.checkout("feat/9", "main");
+  const forkOf10 = fx.commit("b.txt", "from the blocker\n", "B1");
+  fx.push("feat/9");
+  fx.checkout("feat/10", "feat/9");
+  fx.commit("a.txt", "from the middle\n", "A1");
+  fx.push("feat/10");
+  fx.checkout("feat/11", "feat/10");
+  fx.commit("c.txt", "from the leaf\n", "C1");
+  fx.push("feat/11");
+  fx.squashMerge("feat/9", 91);
+  fx.deleteOnOrigin("feat/9");
+  fx.cloneChild();
+
+  const github = new FakeGitHub();
+  github.openPrs = [
+    { number: 110, head: "feat/10" },
+    { number: 111, head: "feat/11" },
+  ];
+  github.blocks = { 10: [9], 11: [10] };
+  // Deliberately no `merged` entry: the blocker's PR head is the DIRECT dependent's
+  // anchor and nothing the leaf could fork from, so the cascade is the only way it can
+  // be anchored at all.
+  const h = harness(fx, github);
+  h.state.set(`${FULL_NAME}#10`, { status: "in-flight", base: "feat/9", forkPoint: forkOf10 });
+  // The leaf has a record, and no fork point in it.
+  h.state.set(`${FULL_NAME}#11`, { status: "in-flight", base: "feat/10" });
+
+  await h.restacker.onMerge(FULL_NAME, 9);
+  await h.lane.drain();
+
+  ok("cascaded recovery: nothing escaped the lane", h.lane.errors.length === 0, h.lane.errors[0]?.message ?? "");
+  ok(
+    "cascaded recovery: the leaf followed its parent, on an anchor state could not give it",
+    isAncestor(fx, fx.origin, "feat/10", "feat/11"),
+    fx.git(fx.origin, "log", "--oneline", "-5", "feat/11"),
+  );
+  ok(
+    "cascaded recovery: carrying its own commit and NOT a replay of its parent's",
+    Number(fx.git(fx.origin, "rev-list", "--count", "feat/10..feat/11")) === 1,
+    fx.git(fx.origin, "rev-list", "--oneline", "feat/10..feat/11"),
+  );
+  ok(
+    "cascaded recovery: and only the two of them over main",
+    aheadOfMain(fx, "feat/11") === 2,
+    fx.git(fx.origin, "rev-list", "--oneline", "main..feat/11"),
+  );
+  ok(
+    "cascaded recovery: the leaf's own work survived the move",
+    fx.git(fx.origin, "show", "feat/11:c.txt") === "from the leaf",
+  );
+  ok(
+    "cascaded recovery: the recovered anchor is written back, so the next cascade is not poisoned",
+    h.state.get(`${FULL_NAME}#11`)?.forkPoint === fx.git(fx.origin, "rev-parse", "feat/10") &&
+      h.state.get(`${FULL_NAME}#11`)?.base === "feat/10",
+    JSON.stringify(h.state.get(`${FULL_NAME}#11`)),
+  );
+  ok(
+    "cascaded recovery: an anchor the cascade already holds is nobody's failure",
+    h.lines.every((l) => l.level !== "error"),
+    JSON.stringify(h.lines.filter((l) => l.level === "error").map((l) => l.message)),
+  );
+}
+
 // ── …and when there is nothing to recover from, the branch is LEFT ALONE ──────
 {
   const fx = makeFixture("restacker-unrecoverable-fork-point");
