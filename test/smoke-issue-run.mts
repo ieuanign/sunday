@@ -325,6 +325,20 @@ function harness(s: Scenario = {}) {
   );
   ok("fail: the work item is recorded failed, PR or no PR", outcome.status === "failed", JSON.stringify(outcome));
   ok("fail: the outcome carries the agent's own words", outcome.summary.includes("Could not make the integration test pass."), outcome.summary);
+  ok(
+    "fail: it says the AGENT reported this — a typed fact (#39), because the summary around it is Sunday's own prose",
+    outcome.agentFailed === true,
+    JSON.stringify(outcome),
+  );
+}
+{
+  const h = harness({ result: { signal: "draft", description: "Works, but the migration wants eyes." } });
+  const outcome = await h.run();
+  ok(
+    "draft: a run that SHIPPED carries no agent-reported flag — nothing failed for anyone to classify",
+    outcome.agentFailed === undefined,
+    JSON.stringify(outcome),
+  );
 }
 
 // ── an agent that committed nothing: say so, ship nothing, and do not read as a crash ──
@@ -336,6 +350,11 @@ function harness(s: Scenario = {}) {
   ok("nothing to ship: no PR is opened", h.created.length === 0, String(h.created.length));
   ok("nothing to ship: the work item fails rather than quietly claiming success", outcome.status === "failed", JSON.stringify(outcome));
   ok("nothing to ship: the outcome says WHY", outcome.summary.includes("no commits"), outcome.summary);
+  ok(
+    "nothing to ship: the agent RAN and this is its own verdict, so it is flagged as one (#39) — not retried as an unknown failure",
+    outcome.agentFailed === true,
+    JSON.stringify(outcome),
+  );
   ok(
     "nothing to ship: counted against the freshly-fetched remote ref, not a stale local one",
     h.counted.length === 1 && h.counted[0] === "origin/main..feat/57",
@@ -461,6 +480,11 @@ function harness(s: Scenario = {}) {
     "agent failure: carrying the agent's own message, which is what #39 will classify on",
     outcome.summary.includes("credit balance is too low"),
     outcome.summary,
+  );
+  ok(
+    "agent failure: and NOT flagged as the agent's own verdict — this text is the provider's, and #39 classifies it",
+    outcome.agentFailed === undefined,
+    JSON.stringify(outcome),
   );
   ok("agent failure: nothing is pushed and no PR is opened", h.pushed.length === 0 && h.created.length === 0, h.trace.join(" → "));
   ok("agent failure: the child still posts no comment — the parent's outcome milestone is the one report", h.comments.length === 0, String(h.comments.length));

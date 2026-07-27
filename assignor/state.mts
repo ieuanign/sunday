@@ -8,10 +8,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "node:path";
 import type { OutcomeStatus } from "#lib/outcome.mts";
 
-/** Every way an outcome can finish, plus the one status only this file knows: `in-flight`
- *  is a claim, not a result, so no outcome file ever carries it. Derived rather than
- *  re-spelled — a status the outcome grows is a status a work item can be recorded as. */
-export type WorkItemStatus = OutcomeStatus | "in-flight";
+/** Every way an outcome can finish, plus the two statuses only this file knows. Derived
+ *  rather than re-spelled — a status the outcome grows is a status a work item can be
+ *  recorded as — and the two extras are exactly the ones no CHILD can report:
+ *  `in-flight` is a claim rather than a result, and `quarantined` is a decision the
+ *  PARENT takes about a failure that already happened twice (#39). */
+export type WorkItemStatus = OutcomeStatus | "in-flight" | "quarantined";
 
 export interface WorkItemState {
   status: WorkItemStatus;
@@ -30,6 +32,13 @@ export interface WorkItemState {
    *  (ADR-0003), neither of which the blocker's final tip does. Absent until a run has
    *  actually created the branch. */
   forkPoint?: string;
+  /** This item has already had its ONE retry (#39): it failed, was restarted once with its
+   *  own error, and the next failure quarantines it instead of running the agent again.
+   *  Durable and not in memory (constraint 7) — a retry is a whole extra agent run on real
+   *  quota, so a restart must not hand every failed item a fresh one. Set by the policy,
+   *  carried through the apply, and dropped by admission: an item started fresh (a human
+   *  released it, or re-labelled it) has its retry back. */
+  retried?: boolean;
 }
 
 /** The whole file: one record per work-item key. */

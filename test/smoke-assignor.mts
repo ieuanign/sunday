@@ -587,6 +587,50 @@ try {
     );
   }
 
+  // ── the durable failure state (#39): the one retry an unrecognised failure gets, and
+  //    the quarantine it lands in when that retry fails too. Both live in the state file
+  //    (constraint 7) — an in-memory retry flag hands every restart a fresh agent run on
+  //    real quota, and a quarantine that reads as `failed` is re-admitted by the next
+  //    reconcile, which is the loop this issue exists to stop ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    // What #39's policy leaves behind when it spends the retry: the flag written durably,
+    // and the item restarted carrying it.
+    h.state.set(KEY, { ...h.state.get(KEY)!, retried: true });
+    await h.finish(KEY, { key: KEY, status: "failed", summary: "boom", finishedAt: "2026-07-25T00:00:00.000Z" });
+
+    ok(
+      "retry budget: applying the second failure keeps the retry SPENT — `set` replaces the whole record, and dropping it here is a run that retries forever",
+      h.state.get(KEY)?.status === "failed" && h.state.get(KEY)?.retried === true,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    h.assignor.handle(delivery());
+    await tick();
+    ok(
+      "retry budget: a fresh admission drops it — an item started again has its retry back, or it quarantines on its first failure ever",
+      h.state.get(KEY)?.status === "in-flight" && h.state.get(KEY)?.retried === undefined,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    // …and quarantine is where that ladder ends: a state DISTINCT from `failed`, because a
+    // failed item is exactly what admission and reconcile pick back up.
+    await h.finish(KEY, { key: KEY, status: "failed", summary: "boom again", finishedAt: "2026-07-25T00:00:00.000Z" });
+    const before = h.forked.length;
+    h.state.set(KEY, { status: "quarantined" });
+    h.assignor.handle(delivery());
+    await tick();
+
+    ok(
+      "quarantine: a quarantined item is NOT re-admitted, where the same delivery re-admits a failed one",
+      h.forked.length === before && h.state.get(KEY)?.status === "quarantined",
+      `${h.forked.length} forks, state ${JSON.stringify(h.state.get(KEY))}`,
+    );
+    ok("quarantine: and the skip says so rather than dropping the delivery in silence", said(h.lines, "state=quarantined"), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
   // ── the gate (#36): the agent stopped to ask a human something. Nothing shipped and
   //    nothing failed — the item is the human's now, and their answer resumes the run
   //    that asked. The question rides the SAME outcome milestone every other finish uses,

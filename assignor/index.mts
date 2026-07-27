@@ -566,6 +566,11 @@ export class Assignor {
       sessionId: outcome.sessionId,
       base: prior?.base,
       forkPoint: outcome.forkPoint ?? prior?.forkPoint,
+      // Carried the same way, and for the sharpest version of the same reason (#39
+      // constraint 8): this is the record the retry ladder reads. Dropped here, every
+      // failure looks like the item's first, and an item that cannot be run successfully
+      // retries on real quota for as long as anything keeps re-admitting it.
+      retried: prior?.retried,
     });
     // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
     // asks the human something, and rendering it as a failure tells them work broke when
