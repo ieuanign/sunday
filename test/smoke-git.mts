@@ -171,6 +171,34 @@ function hasCommit(fx: { git(dir: string, ...args: string[]): string }, dir: str
   ok("resolve: a ref that no longer resolves throws rather than answering with nothing", thrown !== undefined, String(await git.resolveRef(child, "origin/feat/9").catch(() => "threw")));
 }
 
+// ── remoteBranchExists: does the ORIGIN still hold the base, right now (#38) ──
+{
+  const fx = makeFixture("git-remote-branch");
+  fx.commit("shared.txt", "base\n", "C0 base");
+  fx.push("main");
+  fx.checkout("feat/9", "main");
+  fx.commit("b.txt", "from the blocker\n", "B1");
+  fx.push("feat/9");
+  const child = fx.cloneChild();
+
+  ok("remote base: a branch the origin has reads as present", (await git.remoteBranchExists(child, "feat/9")) === true);
+
+  // The base merged and GitHub deleted its head branch while the agent worked. The
+  // `origin/feat/9` this checkout fetched before the run still resolves locally — asking
+  // THAT would ship a stacked PR onto a base that no longer exists.
+  fx.deleteOnOrigin("feat/9");
+  ok("remote base: the ref fetched before the run still looks alive locally", hasRef(fx, child, "origin/feat/9"));
+  ok(
+    "remote base: …but the origin is what is asked, so a base deleted mid-run reads as gone",
+    (await git.remoteBranchExists(child, "feat/9")) === false,
+  );
+
+  // A tag is not something a PR can target or a branch can be pushed to, and repos tag
+  // releases after the branch of the same name is gone.
+  fx.git(fx.origin, "update-ref", "refs/tags/feat/9", fx.git(fx.origin, "rev-parse", "main"));
+  ok("remote base: a TAG of the same name is not a base", (await git.remoteBranchExists(child, "feat/9")) === false);
+}
+
 // ── isAncestor: what makes an already-restacked branch a skip, not a second rebase ──
 {
   const fx = makeFixture("git-ancestor");

@@ -106,7 +106,7 @@ function harness(s: Scenario = {}) {
   const github: GitHubRun = {
     readIssue: async () => {
       if (s.readIssueError) throw new Error(s.readIssueError);
-      return { title: TITLE, body: BODY };
+      return { title: TITLE, body: BODY, state: "open", labels: [] };
     },
     addLabels: async (_repo, _issue, labels) => {
       trace.push("addLabels");
@@ -131,6 +131,7 @@ function harness(s: Scenario = {}) {
   const statted: string[] = [];
   const resolved: string[] = [];
   const git: Git = {
+    remoteBranchExists: async () => true,
     excludeScratch: async () => void trace.push("exclude"),
     fetchPrune: async () => void trace.push("fetch"),
     resolveRef: async (_dir, ref) => {

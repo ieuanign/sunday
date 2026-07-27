@@ -197,11 +197,27 @@ export interface GitHubForwarder {
   dropForwarderHooks(repo: string): Promise<void>;
 }
 
-/** One issue as a RUN needs to read it: what the agent is told to work on, and what its
+/** One issue as READING it needs it: what the agent is told to work on, and what its
  *  pull request is titled. */
 export interface IssueDetail {
   title: string;
   body: string;
+}
+
+/** One issue as a RUN needs it — the above, plus the two facts a run re-asserts before
+ *  it starts (#38): is this issue still open, and does it still wear the labels it was
+ *  admitted on. Wider than `IssueDetail` rather than in place of it because a run reads
+ *  an issue ONCE for all three uses, while admission's blocker walk reads a body and
+ *  nothing else. */
+export interface RunIssueDetail extends IssueDetail {
+  /** Lowercased issue state ("open" | "closed"), normalised HERE for the reason
+   *  `Blocker.state` is: `gh issue view --json state` shouts where the dependencies
+   *  endpoint whispers, and a caller comparing against the wrong casing reads every
+   *  open issue as closed. */
+  state: string;
+  /** Label names, flattened as `listOpenIssues` flattens them — what a caller compares
+   *  a repo's trigger labels against. */
+  labels: string[];
 }
 
 /** A pull request to open, fully composed by the caller. `base` is the LOGICAL branch
@@ -229,8 +245,10 @@ export interface NewPullRequest {
  *  reason to block a loop (ADR-0001). */
 export interface GitHubRun {
   /** The issue the run is working on. Read on every run — fresh and on a gate resume —
-   *  because the PR the resume finally opens is titled from it. */
-  readIssue(repo: string, issue: number): Promise<IssueDetail>;
+   *  because the PR the resume finally opens is titled from it, and because the run
+   *  asserts on its state and labels before it starts (#38). ONE read serves all three:
+   *  `gh issue view` answers them in the same call. */
+  readIssue(repo: string, issue: number): Promise<RunIssueDetail>;
   /** Apply labels — the run applies `awaiting-human` when the agent gates. */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
   /** Take labels off — the resuming run removes `awaiting-human` itself, so the
@@ -326,9 +344,17 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
     ]);
   }
 
-  async readIssue(repo: string, issue: number): Promise<IssueDetail> {
-    const out = await shA("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,body"]);
-    return JSON.parse(out) as IssueDetail;
+  async readIssue(repo: string, issue: number): Promise<RunIssueDetail> {
+    // The wider return satisfies `GitHub.readIssue` too — admission's blocker walk reads
+    // the body off it and ignores the rest, which is one `gh` call per run instead of two.
+    const out = await shA("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,body,state,labels"]);
+    const detail = JSON.parse(out) as IssueDetail & { state: string; labels: { name: string }[] };
+    return {
+      title: detail.title,
+      body: detail.body,
+      state: detail.state.toLowerCase(),
+      labels: detail.labels.map((l) => l.name),
+    };
   }
 
   async blockedBy(repo: string, issue: number): Promise<Blocker[]> {
