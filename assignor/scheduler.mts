@@ -50,7 +50,8 @@ export interface Scheduler {
   /** Lift the pause and drain whatever was retained. */
   resume(): void;
   isPaused(): boolean;
-  /** A point-in-time view for `sunday status` / Telegram `/status` (M3.6). */
+  /** A point-in-time view of both lanes — what is in flight, what is queued, and
+   *  whether the scheduler is paused. */
   snapshot(): SchedulerSnapshot;
 }
 

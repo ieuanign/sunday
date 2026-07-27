@@ -12,7 +12,7 @@ otherwise defers to each repo.
 
 > **Status: pipeline built (M1–M5), live-hardening in progress.** Everything here is built and
 > smoke-verified; a few paths are still owed an end-to-end live run — a real quota pause, a
-> Telegram round-trip, a supervised kill → restart → reconcile, a forced ≥120K handoff.
+> supervised kill → restart → reconcile, a forced ≥120K handoff.
 
 ## How it works
 
@@ -58,7 +58,7 @@ everything else is declared in `devbox.json`:
 devbox shell          # enter the provisioned env; its init hook also installs the gh webhook
                       #   extension (cli/gh-webhook) — gh ships no built-in `webhook` command
 gh auth login         # gh drives the webhook forwarders, PRs, labels, comments
-cp .env.example .env  # agent auth + webhook secret (+ optional Telegram keys)
+cp .env.example .env  # agent auth (+ optional Telegram keys)
 ```
 
 Devbox provisions the **parent host** toolchain only — each child sandbox gets its dependencies
