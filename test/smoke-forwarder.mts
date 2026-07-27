@@ -119,7 +119,7 @@ function harness(repos: string[], opts: Opts = {}) {
   const spawned: Spawned[] = [];
   const forwarders = new Forwarders({
     repos,
-    port: 8788,
+    port: 8787,
     github,
     log: new Logger(dests).child("forwarder"),
     retryMs: opts.retryMs ?? 20,
@@ -157,7 +157,7 @@ function harness(repos: string[], opts: Opts = {}) {
   await h.forwarders.start();
 
   ok("start: one forwarder per routed repo", h.spawned.map((s) => s.repo).join(",") === "acme/finance,acme/drive", h.spawned.map((s) => s.repo).join(","));
-  ok("start: each is forwarded at the port the receiver actually bound", h.spawned.every((s) => s.url === "http://localhost:8788/"), h.spawned.map((s) => s.url).join(","));
+  ok("start: each is forwarded at the port the receiver actually bound", h.spawned.every((s) => s.url === "http://localhost:8787/"), h.spawned.map((s) => s.url).join(","));
   ok("start: a stranded forwarder hook is dropped for each repo, before its child is spawned", h.dropped.join(",") === "acme/finance,acme/drive", h.dropped.join(","));
   ok("start: and every child is really running", h.spawned.every((s) => alive(s.child)), h.spawned.map((s) => `${s.repo}:${s.child.pid}`).join(","));
 

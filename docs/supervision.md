@@ -63,7 +63,7 @@ is answered as soon as the receiver serves, which is *before* the boot sequence:
 minutes, and a probe unanswered that long is the SIGKILL/restart loop
 [ADR-0001](adr/0001-fork-per-work-item.md) exists to stop. The probe port is a literal in
 `process-compose.yaml` (probe ports are ints, so they cannot read the env) — keep it in sync with
-`LISTENER_PORT`.
+`SUNDAY_PORT`.
 
 Restart is safe by design. On every (re)start the parent:
 

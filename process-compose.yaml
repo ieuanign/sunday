@@ -37,7 +37,7 @@ processes:
     # sequence runs — image builds take minutes and a probe unanswered for that long is
     # the SIGKILL/restart loop ADR-0001 exists to stop. process-compose probes support
     # http_get / exec (NOT k8s-style tcp_socket — that leaves a process forever
-    # un-Ready). Keep the port in sync with LISTENER_PORT (.env, default 8787) — probe
+    # un-Ready). Keep the port in sync with SUNDAY_PORT (.env, default 8787) — probe
     # ports are ints, so it can't read the env var here.
     readiness_probe:
       http_get:

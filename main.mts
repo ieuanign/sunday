@@ -51,7 +51,7 @@ import { Boot, readRoutingTable } from "./boot.mts";
 // One pipeline, one port (#45): `gh webhook forward --url http://localhost:8787/` delivers
 // here. `process-compose.yaml`'s readiness probe is a literal int that cannot read the env,
 // so it carries this number by hand — move the two together or the process never goes Ready.
-const port = Number(process.env.LISTENER_PORT ?? 8787);
+const port = Number(process.env.SUNDAY_PORT ?? 8787);
 // One global cap across every repo, because there is one shared agent quota.
 const maxConcurrency = Number(process.env.MAX_CONCURRENCY ?? 3);
 
