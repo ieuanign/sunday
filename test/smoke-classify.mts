@@ -5,7 +5,7 @@
 // provider error strings are unknown until the first live failure; these fixtures
 // encode the PROVISIONAL patterns, to be tightened against a captured excerpt.
 
-import { classify } from "../listener/classify.mts";
+import { classify } from "#listener/classify.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

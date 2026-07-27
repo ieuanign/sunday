@@ -9,11 +9,11 @@ import {
   hasUnaddressedSunday,
   issueAction,
   type CommentRef,
-} from "../listener/reconcile.mts";
-import { restackOwed } from "../listener/restack.mts";
-import { hasLivePr } from "../listener/dag.mts";
-import { isSummon, isActivatedSpec, SUNDAY_MARKER } from "../listener/helper.mts";
-import type { Blocker } from "../listener/dag.mts";
+} from "#listener/reconcile.mts";
+import { restackOwed } from "#listener/restack.mts";
+import { hasLivePr } from "#listener/dag.mts";
+import { isSummon, isActivatedSpec, SUNDAY_MARKER } from "#listener/helper.mts";
+import type { Blocker } from "#listener/dag.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

@@ -13,13 +13,13 @@ import { fork } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import { createForkWorkItem } from "../assignor/fork.mts";
+import { createForkWorkItem } from "#assignor/fork.mts";
 // Type-only, so the entry point stays OUT of this process's module graph exactly as it
 // stays out of the parent's (ADR-0001) — what is asserted below is a real fork.
-import type { Job } from "../issue/run.mts";
-import { readLock, type Lock } from "../lib/lock.mts";
-import { readOutcome } from "../lib/outcome.mts";
-import { pidPath, resultPath } from "../lib/paths.mts";
+import type { Job } from "#issue/run.mts";
+import { readLock, type Lock } from "#lib/lock.mts";
+import { readOutcome } from "#lib/outcome.mts";
+import { pidPath, resultPath } from "#lib/paths.mts";
 
 const root = resolve(import.meta.dirname, "..");
 const entry = resolve(root, "issue", "run.mts");

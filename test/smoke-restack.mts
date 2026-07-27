@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { hostRebase } from "../listener/restack.mts";
+import { hostRebase } from "#listener/restack.mts";
 
 const ROOT = new URL(".", import.meta.url).pathname;
 let fails = 0;

@@ -11,12 +11,12 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { FailurePolicy } from "../assignor/failure.mts";
-import { PauseStore } from "../assignor/pause.mts";
-import { Restacker, type RestackerDeps } from "../assignor/restack.mts";
-import type { Scheduler, SchedulerSnapshot } from "../assignor/scheduler.mts";
-import { StateStore } from "../assignor/state.mts";
-import { GitCli } from "../services/git.mts";
+import { FailurePolicy } from "#assignor/failure.mts";
+import { PauseStore } from "#assignor/pause.mts";
+import { Restacker, type RestackerDeps } from "#assignor/restack.mts";
+import type { Scheduler, SchedulerSnapshot } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
+import { GitCli } from "#services/git.mts";
 import {
   AWAITING_HUMAN_LABEL,
   type Blocker,
@@ -25,8 +25,8 @@ import {
   type MergedPullRequest,
   type OpenPullRequest,
   type PrDetail,
-} from "../services/github/index.mts";
-import { Logger, type Destination, type Destinations, type LogLine } from "../services/logger.mts";
+} from "#services/github/index.mts";
+import { Logger, type Destination, type Destinations, type LogLine } from "#services/logger.mts";
 import { makeFixture, ok, report, restackDrain, stubGhInEffect, type Fixture, type RestackDrain } from "./git-fixture.mts";
 
 /** The repo root — what the routing table's child paths are resolved against. */

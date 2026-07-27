@@ -8,8 +8,8 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { notify } from "../listener/notify.mts";
-import type { OpEvent } from "../listener/classify.mts";
+import { notify } from "#listener/notify.mts";
+import type { OpEvent } from "#listener/classify.mts";
 
 // The listener's real events path (mirrors listener/notify.mts) — NOT relative to
 // this test file; notify() appends to exactly this location.

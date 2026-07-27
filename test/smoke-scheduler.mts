@@ -4,8 +4,8 @@
 // the uncapped restack lane, the two-way per-branch lock, drain-on-completion,
 // and key dedup.
 
-import { createScheduler, type Scheduler } from "../assignor/scheduler.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { createScheduler, type Scheduler } from "#assignor/scheduler.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

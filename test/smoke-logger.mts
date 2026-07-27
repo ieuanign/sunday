@@ -7,9 +7,9 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { sh } from "../lib/sh.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
-import { commentBody, consoleDestination, eventLogDestination, phoneDestination, runLogDestination } from "../services/destinations.mts";
+import { sh } from "#lib/sh.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
+import { commentBody, consoleDestination, eventLogDestination, phoneDestination, runLogDestination } from "#services/destinations.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

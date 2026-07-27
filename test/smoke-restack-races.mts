@@ -22,14 +22,14 @@
 
 import { resolve } from "node:path";
 
-import { FailurePolicy } from "../assignor/failure.mts";
-import { PauseStore } from "../assignor/pause.mts";
-import { Restacker } from "../assignor/restack.mts";
-import type { Scheduler } from "../assignor/scheduler.mts";
-import { StateStore } from "../assignor/state.mts";
-import { GitCli } from "../services/git.mts";
-import { Gh } from "../services/github/index.mts";
-import { Logger, type Destinations } from "../services/logger.mts";
+import { FailurePolicy } from "#assignor/failure.mts";
+import { PauseStore } from "#assignor/pause.mts";
+import { Restacker } from "#assignor/restack.mts";
+import type { Scheduler } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
+import { GitCli } from "#services/git.mts";
+import { Gh } from "#services/github/index.mts";
+import { Logger, type Destinations } from "#services/logger.mts";
 import { makeFixture, ok, report, restackDrain, stubGhInEffect, type Fixture } from "./git-fixture.mts";
 
 /** The repo root — what the routing table's child paths are resolved against. */

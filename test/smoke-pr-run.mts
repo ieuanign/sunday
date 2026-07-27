@@ -7,13 +7,13 @@
 // The module touches no filesystem of its own, so this case needs no temp dir at all.
 // $0, offline, no docker, no network, no tokens.
 
-import { sundayComment, sundayReply, SUNDAY_REPLY_MARKER } from "../lib/markers.mts";
-import { PrModule, type PrRunInput } from "../pr/index.mts";
-import { RESULT_TAG, type PrResult } from "../pr/prompt.mts";
-import type { Agent, AgentRunRequest, AgentRunResult } from "../services/agent/index.mts";
-import type { Git } from "../services/git.mts";
-import type { GitHubPrRun, IssueComment, ReviewComment } from "../services/github/index.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { sundayComment, sundayReply, SUNDAY_REPLY_MARKER } from "#lib/markers.mts";
+import { PrModule, type PrRunInput } from "#pr/index.mts";
+import { RESULT_TAG, type PrResult } from "#pr/prompt.mts";
+import type { Agent, AgentRunRequest, AgentRunResult } from "#services/agent/index.mts";
+import type { Git } from "#services/git.mts";
+import type { GitHubPrRun, IssueComment, ReviewComment } from "#services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

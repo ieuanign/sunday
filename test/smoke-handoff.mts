@@ -13,8 +13,8 @@ import {
   HANDOFF_TAG,
   handoffDocPath,
   cleanupHandoffs,
-} from "../listener/helper.mts";
-import { classify } from "../listener/classify.mts";
+} from "#listener/helper.mts";
+import { classify } from "#listener/classify.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

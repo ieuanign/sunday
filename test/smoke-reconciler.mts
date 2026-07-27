@@ -11,17 +11,17 @@
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { FailurePolicy } from "../assignor/failure.mts";
-import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
-import { PauseStore } from "../assignor/pause.mts";
-import { hasUnansweredSummon, Reconciler } from "../assignor/reconcile.mts";
-import { createScheduler } from "../assignor/scheduler.mts";
-import { StateStore } from "../assignor/state.mts";
+import { FailurePolicy } from "#assignor/failure.mts";
+import { Assignor, type ForkWorkItem, type Paths } from "#assignor/index.mts";
+import { PauseStore } from "#assignor/pause.mts";
+import { hasUnansweredSummon, Reconciler } from "#assignor/reconcile.mts";
+import { createScheduler } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
 import type { RepoConfig } from "#config/repos.mts";
-import { acquireLock, readLock } from "../lib/lock.mts";
-import { sundayComment, sundayReply } from "../lib/markers.mts";
-import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue, type OpenPullRequest, type ReviewComment } from "../services/github/index.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { acquireLock, readLock } from "#lib/lock.mts";
+import { sundayComment, sundayReply } from "#lib/markers.mts";
+import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue, type OpenPullRequest, type ReviewComment } from "#services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-reconciler-${process.pid}`);
 

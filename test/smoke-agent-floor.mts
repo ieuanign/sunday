@@ -10,8 +10,8 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
-import { assembleFloor, floorDir } from "../services/agent/floor.mts";
-import { loadRoster, PHASES } from "../config/roster.mts";
+import { assembleFloor, floorDir } from "#services/agent/floor.mts";
+import { loadRoster, PHASES } from "#config/roster.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

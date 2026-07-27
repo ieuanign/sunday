@@ -11,8 +11,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { acquireLock, readLock, releaseLock } from "../lib/lock.mts";
-import { clearOutcome, readOutcome, writeOutcome, type Outcome } from "../lib/outcome.mts";
+import { acquireLock, readLock, releaseLock } from "#lib/lock.mts";
+import { clearOutcome, readOutcome, writeOutcome, type Outcome } from "#lib/outcome.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-outcome-lock-${process.pid}`);
 

@@ -5,9 +5,9 @@
 //   devbox run node test/smoke-issue-body.mts
 // $0, offline.
 
-import { composeBody, type BodyFacts } from "../issue/body.mts";
-import type { IssueResult } from "../issue/prompt.mts";
-import { SUNDAY_SIGN } from "../lib/markers.mts";
+import { composeBody, type BodyFacts } from "#issue/body.mts";
+import type { IssueResult } from "#issue/prompt.mts";
+import { SUNDAY_SIGN } from "#lib/markers.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

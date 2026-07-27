@@ -9,7 +9,7 @@ import {
   clearPauseState,
   rearmAction,
   type PauseState,
-} from "../listener/pause-state.mts";
+} from "#listener/pause-state.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

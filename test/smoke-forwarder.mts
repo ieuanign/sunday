@@ -7,9 +7,9 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 
-import { Forwarders } from "../services/github/forwarder.mts";
-import type { GitHubForwarder } from "../services/github/index.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { Forwarders } from "#services/github/forwarder.mts";
+import type { GitHubForwarder } from "#services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

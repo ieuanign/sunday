@@ -9,10 +9,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import { Logger, type Destinations } from "../services/logger.mts";
-import { ClaudeAgent } from "../services/agent/claude.mts";
-import { floorDir } from "../services/agent/floor.mts";
-import { selectAgent, type AgentRunRequest } from "../services/agent/index.mts";
+import { Logger, type Destinations } from "#services/logger.mts";
+import { ClaudeAgent } from "#services/agent/claude.mts";
+import { floorDir } from "#services/agent/floor.mts";
+import { selectAgent, type AgentRunRequest } from "#services/agent/index.mts";
 import { EFFORTS } from "#config/roster.mts";
 
 let fails = 0;

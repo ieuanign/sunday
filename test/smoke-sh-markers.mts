@@ -8,8 +8,8 @@
 // Sunday reads and writes, and the Assignor/Reconciler smokes drive that over a
 // substitute.)
 
-import { isSummon, sundayComment, sundayReply, unansweredSummons } from "../lib/markers.mts";
-import { shA } from "../lib/sh.mts";
+import { isSummon, sundayComment, sundayReply, unansweredSummons } from "#lib/markers.mts";
+import { shA } from "#lib/sh.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {
