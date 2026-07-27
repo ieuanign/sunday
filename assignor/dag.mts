@@ -65,8 +65,12 @@ function parseBlockedBy(body: string, repo: string): number[] | undefined {
 /** Everything that blocks `issue`: GitHub's native dependency links, and the body
  *  fallback for a repo that has none. An EMPTY native result is a real answer — this
  *  repo populates no links — which is why the fallback gets its turn there and never
- *  after a read that THREW (constraint 3). */
-async function readBlockers(github: GitHub, repo: string, issue: number): Promise<Blocker[]> {
+ *  after a read that THREW (constraint 3).
+ *
+ *  Exported for the restack's dependent scan (#43), which asks the same question in the
+ *  other direction — "does this open PR's issue name the one that just merged?" — and
+ *  must inherit the THROW: a read that failed is not "not a dependent". */
+export async function readBlockers(github: GitHub, repo: string, issue: number): Promise<Blocker[]> {
   const native = await github.blockedBy(repo, issue);
   if (native.length > 0) return native;
   const refs = parseBlockedBy((await github.readIssue(repo, issue)).body, repo);

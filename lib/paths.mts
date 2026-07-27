@@ -59,6 +59,15 @@ export function runLogPath(fullName: string, flow: string): string {
   return resolve(logDir, fullName, flow, "run.log");
 }
 
+/** The ephemeral detached worktree one branch's restack rebases in (#43). Under `var/`
+ *  and NEVER inside the child checkout: v1 put it there, where an untracked directory
+ *  dirties a concurrent run's worktree and gets it preserved host-side (#21). One path
+ *  per repo+branch, which the scheduler's per-branch lock already keeps to one live
+ *  restack at a time. */
+export function restackWorktreePath(repo: string, branch: string): string {
+  return resolve(varDir, "restack", slug(`${repo}#${branch}`));
+}
+
 /** Where one repo's token reports accumulate: `var/log/<owner>/<repo>/token-report/`,
  *  beside that repo's run logs. Durable, not throwaway — v1 kept them in `.scratch/`,
  *  which CLAUDE.md documents as `rm -rf`-able, so the spend history of every run so far

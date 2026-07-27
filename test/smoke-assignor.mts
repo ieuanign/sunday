@@ -62,6 +62,7 @@ function delivery(over: Partial<Delivery> = {}): Delivery {
     number: 57,
     labels: ["sunday", "ready-for-agent"],
     onPullRequest: false,
+    merged: false,
     ...over,
   };
 }
@@ -75,7 +76,7 @@ function reply(body: string, over: Partial<Delivery> = {}): Delivery {
  *  that reach the world substituted: GitHub (every method is a real write to a real
  *  repo) and the fork (a child process). Every path it uses points into this case's own
  *  dir, so the real `var/` is never touched. */
-function harness(reads: Partial<GitHub> = {}) {
+function harness(reads: Partial<GitHub> = {}, restackError?: string) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   /** Every line either module emits, at any level — the run log is the one destination
    *  every level routes to. */
@@ -137,6 +138,10 @@ function harness(reads: Partial<GitHub> = {}) {
     await tick();
   };
 
+  /** What the restack lane was seeded with (#43) — `<repo>#<merged issue>`, in order.
+   *  Substituted for the same reason the fork is: the real one force-pushes branches. */
+  const restacked: string[] = [];
+
   const logger = new Logger(dests);
   const state = new StateStore(resolve(caseDir, "state.json"));
   const scheduler = createScheduler(2, logger.child("scheduler"));
@@ -148,6 +153,11 @@ function harness(reads: Partial<GitHub> = {}) {
     state,
     fork,
     paths,
+    restack: async (repo, issue) => {
+      restacked.push(`${repo}#${issue}`);
+      // The real one reaches GitHub and git, so it really can reject.
+      if (restackError) throw new Error(restackError);
+    },
     // The real policy, over this case's own pause file and state: what it DOES about each
     // scope is `test/smoke-failure.mts`'s subject, and what matters here is that no case in
     // this file reaches the real `var/pause.json` or writes a label to a real repo.
@@ -160,7 +170,7 @@ function harness(reads: Partial<GitHub> = {}) {
     }),
   });
 
-  return { assignor, state, lines, comments, claimed, released, labelled, forked, finish, paths };
+  return { assignor, state, lines, comments, claimed, released, labelled, forked, restacked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
@@ -470,6 +480,62 @@ try {
     await tick();
 
     ok("promote: a PR in another repo does not re-evaluate this one's deferred items", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+  }
+
+  // ── #43: a blocker MERGING is what moves everything stacked on it. The seed is the
+  //    Assignor's only decision about a restack — which repo, and which ISSUE landed —
+  //    and the issue is read off the HEAD BRANCH, because the delivery's own number is
+  //    the pull request's and a restack aimed at that moves somebody else's branches ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery({ event: "pull_request", action: "closed", number: 61, labels: [], merged: true, head: "feat/9" }));
+    await tick();
+
+    ok("merge: the branch that merged seeds the restack lane, named by its ISSUE and not its PR", h.restacked.join(",") === "acme/finance#9", h.restacked.join(","));
+    ok("merge: and the deferred items still get their re-evaluation — a merge is also a blocker closing", h.forked.length === 0 && said(h.lines, "pull_request.closed"), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  // ── everything that is NOT a merge (AC9). A PR closed unmerged shipped nothing, and a
+  //    `synchronize` is a push to a branch that is still open — restacking on either
+  //    force-pushes every dependent onto a base that never landed ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery({ event: "pull_request", action: "closed", number: 61, labels: [], merged: false, head: "feat/9" }));
+    h.assignor.handle(delivery({ event: "pull_request", action: "opened", number: 62, labels: [], merged: false, head: "feat/9" }));
+    h.assignor.handle(delivery({ event: "pull_request", action: "synchronize", number: 63, labels: [], merged: true, head: "feat/9" }));
+    await tick();
+
+    ok("merge: a PR closed unmerged moves nothing — nothing landed for anything to stack on", h.restacked.length === 0, h.restacked.join(","));
+    ok("merge: nor does a PR opening, or a push to one still open", h.restacked.length === 0, h.restacked.join(","));
+  }
+
+  // ── a merged PR whose head is not one of ours. Sunday only ever restacks `feat/<n>`
+  //    branches, and a human's `hotfix/…` merging says nothing about what is stacked on
+  //    what — there is no issue number in it to key a work item off ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery({ event: "pull_request", action: "closed", number: 61, labels: [], merged: true, head: "hotfix/auth" }));
+    h.assignor.handle(delivery({ event: "pull_request", action: "closed", number: 62, labels: [], merged: true }));
+    await tick();
+
+    ok("merge: a branch that is not ours seeds nothing", h.restacked.length === 0, h.restacked.join(","));
+    ok("merge: and it is still accounted for by a line, like every other delivery", said(h.lines, "pull_request.closed"), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  // ── the seed reaches the world (it force-pushes), so it is fired and not awaited — and
+  //    a rejection from it must be caught HERE. Unhandled, it takes the parent down with
+  //    it (ADR-0001), because `handle` is called synchronously inside the receiver's own
+  //    try/catch which cannot see a rejection ──
+  {
+    const h = harness({}, "gh: HTTP 403");
+    h.assignor.handle(delivery({ event: "pull_request", action: "closed", number: 61, labels: [], merged: true, head: "feat/9" }));
+    await tick();
+
+    ok(
+      "merge: a restack that rejects is caught and recorded here, not left to take the parent down",
+      said(h.lines, "gh: HTTP 403") && said(h.lines, "#9"),
+      JSON.stringify(h.lines.map((l) => l.message)),
+    );
   }
 
   // ── the work-item key and the paths built from it become FILENAMES, so the number

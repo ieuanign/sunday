@@ -35,7 +35,10 @@ interface Payload {
   action?: string;
   repository?: { full_name?: string };
   issue?: Subject;
-  pull_request?: Subject;
+  /** A PR subject carries two fields an issue never does: whether it merged, and the
+   *  branch it merged from. Declared HERE rather than on `Subject`, so the shape says
+   *  what it is — only a real `pull_request` payload has them. */
+  pull_request?: Subject & { merged?: boolean; head?: { ref?: string } };
   comment?: { body?: string };
 }
 
@@ -67,6 +70,13 @@ function normalise(event: string, payload: Payload): Delivery {
     // under that key, while a PR's conversation comment arrives as an `issue_comment`
     // whose `issue` carries a `pull_request` of its own.
     onPullRequest: payload.pull_request !== undefined || payload.issue?.pull_request !== undefined,
+    // Both read off `payload.pull_request` DIRECTLY and never off `subject`: a pull
+    // request's conversation comment arrives as an `issue_comment` whose `issue` carries
+    // a `pull_request` key, so a subject resolved from either would let a comment on a
+    // merged PR's thread arrive looking exactly like the merge itself — and #43 answers
+    // a merge by force-pushing every branch stacked on it.
+    merged: payload.pull_request?.merged === true,
+    head: payload.pull_request?.head?.ref,
   };
 }
 

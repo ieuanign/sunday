@@ -123,7 +123,7 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   // what a failed one MEANS is `test/smoke-failure.mts`'s subject — what matters here is
   // that no case in this file can reach the real `var/pause.json`.
   const failure = new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, state, github, log: logger.child("failure") });
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
+  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, restack: async () => {}, failure });
   const reconciler = new Reconciler({ repos: TABLE, github, assignor, log: logger.child("reconcile") });
 
   /** Everything the queue knows about, running or waiting — a work item that reached the
@@ -180,7 +180,7 @@ try {
     await rederived.reconciler.run();
 
     const live = harness();
-    live.assignor.handle({ event: "issues", action: "labeled", repo: "acme/finance", number: 57, labels, onPullRequest: false });
+    live.assignor.handle({ event: "issues", action: "labeled", repo: "acme/finance", number: 57, labels, onPullRequest: false, merged: false });
     // The live route fires admission and does not wait for it — it reaches GitHub now
     // (#42), and the receiver calling it cannot see a rejection. The sweep awaits its own.
     await new Promise((settle) => setTimeout(settle, 0));

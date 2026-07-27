@@ -24,6 +24,7 @@ import { FailurePolicy } from "#assignor/failure.mts";
 import { Assignor } from "#assignor/index.mts";
 import { PauseStore } from "#assignor/pause.mts";
 import { Reconciler } from "#assignor/reconcile.mts";
+import { Restacker } from "#assignor/restack.mts";
 import { createScheduler } from "#assignor/scheduler.mts";
 import { StateStore } from "#assignor/state.mts";
 import {
@@ -31,12 +32,14 @@ import {
   fallbackLogPath,
   pausePath,
   pidPath,
+  restackWorktreePath,
   resultPath,
   resultsDir,
   runLogPath,
   statePath,
 } from "#lib/paths.mts";
 import { createLogger } from "#services/destinations.mts";
+import { GitCli } from "#services/git.mts";
 import { Forwarders } from "#services/github/forwarder.mts";
 import { Gh } from "#services/github/index.mts";
 import { createReceiver } from "#services/github/receiver.mts";
@@ -100,6 +103,23 @@ const failure: FailurePolicy = new FailurePolicy({
   },
 });
 
+// AFTER the policy (it reports every restack failure through it) and BEFORE the Assignor
+// (which seeds it on a merge) — no cycle in either direction: nothing in here reaches
+// back into the Assignor, because a restack moves BRANCHES and never work items.
+const restacker = new Restacker({
+  repos,
+  github,
+  git: new GitCli(),
+  // The narrow seam, not the whole scheduler: this is the only method a restack uses, and
+  // the per-branch lock behind it is what keeps one off a branch an issue run is on.
+  enqueueRestack: (item) => scheduler.enqueueRestack(item),
+  state,
+  failure,
+  log: logger.child("restack"),
+  parentRoot: import.meta.dirname,
+  worktreePath: restackWorktreePath,
+});
+
 const assignor = new Assignor({
   repos,
   github,
@@ -108,6 +128,7 @@ const assignor = new Assignor({
   state,
   fork: createForkWorkItem(),
   paths: { resultPath, pidPath, runLogPath, eventLogPath },
+  restack: (repo, issue) => restacker.onMerge(repo, issue),
   failure,
 });
 

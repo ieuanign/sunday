@@ -46,6 +46,15 @@ export interface Delivery extends IssueCandidate {
    *  comment on a PR is #44's work and never an issue run's, and a field left off would
    *  default to the dangerous answer — an issue run resumed from a PR thread. */
   onPullRequest: boolean;
+  /** Did this pull request MERGE? Required for the same reason `onPullRequest` is, and
+   *  more sharply: it is the whole of #43's trigger — GitHub sends no `merged` action,
+   *  only `closed` with this flag — and a field left off would default to force-pushing
+   *  every branch stacked on a PR that was closed unmerged. */
+  merged: boolean;
+  /** The head branch of the pull request this delivery is about, when it is one.
+   *  `feat/<n>` names the ISSUE that merged, which `number` does not: that is the PR's
+   *  own number, and a restack aimed at it would move somebody else's branches. */
+  head?: string;
 }
 
 /** How a forked child ENDED. Not what it produced — the parent applies that from the
@@ -64,6 +73,13 @@ export interface ChildExit {
  *  (`fork()` on `issue/run.mts` BY PATH, ADR-0001) and a test supplies one that spawns
  *  nothing. */
 export type ForkWorkItem = (job: Job) => Promise<ChildExit>;
+
+/** A blocker MERGED, so everything stacked on it has to move (#43). Injected as a
+ *  function rather than as the `Restacker` itself, so this class never reaches the
+ *  restack module: what the Assignor decides is WHICH repo and WHICH issue landed, and
+ *  everything after that — the dependent scan, the rebase, the retarget, the cascade —
+ *  belongs to `assignor/restack.mts`. */
+export type RestackOnMerge = (repo: string, mergedIssue: number) => Promise<void>;
 
 /** The `var/` layout, as `lib/paths.mts` exports it. Injected rather than imported, for
  *  the same reason the child is handed its paths (constraint 7): a smoke drives the real
@@ -86,6 +102,8 @@ export interface AssignorDeps {
   state: StateStore;
   fork: ForkWorkItem;
   paths: Paths;
+  /** Where a merged blocker goes (#43). */
+  restack: RestackOnMerge;
   /** What a failed work item MEANS and what is done about it (#39). Injected rather than
    *  constructed for the same reason everything else here is — and because the policy
    *  reaches back into this object for the retry, so one of the two has to be built
@@ -105,9 +123,9 @@ const COMMENT_EVENT = "issue_comment";
 
 /** Event types the pipeline knows and this issue deliberately does not act on, so
  *  "not built yet" and "never heard of it" are different lines in the log: PR-comment
- *  runs are #44 and the restack cascade #43. A created comment is routed above (a gate
- *  resume), and a `pull_request` action that could have changed a blocker's state is
- *  routed below (#42); every other action on either lands here. */
+ *  runs are #44. A created comment is routed above (a gate resume), and a `pull_request`
+ *  action that could have changed a blocker's state — or merged one — is routed below
+ *  (#42, #43); every other action on either lands here. */
 const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", "pull_request_review_comment"]);
 
 /** The actions after which a deferred item's answer could be different: a blocker's PR
@@ -120,6 +138,11 @@ const PR_REEVAL_ACTIONS = new Set(["opened", "reopened", "closed"]);
  *  The literal is ported from v1's `listener/helper.mts` rather than imported — v1 and
  *  V2 must not cross-import until cutover deletes v1. */
 const SPEC_LABEL = "spec";
+
+/** A head branch of Sunday's, and the issue behind it. `feat/<n>` is the only branch
+ *  shape this pipeline creates, and the number in it is the ISSUE — which is what a
+ *  merge is restacked on (#43). Anything else that merges is a human's own branch. */
+const FEAT_BRANCH = /^feat\/(\d+)$/;
 
 /** How each way of finishing opens the comment it is posted as. `⏸` is the same mark
  *  boot and the scheduler use for "held, awaiting a human" — a gate is that, on one work
@@ -211,6 +234,7 @@ export class Assignor {
   private readonly state: StateStore;
   private readonly fork: ForkWorkItem;
   private readonly paths: Paths;
+  private readonly restack: RestackOnMerge;
   private readonly failure: FailurePolicy;
   /** Items waiting on a blocker, by work-item key. IN MEMORY ONLY (constraint 6):
    *  GitHub is the truth and #35's reconcile hands every open issue back to admission,
@@ -226,6 +250,7 @@ export class Assignor {
     this.state = deps.state;
     this.fork = deps.fork;
     this.paths = deps.paths;
+    this.restack = deps.restack;
     this.failure = deps.failure;
   }
 
@@ -253,6 +278,10 @@ export class Assignor {
     // A blocker's PR appeared or its issue closed, so what an item deferred on may have
     // changed (#42). Fired with its own catch for the same reason admission is.
     if ((event === "pull_request" && PR_REEVAL_ACTIONS.has(action)) || (event === "issues" && action === "closed")) {
+      // …and if it MERGED, every branch stacked on it is now stacked on a base that is
+      // gone (#43). A merge is both things at once: an item deferred on it can start, and
+      // an item already stacked on it has to move.
+      if (event === "pull_request" && action === "closed" && delivery.merged) this.seedRestack(delivery);
       void this.reevaluate(repo).catch((err: unknown) =>
         this.log.error(`✗ ${repo} deferred items not re-evaluated — ${describe(err)}`, { repo }),
       );
@@ -260,8 +289,30 @@ export class Assignor {
     }
     this.log.info(
       KNOWN_UNBUILT.has(event)
-        ? `· ${what} — recognised, and not the spine's to handle (#43/#44)`
+        ? `· ${what} — recognised, and not the spine's to handle (#44)`
         : `· ${what} — no route`,
+    );
+  }
+
+  /** A merged pull request, as something to RESTACK (#43). The merged issue comes off the
+   *  HEAD BRANCH and never off `delivery.number`: that is the pull request's own number,
+   *  and a restack keyed on it would go hunting for branches stacked on an issue nobody
+   *  merged. A head that is not one of ours names no issue at all, so nothing this
+   *  pipeline created can be stacked on it. */
+  private seedRestack({ repo, head = "" }: Delivery): void {
+    const ours = FEAT_BRANCH.exec(head);
+    if (!ours) {
+      this.log.info(`· ${repo} merged ${head || "an unnamed branch"} — not one of Sunday's, so nothing is stacked on it`);
+      return;
+    }
+    const merged = Number(ours[1]);
+    // Fired, not awaited, and with its OWN catch — exactly as the two above are, and for
+    // the same reason: `handle` is called synchronously inside the receiver's try/catch,
+    // which cannot see a rejection, so an escaped one would take the parent down
+    // (ADR-0001). What the restack does about its own failures is its funnel's business
+    // (#43); this catches only what got past it.
+    void this.restack(repo, merged).catch((err: unknown) =>
+      this.log.error(`✗ ${repo}#${merged} merged, and what is stacked on it was not restacked — ${describe(err)}`, { repo }),
     );
   }
 

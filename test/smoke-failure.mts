@@ -342,6 +342,9 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     state,
     fork,
     paths,
+    // Nothing in this file merges a pull request — what a merge sets off is #43's own
+    // smoke's subject, and the real one force-pushes branches.
+    restack: async () => {},
     failure: policy,
   });
 
@@ -352,6 +355,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     number,
     labels: ["sunday"],
     onPullRequest: false,
+    merged: false,
   });
 
   /** Admit one issue the way a webhook does, and let it reach the fork. */
@@ -686,7 +690,7 @@ try {
 
     // The trigger label landing again — a human re-labelling an issue they have not
     // actually released. GitHub redelivers these for as long as the label is on.
-    h.assignor.handle({ event: "issues", action: "labeled", repo: ITEM.repo, number: 57, labels: ["sunday", "quarantined"], onPullRequest: false });
+    h.assignor.handle({ event: "issues", action: "labeled", repo: ITEM.repo, number: 57, labels: ["sunday", "quarantined"], onPullRequest: false, merged: false });
     await tick();
     ok("release: a delivery while the label is on does not start it again", h.started().length === held, h.started().join(","));
 

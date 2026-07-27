@@ -138,7 +138,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     github: { addLabels: async () => {} },
     log: logger.child("failure"),
   });
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
+  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, restack: async () => {}, failure });
 
   /** What the build saw when it ran — above all whether the queue was HELD, which is the
    *  whole reason the build sits inside the hold. */
