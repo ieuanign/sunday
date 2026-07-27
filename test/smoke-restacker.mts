@@ -24,6 +24,7 @@ import {
   type IssueDetail,
   type MergedPullRequest,
   type OpenPullRequest,
+  type PrDetail,
 } from "../services/github/index.mts";
 import { Logger, type Destination, type Destinations, type LogLine } from "../services/logger.mts";
 import { makeFixture, ok, report, restackDrain, stubGhInEffect, type Fixture, type RestackDrain } from "./git-fixture.mts";
@@ -92,6 +93,9 @@ class FakeGitHub implements GitHubRestack {
   async openPrForHead(): Promise<string | undefined> {
     throw new Error("the restack does not probe for open PRs");
   }
+  async readPr(): Promise<PrDetail> {
+    throw new Error("the restack does not read pull requests");
+  }
 }
 
 // ── the harness ───────────────────────────────────────────────────────────────
@@ -146,7 +150,7 @@ function harness(fx: Fixture, github: FakeGitHub, git: RestackerDeps["git"] = ne
     pause,
     scheduler: fakeScheduler(paused),
     state,
-    github: { addLabels: async () => {} },
+    github: { addLabels: async () => {}, labelPr: async () => {} },
     log: logger.child("failure"),
   });
   const restacker = new Restacker({

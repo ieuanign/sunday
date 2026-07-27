@@ -55,6 +55,11 @@ export async function planRun(key: string, deps: HandRunDeps): Promise<HandRun> 
   // nothing proves came from us.
   const item = parseWorkItemKey(key, deps.repos);
   if (!item) return { refuse: `${JSON.stringify(key)} is not a work item this workspace routes — expected <owner>/<repo>#<issue> naming a repo in config/repos.json` };
+  // `#pr<n>` parses as a work item too (#44), and this driver forks the ISSUE worker: run
+  // one and a real agent is pointed at whatever issue happens to be numbered `n`, opening
+  // a pull request for work nobody asked about. A comment run is the parent's — it is
+  // triggered by a summon and re-derived by reconcile, so there is nothing to drive here.
+  if (item.kind === "pr") return { refuse: `${item.key} is a pull-request comment run, which this driver does not start — comment @sunday on the pull request instead` };
 
   // BEFORE the reads, and it is the guard this driver exists behind: the parent may
   // already have a child on this item (or an operator may have started one in another

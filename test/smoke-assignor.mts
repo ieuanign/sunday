@@ -14,18 +14,21 @@ import type { RepoConfig } from "#config/repos.mts";
 import {
   admitIssue,
   Assignor,
+  parseWorkItemKey,
   type ChildExit,
   type Delivery,
   type ForkWorkItem,
   type Paths,
+  type WorkItemRef,
 } from "../assignor/index.mts";
 import { classify, FailurePolicy } from "../assignor/failure.mts";
 import { PauseStore } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
 import type { Job } from "../issue/run.mts";
+import type { PrJob } from "../pr/run.mts";
 import { acquireLock, readLock } from "../lib/lock.mts";
-import { SUNDAY_MARKER } from "../lib/markers.mts";
+import { sundayComment, sundayReply, SUNDAY_MARKER } from "../lib/markers.mts";
 import { writeOutcome, type Outcome } from "../lib/outcome.mts";
 import { commentBody } from "../services/destinations.mts";
 import type { GitHub } from "../services/github/index.mts";
@@ -72,6 +75,19 @@ function reply(body: string, over: Partial<Delivery> = {}): Delivery {
   return delivery({ event: "issue_comment", action: "created", comment: body, ...over });
 }
 
+/** A comment on a pull request's CONVERSATION (#44). GitHub delivers one as an
+ *  `issue_comment` whose subject carries a `pull_request` key — the only thing separating
+ *  it from a comment on an issue. */
+function prComment(body: string, over: Partial<Delivery> = {}): Delivery {
+  return reply(body, { onPullRequest: true, labels: [], ...over });
+}
+
+/** …and the other stream: a comment left INLINE on a file line, which arrives as its own
+ *  event and is always about a pull request. */
+function inlineComment(body: string, over: Partial<Delivery> = {}): Delivery {
+  return prComment(body, { event: "pull_request_review_comment", head: "feat/57", ...over });
+}
+
 /** A real Assignor over the real scheduler, state store and Logger, with the two things
  *  that reach the world substituted: GitHub (every method is a real write to a real
  *  repo) and the fork (a child process). Every path it uses points into this case's own
@@ -106,6 +122,9 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // The one read a PR summon costs (#44): the head branch admission holds the branch
+    // lock on, so a comment run and an issue run cannot be on one branch at once.
+    readPr: async () => ({ head: "feat/57", base: "main", state: "open" }),
     // …and a case about dependencies says so, one read at a time.
     ...reads,
   };
@@ -121,9 +140,14 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
    *  case says the child exited — exactly as the real one settles on the exit, so the
    *  cap and the branch lock hold for the child's whole life. */
   const forked: Job[] = [];
+  /** The other lane's children (#44), kept apart so every case above reads the issue lane
+   *  exactly as it did — and so a PR job's own shape (no base, no resume) is asserted as
+   *  itself rather than through a union. */
+  const forkedPr: PrJob[] = [];
   const exits = new Map<string, (exit: ChildExit) => void>();
   const fork: ForkWorkItem = (job) => {
-    forked.push(job);
+    if ("pr" in job) forkedPr.push(job);
+    else forked.push(job);
     // A real child's first act, and it does NOT release on the way out here: a child
     // killed before its own release is the case the parent's clearing exists for.
     acquireLock(job.pidPath, process.pid);
@@ -169,16 +193,24 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
       pause,
       scheduler,
       state,
-      github: { addLabels: async (repo, issue, names) => void labelled.push(`${repo}#${issue} +${names.join(",")}`) },
+      github: {
+        addLabels: async (repo, issue, names) => void labelled.push(`${repo}#${issue} +${names.join(",")}`),
+        // The PR lane's label write (#44): a DIFFERENT `gh` call, and recorded as its own
+        // spelling — `gh issue edit` against a pull request's number marks whatever issue
+        // happens to share it.
+        labelPr: async (repo, pr, names) => void labelled.push(`${repo}#pr${pr} +${names.join(",")}`),
+      },
       log: logger.child("failure"),
     }),
   });
 
-  return { assignor, state, pause, lines, comments, claimed, released, labelled, forked, restacked, finish, paths };
+  return { assignor, state, pause, lines, comments, claimed, released, labelled, forked, forkedPr, restacked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
 const KEY = "acme/finance#57";
+/** …and the PR-comment run on the pull request that happens to share its number (#44). */
+const PR_KEY = "acme/finance#pr57";
 const QUESTION = "Which of the two auth flows should this use?";
 const SESSION = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
 /** The commit a child says it created its branch at (#42). */
@@ -245,6 +277,33 @@ const said = (lines: LogLine[], text: string) => lines.some((l) => l.message.inc
     "reject: a repo Sunday does not route is not Sunday's work",
     !unrouted.admit && unrouted.reason.includes("acme/unknown"),
     JSON.stringify(unrouted),
+  );
+}
+
+// ── the work-item key, both ways round (#44). A comment run on PR 57 and an issue run on
+//    issue 57 are DIFFERENT work items: they share a number and nothing else, and a key
+//    that conflated them would share a state entry, a PID lock and a result file ──
+{
+  const pr = parseWorkItemKey("acme/finance#pr57", TABLE);
+  ok(
+    "key: `#pr<n>` round trips as a pull-request item, carrying the number the PR lane runs on",
+    pr?.key === "acme/finance#pr57" && pr.repo === "acme/finance" && pr.issue === 57 && pr.kind === "pr",
+    JSON.stringify(pr),
+  );
+
+  const issue = parseWorkItemKey("acme/finance#57", TABLE);
+  ok(
+    "key: `#<n>` still round trips, and says which lane it is — the kind is what settling reads to know whether a claim was ever taken",
+    issue?.key === "acme/finance#57" && issue.issue === 57 && issue.kind === "issue",
+    JSON.stringify(issue),
+  );
+
+  ok(
+    "key: a `#pr` with no number behind it is not a work item — it would name a path segment and a pull request Sunday writes to",
+    parseWorkItemKey("acme/finance#pr", TABLE) === undefined &&
+      parseWorkItemKey("acme/finance#pr0", TABLE) === undefined &&
+      parseWorkItemKey("acme/finance#pr057", TABLE) === undefined,
+    JSON.stringify([parseWorkItemKey("acme/finance#pr", TABLE), parseWorkItemKey("acme/finance#pr057", TABLE)]),
   );
 }
 
@@ -953,9 +1012,9 @@ try {
     );
   }
 
-  // ── a comment on a PULL REQUEST is #44's work, never an issue run's. GitHub delivers
-  //    one as an `issue_comment` like any other, so the subject is the only thing that
-  //    separates the two flows — and it is decided on the delivery, not on what state
+  // ── a comment on a PULL REQUEST is the PR lane's work, never an issue run's. GitHub
+  //    delivers one as an `issue_comment` like any other, so the subject is the only thing
+  //    that separates the two flows — and it is decided on the delivery, not on what state
   //    happens to say about a number ──
   {
     const h = harness();
@@ -965,8 +1024,190 @@ try {
     await tick();
 
     ok("PR comment: it does not resume an issue run", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.resume)));
-    ok("PR comment: the item stays the human's, waiting on the answer it actually asked for", h.state.get(KEY)?.status === "awaiting-human", JSON.stringify(h.state.get(KEY)));
-    ok("PR comment: and the line says whose work it is, rather than reading as a dead end", said(h.lines, "#44"), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("PR comment: the gated issue is left exactly as it was, waiting on the answer it actually asked for", h.state.get(KEY)?.status === "awaiting-human", JSON.stringify(h.state.get(KEY)));
+    ok(
+      "PR comment: it is the PR lane that runs, under a key of its own — issue 57 and pull request 57 are different work",
+      h.forkedPr.length === 1 && h.forkedPr[0]?.key === PR_KEY,
+      JSON.stringify(h.forkedPr.map((j) => j.key)),
+    );
+  }
+
+  // ── #44: a summon on a pull request is a work item of its own. It is keyed `#pr<n>`
+  //    (constraint 1) — issue 57's state entry, PID lock, result file and floor dir are
+  //    NOT this run's — and it takes no claim (constraint 3): `agent-working` is an issue
+  //    label, and reconcile's orphan-claim sweep walks issues only, so one left on a pull
+  //    request is a state nothing releases ──
+  {
+    const h = harness();
+    h.assignor.handle(prComment("@sunday the rebase dropped a commit"));
+    await tick();
+
+    ok("PR summon: the PR lane is forked once", h.forkedPr.length === 1, JSON.stringify(h.forkedPr.map((j) => j.key)));
+    ok("PR summon: and no issue run is started beside it", h.forked.length === 0, JSON.stringify(h.forked.map((j) => j.key)));
+
+    const job = h.forkedPr[0];
+    ok(
+      "PR summon: the job names the pull request and the routed repo, never the raw payload's spelling",
+      job?.key === PR_KEY && job.repo === "acme/finance" && job.pr === 57,
+      JSON.stringify(job),
+    );
+    ok("PR summon: it carries how the repo is run, resolved from the routing table", job?.config.imageName === "sunday-finance", JSON.stringify(job?.config));
+    ok(
+      "PR summon: and every path the child writes, under the PR's OWN key — sharing issue 57's would share its lock and its result file",
+      job?.resultPath === h.paths.resultPath(PR_KEY) &&
+        job.pidPath === h.paths.pidPath(PR_KEY) &&
+        job.runLogPath === h.paths.runLogPath("acme/finance", "pr-57") &&
+        job.eventLogPath === h.paths.eventLogPath,
+      JSON.stringify(job),
+    );
+    ok("PR summon: nothing is claimed — a claim on a pull request is a label nothing takes off", h.claimed.length === 0, h.claimed.join(","));
+    ok("PR summon: recorded in-flight under the PR key, so a parent that comes back up knows someone is on it", h.state.get(PR_KEY)?.status === "in-flight", JSON.stringify(h.state.get(PR_KEY)));
+    ok("PR summon: and issue 57 is untouched by it", h.state.get(KEY) === undefined, JSON.stringify(h.state.get(KEY)));
+    ok(
+      "PR summon: the start milestone is addressed at the pull request it is about",
+      h.comments.length === 1 && h.comments[0]?.level === "milestone" && h.comments[0].context.target === 57,
+      JSON.stringify(h.comments.map((l) => l.message)),
+    );
+  }
+
+  // ── the two streams are ONE work item. A summon typed in the conversation and one left
+  //    inline on a file line arrive on different events, and answering them as two runs
+  //    would put two agents in one checkout on one branch — for a pull request that only
+  //    ever needed one pass over everything outstanding ──
+  {
+    const h = harness();
+    h.assignor.handle(inlineComment("@sunday this loop is O(n²)"));
+    await tick();
+
+    ok(
+      "inline summon: a comment on a file line admits under the SAME key the conversation does",
+      h.forkedPr.length === 1 && h.forkedPr[0]?.key === PR_KEY,
+      JSON.stringify(h.forkedPr.map((j) => j.key)),
+    );
+
+    h.assignor.handle(prComment("@sunday and the null check above it"));
+    h.assignor.handle(inlineComment("@sunday this one too"));
+    await tick();
+
+    ok(
+      "inline summon: more summons while the run is in flight start nothing beside it — the run gathers what is outstanding when it starts, and the next reconcile picks up the rest",
+      h.forkedPr.length === 1,
+      JSON.stringify(h.forkedPr.map((j) => j.key)),
+    );
+    ok("inline summon: and the skip says what is holding it", said(h.lines, "state=in-flight"), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  // ── …and two summons landing in the SAME tick, before either can record anything. Both
+  //    cross the read admission makes (an `await` where the issue lane has one too), so
+  //    nothing new guards this: the scheduler's key dedup is what makes it one run ──
+  {
+    const h = harness();
+    h.assignor.handle(prComment("@sunday the rebase dropped a commit"));
+    h.assignor.handle(inlineComment("@sunday and this loop is O(n²)"));
+    await tick();
+
+    ok("race: one child for the pull request, whichever summon got there first", h.forkedPr.length === 1, JSON.stringify(h.forkedPr.map((j) => j.key)));
+    ok("race: and one work item recorded, not two", h.state.get(PR_KEY)?.status === "in-flight", JSON.stringify(h.state.get(PR_KEY)));
+  }
+
+  // ── Sunday and the human post under the same account, and a reply QUOTES the summon it
+  //    answers — so read back by author, or by the `@sunday` in it, every reply summons
+  //    another run, forever, each one real quota (constraint 13). The marker is what tells
+  //    them apart, and the two milestones a work item posts carry it too ──
+  {
+    const h = harness();
+    h.assignor.handle(prComment(sundayReply("> @sunday the rebase dropped a commit\n\nRestored it in 9c1f0b2.")));
+    h.assignor.handle(prComment(sundayComment("✓ done — answered 1 comment(s)")));
+    h.assignor.handle(inlineComment(sundayReply("Fixed — @sunday")));
+    await tick();
+
+    ok("own comment: Sunday's own reply is not a summon to answer it", h.forkedPr.length === 0, JSON.stringify(h.forkedPr.map((j) => j.key)));
+    ok("own comment: nor is the milestone it posts on the same thread", h.state.get(PR_KEY) === undefined, JSON.stringify(h.state.get(PR_KEY)));
+
+    h.assignor.handle(prComment("thanks, looks good to me"));
+    await tick();
+    ok("own comment: and a human talking to another human is not one either", h.forkedPr.length === 0, JSON.stringify(h.forkedPr.map((j) => j.key)));
+    ok(
+      "own comment: each of them still leaves a line — a delivery that vanishes is the defect this rewrite exists to kill",
+      h.lines.filter((l) => l.message.includes("not a summon")).length === 4,
+      JSON.stringify(h.lines.map((l) => l.message)),
+    );
+  }
+
+  // ── a PR item that FINISHED is admissible again, where an issue item is not: a trigger
+  //    label sits on an issue until a human takes it off, but a summon is written fresh
+  //    every time — refusing the next one because this pull request was answered last week
+  //    is a human's request dropped in silence ──
+  {
+    const h = harness();
+    h.assignor.handle(prComment("@sunday the rebase dropped a commit"));
+    await tick();
+    await h.finish(PR_KEY, { key: PR_KEY, status: "done", summary: "answered 1 comment(s)", finishedAt: "2026-07-25T00:00:00.000Z" });
+
+    ok("settle: no claim is handed back, because none was ever taken", h.released.length === 0, h.released.join(","));
+    ok("settle: the result file is cleared — its presence is what stops a second apply", !existsSync(h.paths.resultPath(PR_KEY)), h.paths.resultPath(PR_KEY));
+    ok("settle: and the lock, whether or not the child got to release it itself", readLock(h.paths.pidPath(PR_KEY)) === undefined, JSON.stringify(readLock(h.paths.pidPath(PR_KEY))));
+    ok("settle: two milestones on the pull request, started and finished — the same two every work item posts", h.comments.length === 2, JSON.stringify(h.comments.map((l) => l.message)));
+
+    h.assignor.handle(prComment("@sunday one more thing"));
+    await tick();
+    ok("settle: a later summon on the same pull request runs again", h.forkedPr.length === 2, JSON.stringify(h.forkedPr.map((j) => j.key)));
+  }
+
+  // ── the retry and the quarantine on the PR lane (#39). Same ladder, same durable budget
+  //    — what differs is which worker runs again and which `gh` call marks the subject:
+  //    `gh issue edit` against a pull request's number labels whatever issue shares it ──
+  {
+    const h = harness();
+    h.assignor.handle(prComment("@sunday fix the flaky test"));
+    await tick();
+    await h.finish(PR_KEY, { key: PR_KEY, status: "failed", summary: "something entirely unexpected", finishedAt: "2026-07-25T00:00:00.000Z" });
+    // The policy's retry is deferred by a turn: the apply runs INSIDE the run the scheduler
+    // still counts as in-flight, and an enqueue there is deduped away as "already queued".
+    await tick();
+    await tick();
+
+    ok("retry: it is the PR lane that runs again, never the issue lane", h.forkedPr.length === 2 && h.forked.length === 0, JSON.stringify(h.forkedPr.map((j) => j.key)));
+    ok(
+      "retry: carrying what the last attempt died on, which is the only thing this run knows that the last one did not",
+      h.forkedPr[1]?.retryError?.includes("something entirely unexpected") === true,
+      JSON.stringify(h.forkedPr[1]?.retryError),
+    );
+    ok(
+      "retry: on the head branch admission read once — a failure path re-reads nothing, and the branch lock still has to hold",
+      h.state.get(PR_KEY)?.head === "feat/57",
+      JSON.stringify(h.state.get(PR_KEY)),
+    );
+    ok("retry: and still no claim, on the way in or the way out", h.claimed.length === 0 && h.released.length === 0, `${h.claimed.join(",")} / ${h.released.join(",")}`);
+
+    await h.finish(PR_KEY, { key: PR_KEY, status: "failed", summary: "something entirely unexpected", finishedAt: "2026-07-25T00:00:00.000Z" });
+    await tick();
+    await tick();
+
+    ok("quarantine: the retry spent and the same failure again sets the item aside", h.state.get(PR_KEY)?.status === "quarantined", JSON.stringify(h.state.get(PR_KEY)));
+    ok(
+      "quarantine: marked through `gh pr edit` — the issue that shares the number is somebody else's work",
+      h.labelled.join(",") === `${PR_KEY} +quarantined`,
+      h.labelled.join(","),
+    );
+    ok("quarantine: and it is not run a third time", h.forkedPr.length === 2, JSON.stringify(h.forkedPr.map((j) => j.key)));
+
+    h.assignor.handle(prComment("@sunday please try again", { labels: ["quarantined"] }));
+    await tick();
+    ok(
+      "quarantine: a summon while the label is still on it is refused — a human takes the label off to hand it back",
+      h.forkedPr.length === 2 && h.state.get(PR_KEY)?.status === "quarantined",
+      `${h.forkedPr.length} forks, state ${JSON.stringify(h.state.get(PR_KEY))}`,
+    );
+    ok("quarantine: and the refusal names the label that ends it", said(h.lines, "quarantined` label"), JSON.stringify(h.lines.map((l) => l.message)));
+
+    h.assignor.handle(prComment("@sunday please try again"));
+    await tick();
+    ok(
+      "release: the label gone, the next summon runs like any other — with its retry budget back",
+      h.forkedPr.length === 3 && h.state.get(PR_KEY)?.status === "in-flight" && h.state.get(PR_KEY)?.retried === undefined,
+      `${h.forkedPr.length} forks, state ${JSON.stringify(h.state.get(PR_KEY))}`,
+    );
   }
 
   // ── gated with nothing to resume FROM: the outcome carried no session handle. A run
@@ -1020,7 +1261,7 @@ try {
   //    has to be safe to call again. The FILE is the guard: gone means done ──
   {
     const key = "acme/finance#57";
-    const item = { key, repo: "acme/finance", issue: 57 };
+    const item: WorkItemRef = { key, repo: "acme/finance", issue: 57, kind: "issue" };
     const h = harness();
     h.assignor.handle(delivery());
     await tick();
@@ -1043,7 +1284,7 @@ try {
   //    the same question twice and re-arms an item they are already answering ──
   {
     const key = "acme/finance#57";
-    const item = { key, repo: "acme/finance", issue: 57 };
+    const item: WorkItemRef = { key, repo: "acme/finance", issue: 57, kind: "issue" };
     const session = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
     const gate: Outcome = {
       key,

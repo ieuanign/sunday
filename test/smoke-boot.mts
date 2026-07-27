@@ -104,6 +104,11 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // #44's read, and nothing here drives the PR lane: a stub that ANSWERED would let a
+    // case reach a decision this smoke never checked.
+    readPr: async () => {
+      throw new Error("readPr: no case in this smoke reads a pull request");
+    },
   };
 
   const paths: Paths = {
@@ -135,7 +140,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     state,
     // Boot writes no label of its own; the policy's seam is stubbed so nothing here can
     // reach a real repo.
-    github: { addLabels: async () => {} },
+    github: { addLabels: async () => {}, labelPr: async () => {} },
     log: logger.child("failure"),
   });
   const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, restack: async () => {}, failure });

@@ -51,6 +51,10 @@ function github(over: Partial<GitHub> = {}): GitHub {
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // #44's read: a hand run is an ISSUE run, and this smoke never reaches a pull request.
+    readPr: async () => {
+      throw new Error("readPr: a hand run does not read pull requests");
+    },
     ...over,
   };
 }
@@ -66,6 +70,24 @@ try {
       "refuse" in planned && planned.refuse.includes("acme/legal#57"),
       JSON.stringify(planned),
     );
+  }
+
+  // ── …and a key naming a PULL REQUEST (#44). The key parses — `#pr<n>` is a work item —
+  //    but this driver runs the ISSUE lane, so resolving one would point a real agent at
+  //    whatever issue happens to be numbered `n` and open a pull request for it ──
+  {
+    const asked: string[] = [];
+    const planned = await planRun("acme/finance#pr57", {
+      repos: REPOS,
+      github: github({ blockedBy: async () => (asked.push("blockedBy"), []) }),
+      paths,
+    });
+    ok(
+      "a pull request's key is refused — a hand run is an issue run, and #pr57 is not issue 57",
+      "refuse" in planned && planned.refuse.includes("acme/finance#pr57"),
+      JSON.stringify(planned),
+    );
+    ok("and refused before anything is asked of GitHub about an issue nobody named", asked.length === 0, JSON.stringify(asked));
   }
 
   // ── the guard that costs money if it is missing: this driver forks a real agent from

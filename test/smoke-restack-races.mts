@@ -62,7 +62,7 @@ function restackerFor(fx: Fixture): { restacker: Restacker; state: StateStore; l
     pause: new PauseStore(resolve(fx.root, "pause.json")),
     scheduler: HALTED,
     state,
-    github: { addLabels: async () => {} },
+    github: { addLabels: async () => {}, labelPr: async () => {} },
     log: logger.child("failure"),
   });
   const restacker = new Restacker({

@@ -31,6 +31,11 @@ function github(over: Partial<GitHub> = {}): GitHub {
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // #44's read, and nothing here drives the PR lane: a stub that ANSWERED would let a
+    // case reach a decision this smoke never checked.
+    readPr: async () => {
+      throw new Error("readPr: no case in this smoke reads a pull request");
+    },
     ...over,
   };
 }

@@ -4,8 +4,10 @@
 
 import type { RepoConfig } from "#config/repos.mts";
 // Type-only, so the worker stays OUT of the parent's import graph (ADR-0001): the job
-// shape is a contract, and the entry point itself is only ever reached by path.
+// shape is a contract, and the entry point itself is only ever reached by path. Both
+// lanes' workers are named exactly this way (#44 constraint 4).
 import type { Job } from "#issue/run.mts";
+import type { PrJob } from "#pr/run.mts";
 import { readLock, releaseLock } from "#lib/lock.mts";
 import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
 import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
@@ -28,6 +30,20 @@ export interface IssueCandidate {
   repo: string;
   /** The issue number this is about. Likewise untrusted: it becomes a work-item key and
    *  a path segment. */
+  number: number;
+  labels: string[];
+}
+
+/** One pull request, as PR-COMMENT ADMISSION needs to see it (#44): which repo, which
+ *  pull request, and the labels on it right now — the quarantine label is what a human
+ *  removes to hand a set-aside item back, and it must read the same whether the summon
+ *  arrived live or was re-derived. Mirrors `IssueCandidate` and stays separate from it:
+ *  the number is a PULL REQUEST's, and the two are different work items even when they
+ *  are the same integer. */
+export interface PrCandidate {
+  repo: string;
+  /** The pull request number. Untrusted until admission matches its repo, exactly as an
+   *  issue's is: it becomes a work-item key and a path segment. */
   number: number;
   labels: string[];
 }
@@ -70,9 +86,11 @@ export interface ChildExit {
 
 /** Fork one work item and settle when it EXITS, so the concurrency cap and the branch
  *  lock hold for the child's whole life. Injected: `main.mts` supplies the real one
- *  (`fork()` on `issue/run.mts` BY PATH, ADR-0001) and a test supplies one that spawns
- *  nothing. */
-export type ForkWorkItem = (job: Job) => Promise<ChildExit>;
+ *  (`fork()` on `issue/run.mts` or `pr/run.mts` BY PATH, ADR-0001) and a test supplies
+ *  one that spawns nothing. Which worker runs is read off the JOB (`assignor/fork.mts`),
+ *  so the Assignor decides the lane by building one shape or the other and nothing here
+ *  names a file. */
+export type ForkWorkItem = (job: Job | PrJob) => Promise<ChildExit>;
 
 /** A blocker MERGED, so everything stacked on it has to move (#43). Injected as a
  *  function rather than as the `Restacker` itself, so this class never reaches the
@@ -121,12 +139,16 @@ const ADMIT_ACTIONS = new Set(["opened", "reopened", "labeled"]);
  *  spellings drift into a comment that routes nowhere while the log calls it recognised. */
 const COMMENT_EVENT = "issue_comment";
 
-/** Event types the pipeline knows and this issue deliberately does not act on, so
- *  "not built yet" and "never heard of it" are different lines in the log: PR-comment
- *  runs are #44. A created comment is routed above (a gate resume), and a `pull_request`
- *  action that could have changed a blocker's state — or merged one — is routed below
- *  (#42, #43); every other action on either lands here. */
-const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", "pull_request_review_comment"]);
+/** The event an INLINE comment arrives on — the Files-changed tab (#44). Always about a
+ *  pull request, where `issue_comment` is about either and says which. */
+const REVIEW_COMMENT_EVENT = "pull_request_review_comment";
+
+/** Event types the pipeline knows and deliberately does not act on, so "not built yet"
+ *  and "never heard of it" are different lines in the log. A created comment on either
+ *  stream is routed above (a gate resume, or #44's PR run), and a `pull_request` action
+ *  that could have changed a blocker's state — or merged one — is routed below (#42,
+ *  #43); every other action on any of them lands here. */
+const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", REVIEW_COMMENT_EVENT]);
 
 /** The actions after which a deferred item's answer could be different: a blocker's PR
  *  appearing is what a dependent with nothing to stack on is waiting for, and one closing
@@ -155,15 +177,29 @@ const MARK: Record<Outcome["status"], string> = { done: "✓", failed: "✗", "a
  *  signal-0 against a deadline measured in minutes. */
 const ADOPT_POLL_MS = 250;
 
+/** Which lane a work item runs in: an issue run (`issue/run.mts`) or a comment run on a
+ *  pull request (`pr/run.mts`, #44). What a work item IS decides three things nothing
+ *  else can answer — which worker is forked, whether settling hands a claim back, and
+ *  whether a label is written with `gh issue edit` or `gh pr edit`. */
+export type WorkItemKind = "issue" | "pr";
+
 /** One work item's IDENTITY, resolved once at admission: what a fork, an outcome and a
  *  comment all have to agree on. (`scheduler.mts`'s `WorkItem` is the other half — the
  *  same item as something to queue, dedup and hold a branch for.) */
 export interface WorkItemRef {
-  /** `<owner>/<repo>#<issue>` — the scheduler's dedup key and the outcome's name. */
+  /** `<owner>/<repo>#<issue>`, or `<owner>/<repo>#pr<n>` for a PR-comment run — the
+   *  scheduler's dedup key and the outcome's name. The two spellings are DISTINCT on
+   *  purpose (#44 constraint 1): issue 12 and pull request 12 would otherwise share one
+   *  state entry, one PID lock, one result file and one agent floor dir. */
   key: string;
   /** The CONFIGURED repo full name (constraint 14). */
   repo: string;
+  /** The issue number — or the PULL REQUEST number when `kind` is `pr`. */
   issue: number;
+  /** REQUIRED, never optional (#44 constraint 2). The dangerous default is real: an
+   *  absent kind reading as `issue` makes `settle()` run `gh issue edit --remove-label
+   *  agent-working` against whatever unrelated issue happens to share the PR's number. */
+  kind: WorkItemKind;
 }
 
 /** The inverse of the key `considerIssue` builds, for the one caller that has to go the
@@ -178,15 +214,28 @@ export function parseWorkItemKey(key: string, table: Record<string, RepoConfig>)
   const at = key.lastIndexOf("#");
   if (at === -1) return undefined;
   const repo = key.slice(0, at);
-  const issue = Number(key.slice(at + 1));
+  const subject = key.slice(at + 1);
+  // `#pr<n>` is the PR lane's spelling (#44 constraint 1). Read here rather than guessed
+  // by the caller: this is the file that SPELLS keys, and a sweep that resolved a `#pr`
+  // key as an issue would settle a work item that does not exist — releasing a claim and
+  // commenting on whatever issue shares the number.
+  const kind: WorkItemKind = subject.startsWith("pr") ? "pr" : "issue";
+  const issue = Number(kind === "pr" ? subject.slice(2) : subject);
   // `hasOwn`, not a truthiness check: `table["__proto__"]` is an object on every table
   // there is, and reading it as a routed repo is how untrusted input gets in.
   if (!Object.hasOwn(table, repo)) return undefined;
   if (!Number.isInteger(issue) || issue <= 0) return undefined;
-  const ref: WorkItemRef = { key: `${repo}#${issue}`, repo, issue };
-  // Rebuilt and compared, so a key that only LOOKS canonical (`#0057`, `#57.0`) cannot
-  // name one work item on disk and a different one in the state file.
+  const ref: WorkItemRef = { key: workItemKey(repo, issue, kind), repo, issue, kind };
+  // Rebuilt and compared, so a key that only LOOKS canonical (`#0057`, `#57.0`, `#pr 4`)
+  // cannot name one work item on disk and a different one in the state file.
   return ref.key === key ? ref : undefined;
+}
+
+/** How a work-item key is SPELLED, in the one file that decides it — the parse above is
+ *  its inverse, and the two drifting apart is a key that names one item on disk and
+ *  another in the state file. */
+function workItemKey(repo: string, number: number, kind: WorkItemKind): string {
+  return `${repo}#${kind === "pr" ? "pr" : ""}${number}`;
 }
 
 export type Admission = { admit: true } | { admit: false; reason: string };
@@ -271,8 +320,13 @@ export class Assignor {
       );
       return;
     }
-    if (event === COMMENT_EVENT && action === "created") {
-      this.considerReply(delivery);
+    // A comment on a PULL REQUEST is #44's run, whichever stream it came in on: the
+    // conversation arrives as an `issue_comment` whose subject carries a `pull_request`,
+    // and an inline one on a file line arrives as its own event. An `issue_comment` on an
+    // actual issue is the other thing entirely — a human answering a gate.
+    if ((event === COMMENT_EVENT || event === REVIEW_COMMENT_EVENT) && action === "created") {
+      if (delivery.onPullRequest) this.considerSummon(delivery);
+      else this.considerReply(delivery);
       return;
     }
     // A blocker's PR appeared or its issue closed, so what an item deferred on may have
@@ -289,7 +343,7 @@ export class Assignor {
     }
     this.log.info(
       KNOWN_UNBUILT.has(event)
-        ? `· ${what} — recognised, and not the spine's to handle (#44)`
+        ? `· ${what} — recognised, and no action of this pipeline's`
         : `· ${what} — no route`,
     );
   }
@@ -354,7 +408,7 @@ export class Assignor {
       this.log.info(`· skip ${repo} — ${JSON.stringify(number)} is not an issue number`);
       return;
     }
-    const item: WorkItemRef = { key: `${repo}#${number}`, repo, issue: number };
+    const item: WorkItemRef = { key: workItemKey(repo, number, "issue"), repo, issue: number, kind: "issue" };
     const prior = this.state.get(item.key);
     // A quarantined item is the one state a DELIVERY can lift (#39): it failed twice, and
     // a human takes the `quarantined` label off to hand it back. The label's absence IS the
@@ -442,15 +496,16 @@ export class Assignor {
     else this.log.info(line);
   }
 
-  /** A comment on an issue, which is how a gated run gets its answer. The item is picked
-   *  back up only when the pipeline is actually waiting on one: it is a routed issue (not
-   *  a pull request), a human wrote it (not Sunday), and durable state says this item
-   *  gated with a session to continue.
+  /** A comment on an ISSUE, which is how a gated run gets its answer — `handle` routes on
+   *  the subject, so a comment on a pull request reaches the PR lane and never here. The
+   *  item is picked back up only when the pipeline is actually waiting on one: the repo is
+   *  routed, a human wrote it (not Sunday), and durable state says this item gated with a
+   *  session to continue.
    *
    *  Everything past those guards is the SAME claim-enqueue-fork path an admitted issue
    *  takes — a resume is an issue run, and a second way in that could drift from the
    *  first is the defect class this rewrite exists to kill. */
-  private considerReply({ repo, number, comment = "", onPullRequest }: Delivery): void {
+  private considerReply({ repo, number, comment = "" }: Delivery): void {
     const key = `${repo}#${number}`;
     // Constraint 14, and the resume's own need: a run works from its repo's config, so a
     // repo that left the routing table between the question and the answer has nothing to
@@ -467,13 +522,6 @@ export class Assignor {
     // its own question, on real quota.
     if (comment.includes(SUNDAY_MARKER)) {
       this.log.info(`· ${key} — Sunday's own comment, not an answer to it`);
-      return;
-    }
-    // A PR's conversation comment arrives as an `issue_comment` too, so the SUBJECT is
-    // the only thing separating the two flows — and answering @sunday on a pull request
-    // is #44's run, not a gate resume.
-    if (onPullRequest) {
-      this.log.info(`· ${key} — a comment on a pull request, which is #44's run and not this one`);
       return;
     }
     const prior = this.state.get(key);
@@ -505,12 +553,110 @@ export class Assignor {
     // leaves a gated item with nothing left to resume from, no base to resume onto, and
     // no commit for #43 to restack its branch off.
     this.state.set(key, { status: "in-flight", sessionId: session, base, forkPoint: prior.forkPoint });
-    const item: WorkItemRef = { key, repo, issue: number };
+    const item: WorkItemRef = { key, repo, issue: number, kind: "issue" };
     this.scheduler.enqueue({
       key,
       branch: `feat/${number}`,
       run: () => this.run(item, cfg, base, { sessionId: session, reply: comment }),
     });
+  }
+
+  /** A comment on a PULL REQUEST, live (#44). One guard, and it is the whole trigger:
+   *  did a HUMAN summon Sunday? `isSummon` reads the marker first, so Sunday's own
+   *  comments — the two milestones a work item posts, and every reply a run leaves —
+   *  cannot summon it to answer itself, forever, each round a real agent run on real
+   *  quota (constraint 13).
+   *
+   *  Everything past it is `considerPrComment`, which the reconcile sweep reaches with
+   *  the same candidate: this method's whole job is to turn a delivery into one and to
+   *  decide that a comment IS a summon, which is a question a re-derive has already
+   *  answered against the reply watermark. */
+  private considerSummon({ repo, number, labels, comment = "" }: Delivery): void {
+    if (!isSummon(comment)) {
+      this.log.info(`· ${repo}#${number} — a comment on a pull request, and not a summon`);
+      return;
+    }
+    // Fired, not awaited, and with its OWN catch, exactly as `considerIssue` is: `handle`
+    // is called synchronously inside the receiver's try/catch, which cannot see a
+    // rejection — and this reads the pull request, so it really can reject (ADR-0001).
+    void this.considerPrComment({ repo, number, labels }).catch((err: unknown) =>
+      this.log.error(`✗ ${repo}#pr${number} not considered — ${describe(err)}`, { repo }),
+    );
+  }
+
+  /** Admit a PR-comment run, or say why not (#44). The ADMISSION SEAM for the PR lane,
+   *  public for the same reason `considerIssue` is (constraint 6): the reconcile sweep
+   *  re-derives pull requests whose summons are unanswered and hands each one straight to
+   *  this, rather than carrying a second copy of these guards that drifts from it.
+   *
+   *  Three differences from an issue's admission, each deliberate:
+   *
+   *  · NO CLAIM (constraint 3). `agent-working` is an issue label, and reconcile's
+   *    orphan-claim sweep walks issues only — one left on a pull request is a state
+   *    nothing releases. Mutual exclusion is the durable state, the PID lock and the
+   *    scheduler's key dedup, which are the same three guards an issue run has.
+   *  · A FINISHED item is admissible again. A trigger label sits on an issue until a human
+   *    removes it, so re-admitting a `done` issue re-runs work that is over; a summon is a
+   *    fresh request every time it is written, and refusing one because this PR has been
+   *    answered before is a human's question dropped in silence.
+   *  · The branch lock is the PR's HEAD, read here. It is the only way a comment run and
+   *    an issue run cannot end up in one child checkout on one branch at once — and it is
+   *    kept in durable state, because a retry and an adoption both need it later. */
+  async considerPrComment({ repo, number, labels }: PrCandidate): Promise<void> {
+    const cfg = this.repos[repo];
+    // Constraint 14, first and cheapest: the key and the paths built from it come from the
+    // CONFIGURED repo name, and the run needs that repo's config to have anything to run.
+    if (!cfg) {
+      this.log.info(`· skip ${repo}#pr${number} — ${repo} not in config/repos.json`);
+      return;
+    }
+    // The repo's image will not build, so this run would fork and die on the same create
+    // failure every other item in it just died on (#39). In memory and ahead of the
+    // network read, exactly as `considerIssue` has it.
+    if (this.failure.isStopped(repo)) {
+      this.log.info(`· skip ${repo}#pr${number} — ${repo} is stopped until its sandbox image builds again`);
+      return;
+    }
+    if (!Number.isInteger(number) || number <= 0) {
+      this.log.info(`· skip ${repo} — ${JSON.stringify(number)} is not a pull request number`);
+      return;
+    }
+    const item: WorkItemRef = { key: workItemKey(repo, number, "pr"), repo, issue: number, kind: "pr" };
+    const prior = this.state.get(item.key);
+    // Set aside after failing twice, and the LABEL is what hands it back (#39) — the same
+    // release signal an issue item has, read off the labels both the live delivery and the
+    // re-derive carry.
+    if (prior?.status === "quarantined" && labels.includes(QUARANTINE_LABEL)) {
+      this.log.info(`· skip ${item.key} — state=quarantined (remove the \`${QUARANTINE_LABEL}\` label to hand it back)`);
+      return;
+    }
+    // The only state that refuses a summon: somebody is already on this pull request, and
+    // whatever landed while they work is picked up by the run that is going (it gathers
+    // what is unanswered at the moment it starts) or by the next reconcile pass. Every
+    // other state — done, failed, released from quarantine — is admissible, because a
+    // summon is a new request rather than a label left on from last time.
+    if (prior?.status === "in-flight") {
+      this.log.info(`· skip ${item.key} — state=in-flight`);
+      return;
+    }
+    // The guard the in-memory queue cannot be: children outlive the parent by design
+    // (ADR-0001), so a live lock means someone IS on this item whatever this process
+    // remembers — including across the restart that emptied the queue.
+    const pid = this.liveChild(item.key);
+    if (pid !== undefined) {
+      this.log.info(`· skip ${item.key} — pid ${pid} is still on it`);
+      return;
+    }
+    // The one read admission makes here, and the reason it is made in the PARENT: the
+    // scheduler's branch lock is two-way across both lanes, so the comment run and an
+    // issue run (or a restack) on `feat/<n>` take turns instead of meeting in one checkout.
+    const { head } = await this.github.readPr(repo, number);
+    // Written BEFORE the enqueue and carrying the head, for the reason every other durable
+    // write here is: a retry and an adopted survivor both need the branch to lock, and
+    // neither can ask GitHub for it again (one runs off a failure path, the other off a
+    // key found on disk).
+    this.state.set(item.key, { status: "in-flight", head });
+    this.scheduler.enqueue({ key: item.key, branch: head, run: () => this.runPr(item, cfg) });
   }
 
   /** Start a work item AGAIN, after a failure the policy decided is worth one more run
@@ -536,21 +682,44 @@ export class Assignor {
     }
     const prior = this.state.get(item.key);
     const base = prior?.base ?? "main";
-    this.github.claim(item.repo, item.issue);
-    // The whole record is replaced (constraint 12), so the fork point and the SPENT RETRY
-    // are written back deliberately: without the retry the ladder never reaches the
-    // quarantine and this item retries for as long as anything keeps failing it. No
+    // …and never for a PR-comment run, which took none (constraint 3).
+    if (item.kind === "issue") this.github.claim(item.repo, item.issue);
+    // The whole record is replaced (constraint 12), so the fork point, the head branch and
+    // the SPENT RETRY are written back deliberately: without the retry the ladder never
+    // reaches the quarantine and this item retries for as long as anything keeps failing
+    // it, and without the head a retried comment run has no branch left to lock. No
     // session: a retry is a fresh run with the error in its prompt, not a resume.
-    this.state.set(item.key, { status: "in-flight", base, forkPoint: prior?.forkPoint, retried: prior?.retried });
+    this.state.set(item.key, {
+      status: "in-flight",
+      // What the item was ADMITTED on, carried rather than the `main` fallback the run
+      // below uses: an item that never recorded a base has none, and a PR-comment run
+      // stacks on nothing at all — a `main` written here reads as a decision nobody took.
+      base: prior?.base,
+      forkPoint: prior?.forkPoint,
+      head: prior?.head,
+      retried: prior?.retried,
+    });
+    const branch = this.branch(item);
     setTimeout(
       () =>
         this.scheduler.enqueue({
           key: item.key,
-          branch: `feat/${item.issue}`,
-          run: () => this.run(item, cfg, base, undefined, retryError),
+          branch,
+          run: () => (item.kind === "pr" ? this.runPr(item, cfg, retryError) : this.run(item, cfg, base, undefined, retryError)),
         }),
       0,
     );
+  }
+
+  /** The branch a work item HOLDS while it runs — the scheduler's two-way lock, so no two
+   *  runs are ever in one child checkout on one branch. An issue run creates `feat/<n>`;
+   *  a comment run works the pull request's own head, which admission read once and left
+   *  in durable state. The fallback is the item's key: unique to this item, so a PR whose
+   *  head is somehow unrecorded still cannot start twice — it just holds a branch nothing
+   *  else names. */
+  private branch(item: WorkItemRef): string {
+    if (item.kind === "issue") return `feat/${item.issue}`;
+    return this.state.get(item.key)?.head ?? item.key;
   }
 
   /** One work item, from the fork to its applied outcome. Handed to the scheduler, and
@@ -586,6 +755,33 @@ export class Assignor {
     this.applyOutcome(item, await this.fork(job));
   }
 
+  /** One PR-COMMENT run, the same way (#44): fork, and settle when the child exits. Its
+   *  own method rather than a branch inside `run` because the job is a different shape —
+   *  there is no base to stack on and no session to resume, and the run log goes under
+   *  `pr-<n>` so a comment run and an issue run on the same number do not interleave in
+   *  one file. The child is reached only through `fork`, which picks the worker off THIS
+   *  shape (constraint 4). */
+  private async runPr(item: WorkItemRef, cfg: RepoConfig, retryError?: string): Promise<void> {
+    const job: PrJob = {
+      key: item.key,
+      repo: item.repo,
+      pr: item.issue,
+      config: cfg,
+      // Every path the child writes is resolved HERE (constraint 7), off the PR's own key.
+      resultPath: this.paths.resultPath(item.key),
+      pidPath: this.paths.pidPath(item.key),
+      runLogPath: this.paths.runLogPath(item.repo, `pr-${item.issue}`),
+      eventLogPath: this.paths.eventLogPath,
+      retryError,
+    };
+    // The same two milestones every work item posts, on the pull request's own thread —
+    // `gh issue comment` addresses a PR as well as an issue. They carry the ordinary
+    // Sunday marker and NOT the reply marker, so neither is ever mistaken for an answer to
+    // a summon (#44 constraint 7).
+    this.log.milestone("▶ work started", { repo: item.repo, target: item.issue });
+    this.applyOutcome(item, await this.fork(job));
+  }
+
   /** The pid of the process still working this item, or `undefined` when nobody is. The
    *  Assignor owns the PID lock — #35's boot sweep and reconcile ASK, and neither reads
    *  `var/running/` for itself, so the one guard that stops two agents running the same
@@ -609,7 +805,7 @@ export class Assignor {
   adopt(item: WorkItemRef): void {
     this.scheduler.enqueue({
       key: item.key,
-      branch: `feat/${item.issue}`,
+      branch: this.branch(item),
       run: async () => {
         // No timeout, by design: an adopted child that hangs holds its slot exactly as a
         // locally forked one does, and there is nothing to apply until it lets go. It is
@@ -694,6 +890,10 @@ export class Assignor {
       sessionId: outcome.sessionId,
       base: prior?.base,
       forkPoint: outcome.forkPoint ?? prior?.forkPoint,
+      // Carried for the same reason the base is: the whole record is replaced, and a PR
+      // item that loses its head has no branch for the retry (or the next boot's
+      // adoption) to hold the lock on.
+      head: prior?.head,
       // Carried the same way, and for the sharpest version of the same reason (#39
       // constraint 8): this is the record the retry ladder reads. Dropped here, every
       // failure looks like the item's first, and an item that cannot be run successfully
@@ -757,7 +957,11 @@ export class Assignor {
   private settle(item: WorkItemRef): void {
     clearOutcome(this.paths.resultPath(item.key));
     releaseLock(this.paths.pidPath(item.key));
-    this.github.release(item.repo, item.issue);
+    // …and the claim only where one was ever taken (#44 constraint 3). A PR-comment run
+    // takes none, and `gh issue edit --remove-label agent-working` against the PR's number
+    // strips the claim off an UNRELATED issue that happens to share it — mid-run, which
+    // re-admits it to a second agent on real quota. This is what `kind` exists for.
+    if (item.kind === "issue") this.github.release(item.repo, item.issue);
   }
 }
 

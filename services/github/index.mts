@@ -76,6 +76,13 @@ export interface GitHub {
    *  with no PR open has no branch worth forking from yet. Redeclared for the same
    *  reason `readIssue` is. */
   openPrForHead(repo: string, head: string): Promise<string | undefined>;
+  /** The pull request a summon landed on (#44) — read for its HEAD BRANCH, which is
+   *  what admission holds the scheduler's branch lock on. Nothing else can answer it:
+   *  a PR's conversation comment arrives as an `issue_comment` carrying no branch at
+   *  all, and a comment run that pushed to a branch an issue run is also on is two
+   *  processes in one checkout. Redeclared for the same reason `readIssue` is —
+   *  `GitHubPrRun` names it too, and `Gh` implements it exactly once. */
+  readPr(repo: string, pr: number): Promise<PrDetail>;
 }
 
 /** One open issue, as re-deriving work needs to see it — the number a work item is keyed
@@ -185,6 +192,12 @@ export interface GitHubLabels {
    *  agent reported its own defeat. BEST-EFFORT at the call site — durable state is what
    *  actually stops the item being re-admitted (#39 constraint 9). */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** …and the same marks on a PULL REQUEST, for a comment run that failed (#44). A
+   *  separate call because `gh issue edit <n>` addresses the ISSUE numbered `n`, which
+   *  for a PR item is an unrelated issue that happens to share the number. Redeclared
+   *  from `GitHubRestack` rather than inherited, the way `addLabels` is — `Gh`
+   *  implements it exactly once. */
+  labelPr(repo: string, pr: number, labels: string[]): Promise<void>;
 }
 
 /** What the forwarder supervisor is allowed to do to GitHub: drop the dev webhook a

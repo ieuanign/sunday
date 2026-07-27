@@ -20,7 +20,7 @@ import { StateStore } from "../assignor/state.mts";
 import type { RepoConfig } from "#config/repos.mts";
 import { acquireLock, readLock } from "../lib/lock.mts";
 import { sundayComment } from "../lib/markers.mts";
-import { CLAIM_LABEL, type GitHubReconcile, type IssueComment, type OpenIssue } from "../services/github/index.mts";
+import { CLAIM_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue } from "../services/github/index.mts";
 import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-reconciler-${process.pid}`);
@@ -73,7 +73,7 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   // as the sweep runs, and a supervisor that SIGKILLs it (ADR-0001).
   const releasedSync: string[] = [];
   const labelled: string[] = [];
-  const github: GitHubReconcile = {
+  const github: GitHubReconcile & GitHubLabels = {
     claim: (repo, issue) => {
       // `gh issue edit` against somebody else's service, on the admission path this pass
       // hands every open issue to.
@@ -100,6 +100,16 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // #44's read, and nothing here drives the PR lane: a stub that ANSWERED would let a
+    // case reach a decision this smoke never checked.
+    readPr: async () => {
+      throw new Error("readPr: no case in this smoke reads a pull request");
+    },
+    // The PR lane's label write (#44) — the failure policy takes this seam too, and no
+    // case here fails a PR item.
+    labelPr: async () => {
+      throw new Error("labelPr: no case in this smoke labels a pull request");
+    },
   };
 
   const paths: Paths = {
