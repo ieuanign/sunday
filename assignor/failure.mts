@@ -260,6 +260,31 @@ export interface FailureInput {
   retry?: RestartWorkItem;
 }
 
+/** How long a stopped repo waits before its image is tried again. Long, because the fix
+ *  is a human editing a Dockerfile or starting the daemon, and each attempt is a real
+ *  docker build — but not so long that a repo repaired in a minute sits idle for an hour. */
+const RECHECK_MS = 300_000;
+
+/** How a stopped repo heals, injected as a pair because neither half is any use alone:
+ *  rebuild the image, and when it comes back clean re-derive that repo's outstanding work.
+ *  Absent from a construction with no repo to heal (the smokes that only drive one scope).
+ *
+ *  Both halves are per-REPO and neither is reached for: the rebuild is `SandboxService`
+ *  (docker, minutes) and the re-derive is #40's `Reconciler.repo` — the same per-repo pass
+ *  the forwarder's blackout catch-up uses, so a repair and a blackout cannot drift into two
+ *  ways of bringing a repo back. Constraint 13 as well: `assignor/` names neither module. */
+export interface RepoRecheck {
+  /** Build this repo's image again, and answer with why it is STILL broken — or nothing
+   *  at all, which is the signal the repair landed. Never rejects in production; a
+   *  rejection is treated as "still broken" all the same. */
+  rebuild: (repo: string) => Promise<string | undefined>;
+  /** Re-derive this repo's outstanding work from GitHub, once it can run again. */
+  reconcile: (repo: string) => Promise<void>;
+  /** Constraint 11: injected with a real default, so the suite drives the recheck with a
+   *  real timer at millisecond scale instead of waiting out five minutes. */
+  everyMs?: number;
+}
+
 /** Everything the policy needs and constructs none of: the durable pause it arms, the
  *  queue it stops, and the Logger it says everything through. */
 export interface FailurePolicyDeps {
@@ -276,6 +301,9 @@ export interface FailurePolicyDeps {
   /** Constraint 11: injected with a real default, so the suite drives the auto-resume
    *  with a real timer at millisecond scale instead of waiting out a quota window. */
   resumeGraceMs?: number;
+  /** How a stopped repo heals. Without it a repo stop holds until the next restart —
+   *  which is still only that repo, and is what a caller with no builder gets. */
+  recheck?: RepoRecheck;
 }
 
 /** What Sunday DOES about a failure. One entry — `failed()` — which classifies, and then
@@ -295,6 +323,12 @@ export class FailurePolicy {
   private readonly github: GitHubLabels;
   private readonly log: ModuleLogger;
   private readonly resumeGrace: number;
+  private readonly recheck?: RepoRecheck;
+  /** The repos nothing may start in. IN MEMORY, unlike the pause and the quarantine: a
+   *  stop is a statement about an IMAGE, and the first thing the next parent does is build
+   *  every routed repo's image (`boot.mts`) — which re-derives this set from the world
+   *  rather than trusting a file that could disagree with what docker now says. */
+  private readonly stopped = new Set<string>();
 
   constructor(deps: FailurePolicyDeps) {
     this.pause = deps.pause;
@@ -303,6 +337,15 @@ export class FailurePolicy {
     this.github = deps.github;
     this.log = deps.log;
     this.resumeGrace = deps.resumeGraceMs ?? RESUME_GRACE_MS;
+    this.recheck = deps.recheck;
+  }
+
+  /** Is this repo's environment broken? Read by admission (`assignor/index.mts`), which
+   *  is what makes the stop mean anything: an issue admitted into a repo whose image will
+   *  not build is a whole agent run that dies on the same create failure, and on a busy
+   *  repo that is the entire backlog, one item at a time. */
+  isStopped(repo: string): boolean {
+    return this.stopped.has(repo);
   }
 
   /** Classify a failure and act on it. The one entry point. */
@@ -313,20 +356,92 @@ export class FailurePolicy {
         this.halt(failure);
         return;
       }
+      if (failure.scope === "repo") {
+        this.stop(failure, input.repo);
+        return;
+      }
       if (failure.scope === "item" && input.item) {
         this.item(failure, input.item, input.retry);
         return;
       }
-      // Repo scope, and an item-scope failure with no work item to act on: recorded, and
-      // the rest of the pipeline carries on. Stopping the repo is the commit after this
-      // one; what is already true here is the change ADR-0002 asks for — v1 halted on
-      // every one of these. `info`, because the failure's own text is on the milestone the
-      // caller already posted (constraint 6) and there is nothing yet for a human to do.
-      // Constraint 5 again: a repo-scope line carries the repo and NOT the item, so one
-      // broken image does not comment on whichever issue found it first.
-      const context = failure.scope === "repo" ? { repo: input.repo } : { repo: input.repo, target: input.item?.issue };
-      this.log.info(`· ${failure.class} (${failure.scope}) ${input.item?.key ?? input.repo} — ${failure.summary}`, context);
+      // An item-scope failure with no work item to act on — boot's image sweep has no work
+      // item at all, and #43's restack lane may not either. Recorded, and the rest of the
+      // pipeline carries on. `info`, because the failure's own text is on the milestone the
+      // caller already posted (constraint 6) and there is nothing here for a human to do.
+      this.log.info(`· ${failure.class} (item) ${input.repo} — ${failure.summary}`, { repo: input.repo });
     });
+  }
+
+  /** Stop ONE child repo: its environment cannot be produced, so every run in it would die
+   *  the same way — and every run in every OTHER repo is fine. v1 read exactly this create
+   *  failure as unrecognised and stopped the whole pipeline for it, which is the defect
+   *  ADR-0002 removes.
+   *
+   *  Nothing durable is written and no work item is touched: the items that died on the
+   *  broken image are already `failed`, which is the state the re-derive below picks back
+   *  up. The stop is the ADMISSION guard and nothing more.
+   *
+   *  Constraint 5: the repo and NO target. One broken image is not the fault of whichever
+   *  issue happened to find it first, and it must not comment on that issue's thread.
+   *  `error` the first time — a broken environment is something a human goes and fixes —
+   *  and `info` for every failure after it, so a repo's in-flight items landing one after
+   *  another cannot page anybody once per item for a single break. */
+  private stop(failure: Failure, repo: string): void {
+    if (this.stopped.has(repo)) {
+      this.log.info(`· ${repo} is already stopped — ${failure.summary}`, { repo });
+      return;
+    }
+    this.stopped.add(repo);
+    this.log.error(
+      `⏸ ${repo} stopped — ${failure.summary}. Every other repo keeps running` +
+        `${this.recheck ? ", and this one resumes as soon as its image builds again" : " — a restart is what picks it back up"}`,
+      { repo },
+    );
+    this.scheduleRecheck(repo);
+  }
+
+  /** Try the repo again on a timer. The alternative is a human remembering to tell Sunday
+   *  they fixed it, which is v1's halt with an extra step: the repair (a Dockerfile edit, a
+   *  daemon started) is invisible from here, and a clean build is the one honest signal
+   *  that it landed. */
+  private scheduleRecheck(repo: string): void {
+    if (!this.recheck) return;
+    setTimeout(() => void this.rebuild(repo), this.recheck.everyMs ?? RECHECK_MS);
+  }
+
+  /** One recheck. Async and reached from a timer with nobody above it, so it swallows
+   *  everything (constraint 9): a rejection here is an unhandled one, and under
+   *  `restart: always` that takes the whole parent down over one repo's image. */
+  private async rebuild(repo: string): Promise<void> {
+    if (!this.stopped.has(repo) || !this.recheck) return;
+    let broken: string | undefined;
+    try {
+      broken = await this.recheck.rebuild(repo);
+    } catch (err) {
+      broken = err instanceof Error ? err.message : String(err);
+    }
+    if (broken !== undefined) {
+      // `info`: the stop was said at `error` when it happened, and a repo waiting on a
+      // human is not news once a minute.
+      this.log.info(`· ${repo} is still stopped — ${broken}`, { repo });
+      this.scheduleRecheck(repo);
+      return;
+    }
+    // Cleared BEFORE the re-derive, and that order is the whole self-heal: reconcile hands
+    // every open issue straight back to admission, where the guard this clears would
+    // otherwise skip every one of them.
+    this.stopped.delete(repo);
+    // `info`, exactly as the pipeline's own auto-resume is said: what a human acts on is a
+    // thing being broken, and this is the mechanism reporting that it no longer is.
+    this.log.info(`▶ ${repo} resumed — its sandbox image builds again`, { repo });
+    try {
+      // The items that died on the broken image are `failed`, which is exactly what a
+      // re-derive re-admits — so the repair needs no bookkeeping of its own.
+      await this.recheck.reconcile(repo);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      this.log.error(`✗ ${repo} resumed, and its outstanding work was not re-derived — ${why}`, { repo });
+    }
   }
 
   /** Stop ONE work item, and only it — the change ADR-0002 is about. The ladder is a rung

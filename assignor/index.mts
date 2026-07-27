@@ -286,6 +286,16 @@ export class Assignor {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);
       return;
     }
+    // The repo's environment is broken, so an agent started here would die on the same
+    // create failure this repo was stopped for — on a busy repo, once per item, until
+    // somebody notices (#39). In memory and ahead of the network read for the same reason
+    // every guard above it is: a whole backlog re-derived into a stopped repo must not pay
+    // a `gh` round-trip each to be told nothing can run yet. The policy's recheck clears
+    // this by itself and re-derives the repo, so nothing here has to be remembered.
+    if (this.failure.isStopped(repo)) {
+      this.log.info(`· skip ${repo}#${number} — ${repo} is stopped until its sandbox image builds again`);
+      return;
+    }
     // Constraint 14: a work-item key and the path segments built from it come from the
     // CONFIGURED repo name (admission is the exact match that proved it) and a number
     // that IS one — never from a raw payload string.

@@ -172,6 +172,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     pause,
     state,
     assignor,
+    failure,
     buildImages,
     reconcile,
     parentRoot: caseDir,
@@ -179,7 +180,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     log: logger.child("boot"),
   });
 
-  return { boot, scheduler, state, pause, pausePath, paths, lines, events, comments, claimed, released, build, reDerive, forked };
+  return { boot, scheduler, state, pause, pausePath, paths, lines, events, comments, claimed, released, build, reDerive, forked, failure };
 }
 
 try {
@@ -328,22 +329,53 @@ try {
     ok("re-arm: with the pause disarmed on disk, or the next boot re-applies a window that is over", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
   }
 
-  // ── a repo whose image did not build. Boot REPORTS and does not act (ADR-0002: setup
-  //    is repo scope, and stopping that repo is #39's) — but silence here is a repo whose
-  //    every run dies mid-agent as a mystery Provider failure, which is exactly how v1
-  //    spent a day halted ──
+  // ── a repo whose image did not build. It goes through the POLICY and not to a log line
+  //    (#39): a repo nothing can be built for is a repo whose every run would die mid-agent
+  //    as a mystery Provider failure — one whole agent run per item, on real quota, which
+  //    is exactly how v1 spent a day. Boot classifies it as that repo's `setup`, because a
+  //    failure that came out of an image build is that repo's environment whatever docker
+  //    said about it ──
   {
     const h = harness({
       buildImages: async () => [
-        { fullName: "acme/finance", imageName: "sunday-finance", status: "failed", reason: "Cannot connect to the Docker daemon" },
+        {
+          fullName: "acme/finance",
+          imageName: "sunday-finance",
+          status: "failed",
+          reason: "sandcastle docker build-image exited 1 — ERROR [4/9] RUN apt-get install: exit code 100",
+        },
       ],
     });
     await h.boot.run();
 
-    const reported = h.events.find((l) => l.message.includes("sunday-finance"));
-    ok("images: a failed build is reported at error — durable, and on the operator's phone", reported?.level === "error", JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
-    ok("images: named with the repo it stops, and carrying why", reported?.context.repo === "acme/finance" && reported.message.includes("Docker daemon"), JSON.stringify(reported));
-    ok("images: reported, not acted on — the pipeline still comes up for every other repo", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: a repo whose image did not build is stopped, so nothing is admitted into it", h.failure.isStopped("acme/finance"), JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
+    const reported = h.events.find((l) => l.message.includes("acme/finance stopped"));
+    ok("images: reported at error — durable, and on the operator's phone", reported?.level === "error", JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
+    ok("images: named with the repo it stops, and no issue — one broken image comments on nobody's thread", reported?.context.repo === "acme/finance" && reported.context.target === undefined, JSON.stringify(reported));
+    ok("images: and ONE repo is all it stops — the pipeline still comes up for everybody else", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: the rest of the sequence still runs — a broken image is not a boot that refuses to answer webhooks", h.reDerive.ran === 1, JSON.stringify(h.reDerive));
+  }
+
+  // ── …and the one image failure that is NOT one repo's: with the container daemon down,
+  //    no image anywhere can be built and no sandbox anywhere can be created. Boot arms the
+  //    real pause for it, and its own lift is what then refuses to release the queue ──
+  {
+    const h = harness({
+      buildImages: async () => [
+        {
+          fullName: "acme/finance",
+          imageName: "sunday-finance",
+          status: "failed",
+          reason: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        },
+      ],
+    });
+    await h.boot.run();
+
+    ok("images: a dead container daemon stops the pipeline, not the one repo that noticed", h.scheduler.isPaused() && !h.failure.isStopped("acme/finance"), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: durably, so the restart that follows does not start straight back into it", h.pause.read()?.reason.includes("daemon") === true, JSON.stringify(h.pause.read()));
+    ok("images: with nothing to auto-resume on — a daemon does not start itself on a clock", h.pause.read()?.resumeAt === undefined, JSON.stringify(h.pause.read()));
+    ok("images: and boot's own lift leaves the queue held, because the pause it finds is not its hold to release", h.scheduler.snapshot().pauseReason?.includes("daemon") === true, JSON.stringify(h.scheduler.snapshot()));
   }
 
   // ── the sweep, source B: a child that finished its work item and left the outcome on

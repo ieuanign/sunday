@@ -74,7 +74,31 @@ const pause = new PauseStore(pausePath);
 
 // BEFORE the Assignor, which takes it: a failed work item is classified and acted on
 // there, and only quota, auth and a dead container daemon reach this far (ADR-0002).
-const failure = new FailurePolicy({ pause, scheduler, state, github, log: logger.child("failure") });
+// Its recheck closes over two consts declared BELOW it — legal, and already this file's
+// idiom (the boot wiring does the same): a repo's recheck fires from a timer long after
+// this module finished evaluating, and closing over them is what keeps the policy out of
+// the Assignor's construction cycle. Annotated because that cycle is real to the type
+// checker even though only a closure crosses it: this → Assignor → Reconciler → this.
+const failure: FailurePolicy = new FailurePolicy({
+  pause,
+  scheduler,
+  state,
+  github,
+  log: logger.child("failure"),
+  recheck: {
+    // One repo, through the same builder boot uses — so a repair is proved the way the
+    // pipeline's own images are built, and not by asking docker something subtly different.
+    rebuild: async (repo) => {
+      const cfg = repos[repo];
+      if (!cfg) return `${repo} is no longer in config/repos.json`;
+      const [outcome] = await sandbox.buildImages({ [repo]: cfg }, import.meta.dirname);
+      return outcome?.status === "failed" ? outcome.reason : undefined;
+    },
+    // The existing per-repo pass (#40), so a repo coming back from a broken image and a
+    // repo coming back from a forwarder blackout cannot become two ways of re-deriving one.
+    reconcile: (repo) => reconciler.repo(repo),
+  },
+});
 
 const assignor = new Assignor({
   repos,
@@ -97,6 +121,7 @@ const boot = new Boot({
   pause,
   state,
   assignor,
+  failure,
   buildImages: (table, parentRoot) => sandbox.buildImages(table, parentRoot),
   reconcile: () => reconciler.run(),
   // This file sits at the workspace root, which is what the routing table's child paths

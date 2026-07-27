@@ -199,11 +199,19 @@ async function until(cond: () => boolean, ms = 2_000): Promise<boolean> {
 // real Assignor rather than asserting on a classification nobody acted on.
 // ─────────────────────────────────────────────────────────────────────────────────────
 
-/** One routed repo, with one trigger label: nothing here is about admission. */
+/** Two routed repos, with one trigger label each: nothing here is about admission. The
+ *  SECOND one is the whole of ADR-0002 — a scope is only a scope if the work in the other
+ *  repo carries on, and with one repo in the table a halt and a repo stop look identical. */
 const TABLE: Record<string, RepoConfig> = {
   "acme/finance": {
     path: "repos/finance",
     imageName: "sunday-finance",
+    promptFile: "docs/prompt.md",
+    triggerLabels: ["sunday"],
+  },
+  "acme/ops": {
+    path: "repos/ops",
+    imageName: "sunday-ops",
     promptFile: "docs/prompt.md",
     triggerLabels: ["sunday"],
   },
@@ -220,7 +228,7 @@ const slug = (key: string) => key.replace(/[^A-Za-z0-9._-]/g, "-");
  *  Assignor that routes failures INTO it — the two things that reach the world (GitHub,
  *  the fork) substituted, and every path pointed into this case's own dir so the real
  *  `var/` is never touched. */
-function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?: boolean } = {}) {
+function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?: boolean; imageBroken?: string } = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   /** Every line, at any level — the run log is the one destination every level routes to. */
   const lines: LogLine[] = [];
@@ -280,6 +288,22 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     return new Promise((settle) => exits.set(job.key, settle));
   };
 
+  /** How a stopped repo heals, stood in for: the rebuild is docker (minutes), and the
+   *  re-derive is `assignor/reconcile.mts` reading GitHub. `imageBroken` is the reason a
+   *  rebuild still fails, and `fix()` is the human editing the Dockerfile. */
+  const rebuilt: string[] = [];
+  const reDerived: string[] = [];
+  let broken = over.imageBroken;
+  const recheck = {
+    rebuild: async (repo: string) => {
+      rebuilt.push(repo);
+      return broken;
+    },
+    reconcile: async (repo: string) => void reDerived.push(repo),
+    // Constraint 11 again: milliseconds here, five minutes in production.
+    everyMs: 5,
+  };
+
   const policy = new FailurePolicy({
     pause,
     scheduler,
@@ -289,6 +313,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     // Constraint 11: the timing constants are injected, so the suite drives a REAL timer
     // at millisecond scale instead of a mocked clock.
     resumeGraceMs: over.resumeGraceMs ?? 5,
+    recheck,
   });
 
   const assignor = new Assignor({
@@ -302,18 +327,18 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     failure: policy,
   });
 
-  const delivery = (number: number): Delivery => ({
+  const delivery = (number: number, repo = "acme/finance"): Delivery => ({
     event: "issues",
     action: "labeled",
-    repo: "acme/finance",
+    repo,
     number,
     labels: ["sunday"],
     onPullRequest: false,
   });
 
   /** Admit one issue the way a webhook does, and let it reach the fork. */
-  const admit = async (number: number) => {
-    assignor.handle(delivery(number));
+  const admit = async (number: number, repo?: string) => {
+    assignor.handle(delivery(number, repo));
     await tick();
   };
 
@@ -326,7 +351,26 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
   };
 
   const started = () => forked.map((j) => j.key);
-  return { policy, assignor, scheduler, pause, state, lines, comments, claimed, released, labelled, forked, admit, finish, started };
+  return {
+    policy,
+    assignor,
+    scheduler,
+    pause,
+    state,
+    lines,
+    comments,
+    claimed,
+    released,
+    labelled,
+    forked,
+    admit,
+    finish,
+    started,
+    rebuilt,
+    reDerived,
+    /** The human who edits the Dockerfile: the next recheck builds clean. */
+    fix: () => void (broken = undefined),
+  };
 }
 
 /** The item every act case below is about, and a second one queued alongside it: whether
@@ -669,6 +713,91 @@ try {
     );
     ok("transient: and nothing is labelled — a blip is not something to set aside for a human", h.labelled.length === 0, h.labelled.join(","));
     ok("transient: nor started a third time", h.started().filter((k) => k === ITEM.key).length === 2, h.started().join(","));
+  }
+
+  // ── the repo scope: one child's sandbox image is broken, so nothing in THAT repo can
+  //    run — and every other repo carries on. v1 read exactly this create failure as
+  //    `unknown` and stopped everything on it (captured 2026-07-24, finance#55), which is
+  //    the day ADR-0002 was written about ──
+  {
+    const h = harness({ imageBroken: "Image 'sunday-finance:latest' not found locally" });
+    await h.admit(57);
+    await h.finish(57, {
+      status: "failed",
+      summary: "Provider 'docker' create failed: Image 'sunday-finance:latest' not found locally.",
+    });
+
+    ok(
+      "setup: the pipeline keeps running — one broken image is one repo's problem",
+      !h.scheduler.isPaused() && h.pause.read() === undefined,
+      JSON.stringify(h.pause.read()),
+    );
+    ok("setup: and that repo is stopped, because every run in it would die the same way", h.policy.isStopped("acme/finance"));
+    ok(
+      "setup: the item that hit it is left `failed` — the state the re-derive picks back up once the repo builds",
+      h.state.get(ITEM.key)?.status === "failed",
+      JSON.stringify(h.state.get(ITEM.key)),
+    );
+    ok(
+      "setup: and it is NOT retried — a missing image does not appear on a second run, it just spends the quota",
+      h.started().filter((k) => k === ITEM.key).length === 1,
+      h.started().join(","),
+    );
+
+    const said = h.lines.find((l) => l.module === "failure" && l.message.includes("stopped"));
+    ok("setup: reported at error — a broken environment is something a human has to go and fix", said?.level === "error", JSON.stringify(said));
+    ok(
+      "setup: naming the repo and NO issue, so a broken image comments on no issue thread (constraint 5)",
+      said?.context.repo === "acme/finance" && said.context.target === undefined,
+      JSON.stringify(said?.context),
+    );
+
+    // The teeth of the scope: admission into the stopped repo is refused, and admission
+    // anywhere else is untouched.
+    await h.admit(58);
+    ok("setup: a delivery in the stopped repo is not started on an image that is not there", !h.started().includes("acme/finance#58"), h.started().join(","));
+    ok(
+      "setup: it is skipped with a reason — an issue that goes quiet with no line is the defect this rewrite exists to kill",
+      h.lines.some((l) => l.message.includes("skip acme/finance#58") && l.message.includes("stopped")),
+      JSON.stringify(h.lines.map((l) => l.message)),
+    );
+
+    await h.admit(11, "acme/ops");
+    ok("setup: while a work item in another repo starts as if nothing happened", h.started().includes("acme/ops#11"), h.started().join(","));
+
+    // Nobody is watching the child repo but Sunday, so the stop lifts ITSELF: the image is
+    // rebuilt on a timer, and a clean build is the signal that the repair landed.
+    ok("setup: the image is rechecked on a timer", await until(() => h.rebuilt.includes("acme/finance")), h.rebuilt.join(","));
+    ok("setup: and while it is still broken the repo stays stopped", h.policy.isStopped("acme/finance"));
+    ok("setup: only the stopped repo is rebuilt — a healthy repo's image is not rebuilt on somebody else's failure", h.rebuilt.every((r) => r === "acme/finance"), h.rebuilt.join(","));
+
+    h.fix(); // the human edits the Dockerfile, or starts the daemon
+    ok("setup: a recheck that builds clean clears the stop", await until(() => !h.policy.isStopped("acme/finance")));
+    ok(
+      "setup: and re-derives that repo, which is what brings back the items that died on the broken image",
+      await until(() => h.reDerived.includes("acme/finance")),
+      h.reDerived.join(","),
+    );
+    ok("setup: that repo only — a re-derive of everybody's backlog is somebody else's rate limit", h.reDerived.every((r) => r === "acme/finance"), h.reDerived.join(","));
+
+    // What the re-derive meets: it hands every open issue to the same admission seam, so
+    // the guard being gone IS the re-admission.
+    await h.assignor.considerIssue({ repo: "acme/finance", number: 58, labels: ["sunday"] });
+    ok("setup: so the work the stop held back starts again, with no bookkeeping of its own", h.started().includes("acme/finance#58"), h.started().join(","));
+  }
+
+  // ── …unless the container daemon itself is down. No image anywhere can be built or run
+  //    then, so this is the third thing allowed to stop the pipeline (constraint 4):
+  //    stopping one repo for it would leave every other repo dying item by item ──
+  {
+    const h = harness();
+    h.policy.failed({
+      text: "Provider 'docker' create failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+      repo: ITEM.repo,
+      item: ITEM,
+    });
+    ok("a dead daemon: the pipeline stops instead", h.scheduler.isPaused() && h.pause.read() !== undefined, JSON.stringify(h.pause.read()));
+    ok("a dead daemon: and no single repo is blamed for it — there is nothing to rebuild until the daemon is back", !h.policy.isStopped(ITEM.repo));
   }
 
   // ── an auth halt armed WHILE a quota window is running outranks it: the quota's timer

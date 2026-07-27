@@ -24,6 +24,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
+import type { FailurePolicy } from "#assignor/failure.mts";
 import { type Assignor, parseWorkItemKey, type WorkItemRef } from "#assignor/index.mts";
 import { type PauseState, type PauseStore, rearmAction } from "#assignor/pause.mts";
 import type { Scheduler } from "#assignor/scheduler.mts";
@@ -75,6 +76,10 @@ export interface BootDeps {
   pause: PauseStore;
   state: StateStore;
   assignor: Assignor;
+  /** What a failed image build MEANS and what is done about it (#39): one repo stopped,
+   *  or — for a dead container daemon — the pause armed. The same policy the Assignor
+   *  routes a failed work item into, so one broken environment is read one way. */
+  failure: FailurePolicy;
   buildImages: BuildImages;
   reconcile: Reconcile;
   /** The workspace root the routing table's child paths resolve against. */
@@ -91,6 +96,7 @@ export class Boot {
   private readonly pause: PauseStore;
   private readonly state: StateStore;
   private readonly assignor: Assignor;
+  private readonly failure: FailurePolicy;
   private readonly buildImages: BuildImages;
   private readonly reconcile: Reconcile;
   private readonly parentRoot: string;
@@ -107,6 +113,7 @@ export class Boot {
     this.pause = deps.pause;
     this.state = deps.state;
     this.assignor = deps.assignor;
+    this.failure = deps.failure;
     this.buildImages = deps.buildImages;
     this.reconcile = deps.reconcile;
     this.parentRoot = deps.parentRoot;
@@ -178,15 +185,20 @@ export class Boot {
     }, delay);
   }
 
-  /** (Re)build every routed repo's image, with the hold on. Boot REPORTS: a repo whose
-   *  image did not build is named at `error` with its repo context, and stopping that
-   *  repo (rather than the pipeline) is the classifier's — ADR-0002, #39. */
+  /** (Re)build every routed repo's image, with the hold on. A repo that did not build goes
+   *  to the POLICY and not to a log line of its own (#39 constraint 1): a broken image
+   *  stops that repo, a dead container daemon stops the pipeline, and both decisions live
+   *  in one place — boot reporting it separately is the second reading of a failure that is
+   *  how v1's live and recovery paths drifted apart.
+   *
+   *  The build's OWN output goes over, never a line composed here (constraint 3), with
+   *  `setup` as the fallback: a failure that came out of an image build is that repo's
+   *  environment whatever docker said about it. What the build could not do is already a
+   *  durable `error` from `services/sandbox.mts`, carrying the image name and the reason. */
   private async images(): Promise<void> {
     for (const outcome of await this.buildImages(this.repos, this.parentRoot)) {
       if (outcome.status === "built") continue;
-      this.log.error(`✗ ${outcome.fullName}: no sandbox image (${outcome.imageName}) — ${outcome.reason}`, {
-        repo: outcome.fullName,
-      });
+      this.failure.failed({ text: outcome.reason, repo: outcome.fullName, fallback: "setup" });
     }
   }
 
