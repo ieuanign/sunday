@@ -4,7 +4,7 @@
 // model/effort, and the shared isEffort guard (used to validate .env MODEL_EFFORT
 // before it reaches Sandcastle). Pure host-side — no sandbox, no quota.
 
-import { loadRoster, isEffort, PHASES, EFFORTS } from "../config/roster.mts";
+import { loadRoster, isEffort, PHASES, EFFORTS } from "#config/roster.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

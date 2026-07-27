@@ -17,16 +17,16 @@ import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
-import { classify, FailurePolicy } from "../assignor/failure.mts";
-import { Assignor, type ChildExit, type Delivery, type ForkWorkItem, type Paths, type WorkItemRef } from "../assignor/index.mts";
-import { PauseStore } from "../assignor/pause.mts";
-import { createScheduler } from "../assignor/scheduler.mts";
-import { StateStore } from "../assignor/state.mts";
-import type { Job } from "../issue/run.mts";
-import { acquireLock } from "../lib/lock.mts";
-import { writeOutcome, type Outcome } from "../lib/outcome.mts";
-import type { GitHub, GitHubLabels } from "../services/github/index.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { classify, FailurePolicy } from "#assignor/failure.mts";
+import { Assignor, type ChildExit, type Delivery, type ForkWorkItem, type Paths, type WorkItemRef } from "#assignor/index.mts";
+import { PauseStore } from "#assignor/pause.mts";
+import { createScheduler } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
+import type { Job } from "#issue/run.mts";
+import { acquireLock } from "#lib/lock.mts";
+import { writeOutcome, type Outcome } from "#lib/outcome.mts";
+import type { GitHub, GitHubLabels } from "#services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

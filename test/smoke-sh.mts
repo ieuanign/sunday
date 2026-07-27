@@ -7,8 +7,8 @@
 // classify a failed create as a P1 auth halt on the agent's wording alone. Shells
 // out to `sh`/`printf` only — no network, no GitHub.
 
-import { classify } from "../listener/classify.mts";
-import { sh, shA } from "../listener/helper.mts";
+import { classify } from "#listener/classify.mts";
+import { sh, shA } from "#listener/helper.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

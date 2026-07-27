@@ -28,7 +28,7 @@ const watched = [
 ];
 const before = watched.map(existsSync);
 
-const paths = await import("../lib/paths.mts");
+const paths = await import("#lib/paths.mts");
 
 // ── the layout, spelled out (expected values are the plan's layout, not the module's) ──
 {

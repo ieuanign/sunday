@@ -13,17 +13,17 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "../boot.mts";
+import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "#boot.mts";
 import type { RepoConfig } from "#config/repos.mts";
-import { FailurePolicy } from "../assignor/failure.mts";
-import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
-import { PauseStore, rearmAction } from "../assignor/pause.mts";
-import { createScheduler } from "../assignor/scheduler.mts";
-import { StateStore } from "../assignor/state.mts";
-import { acquireLock, readLock } from "../lib/lock.mts";
-import { writeOutcome } from "../lib/outcome.mts";
-import type { GitHub } from "../services/github/index.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import { FailurePolicy } from "#assignor/failure.mts";
+import { Assignor, type ForkWorkItem, type Paths } from "#assignor/index.mts";
+import { PauseStore, rearmAction } from "#assignor/pause.mts";
+import { createScheduler } from "#assignor/scheduler.mts";
+import { StateStore } from "#assignor/state.mts";
+import { acquireLock, readLock } from "#lib/lock.mts";
+import { writeOutcome } from "#lib/outcome.mts";
+import type { GitHub } from "#services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-boot-${process.pid}`);
 

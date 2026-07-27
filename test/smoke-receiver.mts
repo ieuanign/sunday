@@ -6,9 +6,9 @@
 // Port 0 asks the OS for a free one, so this never collides with a live pipeline. $0,
 // loopback only, no network, no GitHub.
 
-import type { Delivery } from "../assignor/index.mts";
-import { createReceiver } from "../services/github/receiver.mts";
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
+import type { Delivery } from "#assignor/index.mts";
+import { createReceiver } from "#services/github/receiver.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

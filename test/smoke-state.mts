@@ -8,7 +8,7 @@
 import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { StateStore } from "../assignor/state.mts";
+import { StateStore } from "#assignor/state.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-state-${process.pid}`);
 

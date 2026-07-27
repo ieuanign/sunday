@@ -6,8 +6,8 @@
 // over a fake GitHub seam. Every `gh` call lives behind that seam (constraint 1), which
 // is what lets the entire table be driven offline. $0, no network, no tokens.
 
-import { resolveBase } from "../assignor/dag.mts";
-import type { Blocker, GitHub } from "../services/github/index.mts";
+import { resolveBase } from "#assignor/dag.mts";
+import type { Blocker, GitHub } from "#services/github/index.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

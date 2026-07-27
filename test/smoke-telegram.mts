@@ -9,7 +9,7 @@ import {
   isAllowedChat,
   dispatchCommand,
   type TelegramHandlers,
-} from "../listener/telegram.mts";
+} from "#listener/telegram.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

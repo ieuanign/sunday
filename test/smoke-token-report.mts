@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import { Logger, type LogLine } from "../services/logger.mts";
+import { Logger, type LogLine } from "#services/logger.mts";
 import {
   parseSessionUsage,
   buildReport,
@@ -18,7 +18,7 @@ import {
   headline,
   writeReport,
   type Row,
-} from "../services/agent/token-report.mts";
+} from "#services/agent/token-report.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import type { WorkItem } from "../listener/scheduler.mts";
+import type { WorkItem } from "#listener/scheduler.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 /** The repo root — `test/..`. Fixtures hang off it under `.scratch/`. */

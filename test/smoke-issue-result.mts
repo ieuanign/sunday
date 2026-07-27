@@ -7,7 +7,7 @@
 //   devbox run node test/smoke-issue-result.mts
 // $0, offline, no docker, no network, no tokens.
 
-import { resultSchema } from "../issue/prompt.mts";
+import { resultSchema } from "#issue/prompt.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

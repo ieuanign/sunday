@@ -9,7 +9,10 @@
     "#services/*": "./services/*",
     "#assignor/*": "./assignor/*",
     "#issue/*": "./issue/*",
-    "#pr/*": "./pr/*"
+    "#pr/*": "./pr/*",
+    "#listener/*": "./listener/*",
+    "#scripts/*": "./scripts/*",
+    "#boot.mts": "./boot.mts"
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {

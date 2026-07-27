@@ -8,8 +8,8 @@
 import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 
-import { formatStatus, buildStatus, type StatusReport } from "../listener/status.mts";
-import type { IssueStatus } from "../listener/state.mts";
+import { formatStatus, buildStatus, type StatusReport } from "#listener/status.mts";
+import type { IssueStatus } from "#listener/state.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

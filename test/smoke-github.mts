@@ -12,7 +12,7 @@
 
 import { makeFixture, ok, report, stubGhInEffect } from "./git-fixture.mts";
 
-import { Gh } from "../services/github/index.mts";
+import { Gh } from "#services/github/index.mts";
 
 /** The routed repo the scenario pretends to be. Only ever reaches the stub. */
 const REPO = "sunday-fixture/child";

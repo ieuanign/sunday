@@ -10,10 +10,10 @@ import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type { RepoConfig } from "../config/repos.mts";
-import { planRun } from "../issue/run-one.mts";
-import { acquireLock, releaseLock } from "../lib/lock.mts";
-import type { GitHub } from "../services/github/index.mts";
+import type { RepoConfig } from "#config/repos.mts";
+import { planRun } from "#issue/run-one.mts";
+import { acquireLock, releaseLock } from "#lib/lock.mts";
+import type { GitHub } from "#services/github/index.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

@@ -9,8 +9,8 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
-import { SandboxService, isScaffoldPlaceholder, type ImageOutcome } from "../services/sandbox.mts";
+import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
+import { SandboxService, isScaffoldPlaceholder, type ImageOutcome } from "#services/sandbox.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 let fails = 0;

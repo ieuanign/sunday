@@ -8,7 +8,7 @@
 //   devbox run node test/smoke-v1-result.mts
 // Deleted with the rest of listener/ at cutover. $0, offline, no docker, no network.
 
-import { resultSchema } from "../listener/run-issue.mts";
+import { resultSchema } from "#listener/run-issue.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

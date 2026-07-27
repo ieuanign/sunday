@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { GitCli } from "../services/git.mts";
+import { GitCli } from "#services/git.mts";
 import { makeFixture, ok, report } from "./git-fixture.mts";
 
 const git = new GitCli();

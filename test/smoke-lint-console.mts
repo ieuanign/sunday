@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { scanSource, scanTree } from "../scripts/lint-console.mts";
+import { scanSource, scanTree } from "#scripts/lint-console.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {

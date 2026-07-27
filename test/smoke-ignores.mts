@@ -2,7 +2,7 @@
 //   devbox run node test/smoke-ignores.mts
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ensureSandboxIgnores } from "../listener/helper.mts";
+import { ensureSandboxIgnores } from "#listener/helper.mts";
 
 let fails = 0;
 const ok = (l: string, c: boolean, d = "") => { if (!c) fails++; console.log(`${c ? "✓" : "✗"} ${l}${c ? "" : `\n    ${d}`}`); };

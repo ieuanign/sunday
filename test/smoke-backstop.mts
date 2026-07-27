@@ -5,7 +5,7 @@
 // deleteLocalBranch then succeeds.
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { sh, deleteLocalBranch, removePreservedWorktree } from "../listener/helper.mts";
+import { sh, deleteLocalBranch, removePreservedWorktree } from "#listener/helper.mts";
 
 let fails = 0;
 const ok = (l: string, c: boolean, d = "") => { if (!c) fails++; console.log(`${c ? "✓" : "✗"} ${l}${c ? "" : `\n    ${d}`}`); };
