@@ -1,5 +1,5 @@
 // test/smoke-issue-result.mts — hermetic smoke for the RESULT CONTRACT an issue run is
-// answered in (V2, issue #37): the shape `docs/sandbox-prompt.md` §4 tells every routed
+// answered in (issue #37): the shape `docs/sandbox-prompt.md` §4 tells every routed
 // repo's agent to emit, and the shape the PR body is composed from. Asserted at the parse
 // seam because that is where the contract is actually enforced — the agent library
 // validates against this schema before the run ever sees an answer, so a field wrongly

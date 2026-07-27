@@ -32,7 +32,7 @@
 # Scratch
 /.scratch/
 
-# Durable runtime state — survives restarts, but never source (V2: state.json,
+# Durable runtime state — survives restarts, but never source (state.json,
 # pause.json, results/, running/, log/)
 /var/
 

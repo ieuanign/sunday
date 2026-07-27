@@ -1,5 +1,5 @@
-// test/smoke-issue-run.mts — hermetic smoke for the thing one issue run DECIDES (V2,
-// issue #36). It drives the real IssueModule over the real Logger with the four things
+// test/smoke-issue-run.mts — hermetic smoke for the thing one issue run DECIDES
+// (issue #36). It drives the real IssueModule over the real Logger with the four things
 // that reach the world substituted — the agent (quota), GitHub (real writes to a real
 // repo), git (a checkout on disk) and the image probe (docker) — so what is asserted is
 // what a run decides from an agent's signal and from what it asserts around it (#38),

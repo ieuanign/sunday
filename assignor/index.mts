@@ -157,8 +157,7 @@ const KNOWN_UNBUILT = new Set([COMMENT_EVENT, "pull_request", REVIEW_COMMENT_EVE
 const PR_REEVAL_ACTIONS = new Set(["opened", "reopened", "closed"]);
 
 /** A spec describes the shape of a feature; its child issues are the work (CONTEXT.md).
- *  The literal is ported from v1's `listener/helper.mts` rather than imported — v1 and
- *  V2 must not cross-import until cutover deletes v1. */
+ *  The literal is ported unchanged from v1's `listener/helper.mts`. */
 const SPEC_LABEL = "spec";
 
 /** A head branch of Sunday's, and the issue behind it. `feat/<n>` is the only branch

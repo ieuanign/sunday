@@ -2,7 +2,7 @@
 
 Sunday v1 treats an unrecognised failure as a fail-safe global halt: `classify`
 returns `unknown` and the act layer pauses both scheduler lanes until a human
-resumes. That is why the pipeline sits halted for long stretches. V2 classifies every
+resumes. That is why the pipeline sits halted for long stretches. Sunday now classifies every
 failure into a **scope** instead, and only pipeline-scope failures stop everything.
 
 | Class | Scope | Why |

@@ -13,7 +13,7 @@ export interface RepoConfig {
   path: string;
   /** Pre-built sandbox image (per the onboarding recipe). */
   imageName: string;
-  /** Baseline prompt the listener composes the issue onto, relative to root. */
+  /** Baseline prompt Sunday composes the issue onto, relative to root. */
   promptFile: string;
   /** ALL must be present on an issue to admit it (AND). */
   triggerLabels: string[];

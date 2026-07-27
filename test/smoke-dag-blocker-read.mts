@@ -14,7 +14,7 @@
 // admitted and started work on main while its blocker was still open.
 //
 // This file held both as `knownDefect`s against v1. They are `ok`s now, against
-// V2's `resolveBase` over the real `Gh` — the whole path, argv included, driven
+// Sunday's `resolveBase` over the real `Gh` — the whole path, argv included, driven
 // through the fixture's stub `gh`. No network, no tokens, $0. The decision table
 // itself is `test/smoke-dag.mts`; what is under test HERE is the read.
 

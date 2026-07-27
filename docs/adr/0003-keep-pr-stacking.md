@@ -4,13 +4,13 @@ A dependent issue whose blocker has an open PR branches off that blocker's branc
 targets it, rather than waiting for the blocker to merge. This is the single most
 intricate part of Sunday — roughly 500 lines of dependency reading, cascade rebasing
 and in-sandbox conflict resolution — and dropping it was seriously considered during
-the V2 design. Deferring instead would have deleted all of it, but it puts human
+the rewrite. Deferring instead would have deleted all of it, but it puts human
 review latency on the critical path: a chain of three dependent issues could not
 start work until each PR before it had been reviewed and merged. Throughput won.
 
 Stacking is kept, but the fragility that motivated dropping it is fixed at the root.
 v1 used the **blocker's final tip** (from the merge webhook payload) as the rebase
-upstream. V2 stores the **fork point** — the commit the dependent actually branched
+upstream. Sunday stores the **fork point** — the commit the dependent actually branched
 from, captured at branch creation — in the dependent's durable state.
 
 ## Considered options
@@ -32,7 +32,7 @@ code and adds a branch, giving two paths to test instead of one.
 - Durable state lives under `var/`, but it is still disposable by design. The
   permanent `refs/pull/<n>/head` ref stays as the recovery path when a fork point
   cannot be read back.
-- These are merge-race code paths that are hard to trigger by hand, so V2 adds a
+- These are merge-race code paths that are hard to trigger by hand, so the rewrite adds a
   local bare-origin git fixture harness. Merge, squash-merge, branch deletion and
   force-push become scripted scenarios in a temp directory — no Docker, no agent, no
   network. Confidence here has to come from tests, not from argument.

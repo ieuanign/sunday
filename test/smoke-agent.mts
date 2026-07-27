@@ -1,4 +1,4 @@
-// test/smoke-agent.mts — hermetic smoke for the agent seam (V2, issue #33).
+// test/smoke-agent.mts — hermetic smoke for the agent seam (issue #33).
 //   devbox run node test/smoke-agent.mts
 // What can be wrong here without spending quota: which implementation the AGENT setting
 // selects, what an unsupported setting says, and what is refused BEFORE a run starts.

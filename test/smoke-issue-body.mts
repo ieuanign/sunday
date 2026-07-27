@@ -1,4 +1,4 @@
-// test/smoke-issue-body.mts — hermetic smoke for the PULL REQUEST BODY (V2, issue #37):
+// test/smoke-issue-body.mts — hermetic smoke for the PULL REQUEST BODY (issue #37):
 // the pure composer that turns an agent's result plus the host's own facts into the
 // markdown a reviewer reads before the diff. Driven directly because it is a pure
 // function — no docker, no git, no network, no quota.

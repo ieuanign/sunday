@@ -2,7 +2,7 @@
 
 This is the baseline discipline Sunday injects into **every** sandbox run, ahead of the
 issue text. It governs in-sandbox agent behaviour only — orchestration (label triggers,
-concurrency, restack-on-merge, reconcile, session resume) is the listener's job, described in
+concurrency, restack-on-merge, reconcile, session resume) is Sunday's job, described in
 [`architecture.md`](architecture.md).
 
 Default agent: **Claude**. Another agent/model can be set in `.env` (`AGENT` / `MODEL` /
@@ -137,7 +137,7 @@ unresolvable conflict):
 
 1. **Emit `signal: "gate"`** with your question in `question` (§4). The host posts it to the issue
    and applies the `awaiting-human` label — you do neither yourself.
-2. Exit cleanly. The listener resumes your session when the human replies — do not block
+2. Exit cleanly. Sunday resumes your session when the human replies — do not block
    waiting.
 
 ## 7. When you cannot reach green (failure)

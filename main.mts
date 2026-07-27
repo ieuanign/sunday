@@ -1,4 +1,4 @@
-// main.mts — the V2 parent process. It owns the services, the Assignor, the queue and
+// main.mts — the parent process. It owns the services, the Assignor, the queue and
 // BOTH ends of the event pipe, and it owns no work: every work item runs in a forked
 // child (ADR-0001), so a `gh` or `git` call that blocks blocks only that child and never
 // the socket this process answers on.

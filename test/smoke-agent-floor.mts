@@ -1,4 +1,4 @@
-// test/smoke-agent-floor.mts — no-quota smoke for the discipline floor (V2, issue #33).
+// test/smoke-agent-floor.mts — no-quota smoke for the discipline floor (issue #33).
 //   devbox run node test/smoke-agent-floor.mts
 // Was smoke-roster-inject.mts: the assembly is unchanged, so the assertions follow the
 // module to services/agent/floor.mts. Asserts assembleFloor() writes one agent def per

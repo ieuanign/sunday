@@ -12,7 +12,7 @@ import type { ModuleLogger } from "#services/logger.mts";
 
 export interface ReceiverDeps {
   /** The port to bind. Constructor-injected rather than read from the environment:
-   *  v1 owns `LISTENER_PORT` until cutover (#45), and `0` lets a smoke drive the real
+   *  `main.mts` reads `LISTENER_PORT`, and `0` lets a smoke drive the real
    *  receiver on whatever the OS hands out. */
   port: number;
   log: ModuleLogger;

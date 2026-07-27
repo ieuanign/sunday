@@ -1,4 +1,4 @@
-// test/smoke-sandbox.mts — hermetic smoke for the sandbox service (V2, issue #33).
+// test/smoke-sandbox.mts — hermetic smoke for the sandbox service (issue #33).
 //   devbox run node test/smoke-sandbox.mts
 // Was smoke-preflight.mts: the pure half (isScaffoldPlaceholder) is unchanged, and the
 // image sweep is now driven with a SUBSTITUTED build step, so what is asserted is the

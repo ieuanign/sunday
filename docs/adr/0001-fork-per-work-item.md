@@ -1,7 +1,7 @@
 # Each work item runs in its own forked process
 
 Sunday v1 ran every issue and PR-comment run as an `await`ed async call inside the
-single listener process. V2 keeps the services and the Assignor in the parent, but
+single listener process. The rewrite keeps the services and the Assignor in the parent, but
 `fork()`s a child process per work item. The decisive reason is that v1's shell-out
 helper is synchronous (`spawnSync`), so a chain of `gh`/`git` calls froze the one
 event loop, starved the readiness probe, and got the listener SIGKILLed and restarted

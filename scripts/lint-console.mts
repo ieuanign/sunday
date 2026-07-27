@@ -1,12 +1,13 @@
-// scripts/lint-console.mts — `npm run lint`. Fails on a bare console write in V2 code,
-// so output cannot bypass the Logger (and with it the run log, the event log, the issue
-// and the phone). No dependency: the repo has no lint tooling, and this is ~40 lines.
+// scripts/lint-console.mts — `npm run lint`. Fails on a bare console write in Sunday's
+// own code, so output cannot bypass the Logger (and with it the run log, the event
+// log, the issue and the phone). No dependency: the repo has no lint tooling, and this
+// is ~40 lines.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Dirs the check does not enter. Exclusion-based, so a NEW V2 module is covered the
+/** Dirs the check does not enter. Exclusion-based, so a NEW module is covered the
  *  moment it exists: `test/` holds smokes that print their own results, `scripts/` are
  *  CLIs, `repos/` holds child repo clones that are not this repo's code. Any dot dir
  *  (`.scratch/`, `.git/`) is skipped too — `.scratch/` is throwaway by CLAUDE.md §6. */

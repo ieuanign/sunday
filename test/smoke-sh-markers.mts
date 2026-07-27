@@ -1,4 +1,4 @@
-// test/smoke-sh-markers.mts — hermetic smoke for the two V2 leaves the boot reconcile
+// test/smoke-sh-markers.mts — hermetic smoke for the two leaves the boot reconcile
 // sweep is built on: the async shell-out (`lib/sh.mts`) that keeps hundreds of `gh`
 // reads off the parent's event loop, and the summon test (`lib/markers.mts`) that says
 // whether a comment stream is asking Sunday for something.

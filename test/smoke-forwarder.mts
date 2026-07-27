@@ -1,4 +1,4 @@
-// test/smoke-forwarder.mts — hermetic smoke for the forwarder supervisor (V2, issue #40).
+// test/smoke-forwarder.mts — hermetic smoke for the forwarder supervisor (issue #40).
 //   devbox run node test/smoke-forwarder.mts
 // The REAL `Forwarders` drives REAL child processes — a trivial `node -e` that sleeps —
 // so exit and kill are exercised for real with no `gh`, no network and no GitHub token.
@@ -205,7 +205,7 @@ function harness(repos: string[], opts: Opts = {}) {
 
 // ── a drop OPENS A BLACKOUT and says so once, on the phone, with what the child said on
 //    its way out. This is the whole issue: on 2026-07-24 a forwarder dropped and the gap
-//    ran 8h44m with a healthy listener and nobody told ──
+//    ran 8h44m with a healthy parent and nobody told ──
 {
   const h = harness(["acme/finance", "acme/drive"], {
     script: () => `process.stderr.write("websocket: close 1006 (abnormal closure)"); ${STAY_ALIVE}`,

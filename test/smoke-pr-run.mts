@@ -1,4 +1,4 @@
-// test/smoke-pr-run.mts — hermetic smoke for what one PR-COMMENT run DECIDES (V2, issue
+// test/smoke-pr-run.mts — hermetic smoke for what one PR-COMMENT run DECIDES (issue
 // #44). It drives the real PrModule over the real Logger with the four things that reach
 // the world substituted — the agent (quota), GitHub (real writes to a real repo), git (a
 // checkout on disk) and the image probe (docker) — so what is asserted is which comments

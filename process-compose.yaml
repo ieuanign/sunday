@@ -1,6 +1,6 @@
 # Sunday supervision stack — run with `devbox services up`.
 #
-# ONE process: the V2 parent. It binds the receiver, supervises a `gh webhook forward`
+# ONE process: the parent. It binds the receiver, supervises a `gh webhook forward`
 # per routed repo IN-PROCESS and then boots — so there is nothing left for a second
 # supervised process to depend on, and no launcher script between them (#40). The relay's
 # recovery lives in `services/github/forwarder.mts`, which is what lets a dropped
