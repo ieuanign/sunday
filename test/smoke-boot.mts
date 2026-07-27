@@ -15,6 +15,7 @@ import { dirname, resolve } from "node:path";
 
 import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "../boot.mts";
 import type { RepoConfig } from "#config/repos.mts";
+import { FailurePolicy } from "../assignor/failure.mts";
 import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
 import { PauseStore, rearmAction } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
@@ -126,7 +127,18 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
   // something on it the store did not write is how "unreadable" gets driven at all.
   const pausePath = resolve(caseDir, "pause.json");
   const pause = new PauseStore(pausePath);
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths });
+  // The real policy over this case's own pause store — the same one boot re-arms from, so
+  // nothing here can arm a halt in one place and read it from another (#39).
+  const failure = new FailurePolicy({
+    pause,
+    scheduler,
+    state,
+    // Boot writes no label of its own; the policy's seam is stubbed so nothing here can
+    // reach a real repo.
+    github: { addLabels: async () => {} },
+    log: logger.child("failure"),
+  });
+  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
 
   /** What the build saw when it ran — above all whether the queue was HELD, which is the
    *  whole reason the build sits inside the hold. */
@@ -160,6 +172,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     pause,
     state,
     assignor,
+    failure,
     buildImages,
     reconcile,
     parentRoot: caseDir,
@@ -167,7 +180,7 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
     log: logger.child("boot"),
   });
 
-  return { boot, scheduler, state, pause, pausePath, paths, lines, events, comments, claimed, released, build, reDerive, forked };
+  return { boot, scheduler, state, pause, pausePath, paths, lines, events, comments, claimed, released, build, reDerive, forked, failure };
 }
 
 try {
@@ -316,22 +329,53 @@ try {
     ok("re-arm: with the pause disarmed on disk, or the next boot re-applies a window that is over", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
   }
 
-  // ── a repo whose image did not build. Boot REPORTS and does not act (ADR-0002: setup
-  //    is repo scope, and stopping that repo is #39's) — but silence here is a repo whose
-  //    every run dies mid-agent as a mystery Provider failure, which is exactly how v1
-  //    spent a day halted ──
+  // ── a repo whose image did not build. It goes through the POLICY and not to a log line
+  //    (#39): a repo nothing can be built for is a repo whose every run would die mid-agent
+  //    as a mystery Provider failure — one whole agent run per item, on real quota, which
+  //    is exactly how v1 spent a day. Boot classifies it as that repo's `setup`, because a
+  //    failure that came out of an image build is that repo's environment whatever docker
+  //    said about it ──
   {
     const h = harness({
       buildImages: async () => [
-        { fullName: "acme/finance", imageName: "sunday-finance", status: "failed", reason: "Cannot connect to the Docker daemon" },
+        {
+          fullName: "acme/finance",
+          imageName: "sunday-finance",
+          status: "failed",
+          reason: "sandcastle docker build-image exited 1 — ERROR [4/9] RUN apt-get install: exit code 100",
+        },
       ],
     });
     await h.boot.run();
 
-    const reported = h.events.find((l) => l.message.includes("sunday-finance"));
-    ok("images: a failed build is reported at error — durable, and on the operator's phone", reported?.level === "error", JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
-    ok("images: named with the repo it stops, and carrying why", reported?.context.repo === "acme/finance" && reported.message.includes("Docker daemon"), JSON.stringify(reported));
-    ok("images: reported, not acted on — the pipeline still comes up for every other repo", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: a repo whose image did not build is stopped, so nothing is admitted into it", h.failure.isStopped("acme/finance"), JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
+    const reported = h.events.find((l) => l.message.includes("acme/finance stopped"));
+    ok("images: reported at error — durable, and on the operator's phone", reported?.level === "error", JSON.stringify(h.events.map((l) => `${l.level} ${l.message}`)));
+    ok("images: named with the repo it stops, and no issue — one broken image comments on nobody's thread", reported?.context.repo === "acme/finance" && reported.context.target === undefined, JSON.stringify(reported));
+    ok("images: and ONE repo is all it stops — the pipeline still comes up for everybody else", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: the rest of the sequence still runs — a broken image is not a boot that refuses to answer webhooks", h.reDerive.ran === 1, JSON.stringify(h.reDerive));
+  }
+
+  // ── …and the one image failure that is NOT one repo's: with the container daemon down,
+  //    no image anywhere can be built and no sandbox anywhere can be created. Boot arms the
+  //    real pause for it, and its own lift is what then refuses to release the queue ──
+  {
+    const h = harness({
+      buildImages: async () => [
+        {
+          fullName: "acme/finance",
+          imageName: "sunday-finance",
+          status: "failed",
+          reason: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        },
+      ],
+    });
+    await h.boot.run();
+
+    ok("images: a dead container daemon stops the pipeline, not the one repo that noticed", h.scheduler.isPaused() && !h.failure.isStopped("acme/finance"), JSON.stringify(h.scheduler.snapshot()));
+    ok("images: durably, so the restart that follows does not start straight back into it", h.pause.read()?.reason.includes("daemon") === true, JSON.stringify(h.pause.read()));
+    ok("images: with nothing to auto-resume on — a daemon does not start itself on a clock", h.pause.read()?.resumeAt === undefined, JSON.stringify(h.pause.read()));
+    ok("images: and boot's own lift leaves the queue held, because the pause it finds is not its hold to release", h.scheduler.snapshot().pauseReason?.includes("daemon") === true, JSON.stringify(h.scheduler.snapshot()));
   }
 
   // ── the sweep, source B: a child that finished its work item and left the outcome on
@@ -389,9 +433,12 @@ try {
     acquireLock(h.paths.pidPath(dead), spawnSync(process.execPath, ["-e", ""]).pid!); // a pid that has certainly exited
     await h.boot.run();
 
-    ok("sweep: an in-flight item whose child left nothing behind is recorded failed, not left in-flight", h.state.get(gone)?.status === "failed", JSON.stringify(h.state.get(gone)));
+    // Recorded through the same `record` the live path uses, which is what hands it to the
+    // failure policy (#39): the spent retry is the mark that it got there, and the item is
+    // started again rather than left in-flight for nobody.
+    ok("sweep: an in-flight item whose child left nothing behind is recorded and picked back up, not left in-flight", h.state.get(gone)?.retried === true, JSON.stringify(h.state.get(gone)));
     ok("sweep: and its claim is released, so a human re-labelling it gets a retry", h.released.includes(gone), h.released.join(","));
-    ok("sweep: a dead lock is not a live child — that item is settled too", h.state.get(dead)?.status === "failed" && h.released.includes(dead), `${JSON.stringify(h.state.get(dead))} ${h.released.join(",")}`);
+    ok("sweep: a dead lock is not a live child — that item is settled too", h.state.get(dead)?.retried === true && h.released.includes(dead), `${JSON.stringify(h.state.get(dead))} ${h.released.join(",")}`);
     ok("sweep: and the lock the dead child never released is cleared", readLock(h.paths.pidPath(dead)) === undefined, JSON.stringify(readLock(h.paths.pidPath(dead))));
     ok("sweep: the comment says what is actually known — that the work item ended with nothing to show", h.comments.every((l) => l.message.includes("no outcome")), JSON.stringify(h.comments.map((l) => l.message)));
     ok("sweep: an item that is not in-flight is nobody's to settle — it was applied already", h.state.get(settled)?.status === "done" && !h.released.includes(settled), `${JSON.stringify(h.state.get(settled))} ${h.released.join(",")}`);
@@ -408,7 +455,7 @@ try {
     h.state.set(second, { status: "in-flight" });
     await h.boot.run();
 
-    ok("sweep: an item that fails on the way out does not strand the ones behind it", h.state.get(second)?.status === "failed" && h.released.includes(second), `${JSON.stringify(h.state.get(second))} ${h.released.join(",")}`);
+    ok("sweep: an item that fails on the way out does not strand the ones behind it", h.state.get(second)?.retried === true && h.released.includes(second), `${JSON.stringify(h.state.get(second))} ${h.released.join(",")}`);
     ok("sweep: and the one that failed is named, since it is a work item still holding its claim", said(h.lines, first) && said(h.lines, "502"), JSON.stringify(h.lines.map((l) => l.message)));
     ok("sweep: boot still finishes — the queue is released, not stranded held", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
   }

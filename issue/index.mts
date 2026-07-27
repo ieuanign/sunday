@@ -49,6 +49,10 @@ export interface IssueRunInput {
   logPath: string;
   /** Continue the session a previous run gated on, with the human's answer. */
   resume?: { sessionId: string; reply: string };
+  /** What the PREVIOUS attempt at this item died on, when this run is #39's one retry.
+   *  Handed to the agent in the prompt: it is the only thing this run knows that the last
+   *  one did not, and without it a retry is the same run again on fresh quota. */
+  retryError?: string;
 }
 
 /** Everything a run reaches the world through, and constructs none of. */
@@ -119,7 +123,7 @@ export class IssueModule {
         repo: { fullName: input.repo, childDir: input.childDir, imageName: input.imageName },
         prompt: input.resume
           ? resumePrompt(input.resume.reply)
-          : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body),
+          : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body, input.retryError),
         branch,
         // RESOLVED, never a bare branch name: handed one, the library prefers a stale
         // local branch over the origin's (#33's contract).
@@ -160,6 +164,11 @@ export class IssueModule {
           status: "failed",
           summary: `${description}\n\nsignal ${signal}, but no commits — nothing to ship.`,
           forkPoint,
+          // The agent RAN, and the summary above is prose SUNDAY wrote around its own
+          // description — so what it failed AT travels as this typed fact rather than as
+          // text for #39 to pattern-match (constraint 3). Retrying this one with its own
+          // error would spend a second agent run on a decision already taken.
+          agentFailed: true,
         });
       }
       await this.git.push(input.childDir, branch);
@@ -167,13 +176,15 @@ export class IssueModule {
       const url = await this.openPr(input, branch, detail.title, result, ahead, draft);
       this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about);
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
-      // human to read, not because the run succeeded. Classifying it (and the
-      // `agent-failed` label) is #39's.
+      // human to read, not because the run succeeded — and it is the agent's OWN verdict,
+      // flagged as one so #39 neither retries it nor quarantines it. Only on the failing
+      // branch: a shipped `ready`/`draft` has nothing for anyone to classify.
       return this.outcome({
         key: input.key,
         status: signal === "fail" ? "failed" : "done",
         summary: `${description}\n\n${draft ? "draft " : ""}PR: ${url}`,
         forkPoint,
+        ...(signal === "fail" ? { agentFailed: true } : {}),
       });
     } catch (err) {
       // NOTHING escapes this method. The child's whole job is to leave exactly one durable

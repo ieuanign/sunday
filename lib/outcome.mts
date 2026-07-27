@@ -39,6 +39,14 @@ export interface Outcome {
    *  re-derived later from a branch that has moved since (ADR-0003). Absent on a resumed
    *  run: the branch was already there, so that run forked from nothing. */
   forkPoint?: string;
+  /** The agent RAN and reported the failure ITSELF (#39) — a `fail` signal, or a run that
+   *  committed nothing — as opposed to something blowing up around it. Carried as a typed
+   *  fact because the summary on those paths is prose SUNDAY composed around the agent's
+   *  own description: classifying that by pattern would break the day the wording changes,
+   *  and would let anything the agent happened to write ("hit the usage limit") stop the
+   *  whole pipeline. Absent on every other path, which is every failure the agent never
+   *  got to describe. */
+  agentFailed?: boolean;
 }
 
 /** The answers a read can give. Absence is the common one — no file means nothing to
@@ -102,6 +110,10 @@ function isOutcome(value: unknown): value is Outcome {
     // Likewise optional, and likewise checked: a restack aims at the commit this names,
     // and this file's own warning is that a field the guard skips is how a finished run
     // becomes an unreadable outcome — or here, a fork point that is not a commit.
-    (o.forkPoint === undefined || typeof o.forkPoint === "string")
+    (o.forkPoint === undefined || typeof o.forkPoint === "string") &&
+    // And likewise: this one decides whether a failure is the agent's own verdict or an
+    // unrecognised one, so a truthy string here would classify a real quota wall as the
+    // agent having failed — one item quarantined while the pipeline feeds into the wall.
+    (o.agentFailed === undefined || typeof o.agentFailed === "boolean")
   );
 }

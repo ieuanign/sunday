@@ -159,6 +159,52 @@ try {
     );
   }
 
+  // ── the agent-reported flag (#39): the agent RAN and said the work failed, as opposed
+  //    to something blowing up around it. A TYPED fact and never a pattern (constraint 3):
+  //    the summary on that path is prose SUNDAY composed around the agent's description,
+  //    so classifying it by regex would both break the day that wording changes and let
+  //    anything the agent happened to write halt the pipeline. Optional, and checked like
+  //    the rest — a field the guard skips is how a finished run becomes unreadable ──
+  {
+    const path = resolve(dir, "results", "agent-failed.json");
+    const reported: Outcome = {
+      key: "acme/finance#57",
+      status: "failed",
+      summary: "Could not make the integration test pass.\n\ndraft PR: https://github.com/acme/finance/pull/99",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      agentFailed: true,
+    };
+    writeOutcome(path, reported);
+    const read = readOutcome(path);
+    ok(
+      "agent-reported: the flag survives the file — it is what the classifier reads, never the prose",
+      read.state === "ok" && read.outcome.agentFailed === true,
+      JSON.stringify(read),
+    );
+
+    const thrown: Outcome = {
+      key: "acme/finance#58",
+      status: "failed",
+      summary: "Claude Code exited 1: credit balance is too low",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+    };
+    writeOutcome(path, thrown);
+    const plain = readOutcome(path);
+    ok(
+      "agent-reported: a failure the agent never got to report carries no flag — absent, not false",
+      plain.state === "ok" && plain.outcome.agentFailed === undefined,
+      JSON.stringify(plain),
+    );
+
+    writeFileSync(path, JSON.stringify({ ...reported, agentFailed: "yes" }));
+    const wrong = readOutcome(path);
+    ok(
+      "agent-reported: present and not a boolean is unreadable — a truthy string would quarantine a real quota failure",
+      wrong.state === "unreadable",
+      JSON.stringify(wrong),
+    );
+  }
+
   // ── atomic: the parent can read the results dir at any instant, including the one in
   //    which a child is mid-write. The file it reads is therefore either the whole old
   //    outcome or the whole new one — never half of either (constraint 3) ──

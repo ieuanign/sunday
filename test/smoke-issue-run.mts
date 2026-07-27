@@ -58,6 +58,8 @@ interface Scenario {
   /** The base does not resolve — a blocker's branch deleted between admission and the
    *  run. */
   resolveRefError?: string;
+  /** This run is #39's one retry, carrying what the previous attempt died on. */
+  retryError?: string;
 }
 
 /** A real IssueModule over the real Logger, with the three world-reaching services stood
@@ -172,6 +174,7 @@ function harness(s: Scenario = {}) {
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
     ...(s.resume ? { resume: s.resume } : {}),
+    ...(s.retryError ? { retryError: s.retryError } : {}),
   };
 
   const module = new IssueModule({ agent, github, git, log: new Logger(dests).child("issue") });
@@ -325,6 +328,20 @@ function harness(s: Scenario = {}) {
   );
   ok("fail: the work item is recorded failed, PR or no PR", outcome.status === "failed", JSON.stringify(outcome));
   ok("fail: the outcome carries the agent's own words", outcome.summary.includes("Could not make the integration test pass."), outcome.summary);
+  ok(
+    "fail: it says the AGENT reported this — a typed fact (#39), because the summary around it is Sunday's own prose",
+    outcome.agentFailed === true,
+    JSON.stringify(outcome),
+  );
+}
+{
+  const h = harness({ result: { signal: "draft", description: "Works, but the migration wants eyes." } });
+  const outcome = await h.run();
+  ok(
+    "draft: a run that SHIPPED carries no agent-reported flag — nothing failed for anyone to classify",
+    outcome.agentFailed === undefined,
+    JSON.stringify(outcome),
+  );
 }
 
 // ── an agent that committed nothing: say so, ship nothing, and do not read as a crash ──
@@ -336,6 +353,11 @@ function harness(s: Scenario = {}) {
   ok("nothing to ship: no PR is opened", h.created.length === 0, String(h.created.length));
   ok("nothing to ship: the work item fails rather than quietly claiming success", outcome.status === "failed", JSON.stringify(outcome));
   ok("nothing to ship: the outcome says WHY", outcome.summary.includes("no commits"), outcome.summary);
+  ok(
+    "nothing to ship: the agent RAN and this is its own verdict, so it is flagged as one (#39) — not retried as an unknown failure",
+    outcome.agentFailed === true,
+    JSON.stringify(outcome),
+  );
   ok(
     "nothing to ship: counted against the freshly-fetched remote ref, not a stale local one",
     h.counted.length === 1 && h.counted[0] === "origin/main..feat/57",
@@ -451,6 +473,39 @@ function harness(s: Scenario = {}) {
   ok("fresh: a fresh run touches no label at all", h.labelsRemoved.length === 0 && h.labelsAdded.length === 0, h.trace.join(" → "));
 }
 
+// ── the one retry (#39): this run is the second attempt at an item that failed once, and
+//    the error it died on goes to the agent. That error is the ONLY thing this run knows
+//    that the last one did not — without it the retry is the same run again on fresh quota ──
+{
+  const died = "TypeError: Cannot read properties of undefined (reading 'invoice')";
+  const h = harness({ retryError: died });
+  const outcome = await h.run();
+  const prompt = h.requests[0]?.prompt ?? "";
+
+  ok("retry: the previous run's error is in the prompt the agent is handed", prompt.includes(died), prompt);
+  ok(
+    "retry: and it is marked as the last attempt's, not as part of the issue — an unlabelled error reads as something the human wrote",
+    prompt.includes("previous"),
+    prompt,
+  );
+  ok(
+    "retry: the baseline and the issue are still there — a retry is a FRESH run with one extra fact, not a resume",
+    prompt.includes("Work acme/finance issue #57") && prompt.includes(TITLE) && prompt.includes(`<${RESULT_TAG}>`),
+    prompt,
+  );
+  ok("retry: it resumes no session — the run that failed is gone", h.requests[0]?.resumeSession === undefined, String(h.requests[0]?.resumeSession));
+  ok("retry: and nothing else about the run changes — it ships its PR like any other", outcome.status === "done" && h.created.length === 1, JSON.stringify(outcome));
+}
+{
+  const h = harness();
+  await h.run();
+  ok(
+    "fresh: a run that is nobody's retry says nothing about a previous attempt",
+    h.requests[0]?.prompt.includes("previous") === false,
+    h.requests[0]?.prompt ?? "",
+  );
+}
+
 // ── an agent that blows up is one failed work item, never a thrown run ──
 {
   const h = harness({ agentError: "Claude Code exited 1: credit balance is too low" });
@@ -461,6 +516,11 @@ function harness(s: Scenario = {}) {
     "agent failure: carrying the agent's own message, which is what #39 will classify on",
     outcome.summary.includes("credit balance is too low"),
     outcome.summary,
+  );
+  ok(
+    "agent failure: and NOT flagged as the agent's own verdict — this text is the provider's, and #39 classifies it",
+    outcome.agentFailed === undefined,
+    JSON.stringify(outcome),
   );
   ok("agent failure: nothing is pushed and no PR is opened", h.pushed.length === 0 && h.created.length === 0, h.trace.join(" → "));
   ok("agent failure: the child still posts no comment — the parent's outcome milestone is the one report", h.comments.length === 0, String(h.comments.length));

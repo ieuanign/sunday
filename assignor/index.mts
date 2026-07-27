@@ -9,9 +9,12 @@ import type { Job } from "#issue/run.mts";
 import { readLock, releaseLock } from "#lib/lock.mts";
 import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
 import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
-import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
+import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import { resolveBase, type BaseDecision } from "./dag.mts";
+// Type-only in BOTH directions (`assignor/failure.mts` names `WorkItemRef` the same way),
+// so neither module reaches the other's runtime import graph.
+import type { FailurePolicy } from "./failure.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 
@@ -83,6 +86,11 @@ export interface AssignorDeps {
   state: StateStore;
   fork: ForkWorkItem;
   paths: Paths;
+  /** What a failed work item MEANS and what is done about it (#39). Injected rather than
+   *  constructed for the same reason everything else here is — and because the policy
+   *  reaches back into this object for the retry, so one of the two has to be built
+   *  first. */
+  failure: FailurePolicy;
 }
 
 /** `issues` actions that should (re)consider an issue. NOT `unlabeled`/`edited`: those
@@ -203,6 +211,7 @@ export class Assignor {
   private readonly state: StateStore;
   private readonly fork: ForkWorkItem;
   private readonly paths: Paths;
+  private readonly failure: FailurePolicy;
   /** Items waiting on a blocker, by work-item key. IN MEMORY ONLY (constraint 6):
    *  GitHub is the truth and #35's reconcile hands every open issue back to admission,
    *  so a restart rebuilds this map from the world rather than from a file that could
@@ -217,6 +226,7 @@ export class Assignor {
     this.state = deps.state;
     this.fork = deps.fork;
     this.paths = deps.paths;
+    this.failure = deps.failure;
   }
 
   /** Route one delivery. EVERY one leaves a line behind, including the event types this
@@ -276,6 +286,16 @@ export class Assignor {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);
       return;
     }
+    // The repo's environment is broken, so an agent started here would die on the same
+    // create failure this repo was stopped for — on a busy repo, once per item, until
+    // somebody notices (#39). In memory and ahead of the network read for the same reason
+    // every guard above it is: a whole backlog re-derived into a stopped repo must not pay
+    // a `gh` round-trip each to be told nothing can run yet. The policy's recheck clears
+    // this by itself and re-derives the repo, so nothing here has to be remembered.
+    if (this.failure.isStopped(repo)) {
+      this.log.info(`· skip ${repo}#${number} — ${repo} is stopped until its sandbox image builds again`);
+      return;
+    }
     // Constraint 14: a work-item key and the path segments built from it come from the
     // CONFIGURED repo name (admission is the exact match that proved it) and a number
     // that IS one — never from a raw payload string.
@@ -284,10 +304,20 @@ export class Assignor {
       return;
     }
     const item: WorkItemRef = { key: `${repo}#${number}`, repo, issue: number };
+    const prior = this.state.get(item.key);
+    // A quarantined item is the one state a DELIVERY can lift (#39): it failed twice, and
+    // a human takes the `quarantined` label off to hand it back. The label's absence IS the
+    // release signal — `labeled` and reconcile are the only two ways a label change reaches
+    // admission, and both hand over the issue's CURRENT labels, so this one guard serves
+    // the live path and the re-derive alike. Everything below then runs as it does for any
+    // other admission, which is what gives the released item its retry budget back.
+    if (prior?.status === "quarantined" && labels.includes(QUARANTINE_LABEL)) {
+      this.log.info(`· skip ${item.key} — state=quarantined (remove the \`${QUARANTINE_LABEL}\` label to hand it back)`);
+      return;
+    }
     // A `failed` item is retried when a human re-labels it; anything else is already
     // somewhere in its life and must not be started again.
-    const prior = this.state.get(item.key);
-    if (prior && prior.status !== "failed") {
+    if (prior && prior.status !== "failed" && prior.status !== "quarantined") {
       this.log.info(`· skip ${item.key} — state=${prior.status}`);
       return;
     }
@@ -432,10 +462,56 @@ export class Assignor {
     });
   }
 
+  /** Start a work item AGAIN, after a failure the policy decided is worth one more run
+   *  (#39). Shaped like `considerReply`'s tail and for the same reasons: claim, write
+   *  `in-flight` carrying what the item already knows, enqueue. Nothing is re-derived —
+   *  a retry re-runs on the base the item was ADMITTED on, because re-asking GitHub on a
+   *  failure path buys an answer #38's before-work precondition re-asserts anyway.
+   *
+   *  The claim and the durable write happen NOW and the enqueue on the next turn. The
+   *  policy is reached from inside the run being applied, and the scheduler still counts
+   *  that key as in-flight until this run's promise settles — an enqueue here would be
+   *  deduped away as "already queued", and the retry would silently never happen. Claiming
+   *  synchronously is what closes the window the deferral opens: `settle` has just handed
+   *  the claim back, and a delivery landing in between would otherwise start a second run
+   *  on the same item. */
+  private restart(item: WorkItemRef, retryError?: string): void {
+    const cfg = this.repos[item.repo];
+    // The table can lose a repo between the run and its failure (a human edits
+    // `config/repos.json`); a retry with no config has nothing to run against.
+    if (!cfg) {
+      this.log.info(`· skip ${item.key} — ${item.repo} not in config/repos.json`);
+      return;
+    }
+    const prior = this.state.get(item.key);
+    const base = prior?.base ?? "main";
+    this.github.claim(item.repo, item.issue);
+    // The whole record is replaced (constraint 12), so the fork point and the SPENT RETRY
+    // are written back deliberately: without the retry the ladder never reaches the
+    // quarantine and this item retries for as long as anything keeps failing it. No
+    // session: a retry is a fresh run with the error in its prompt, not a resume.
+    this.state.set(item.key, { status: "in-flight", base, forkPoint: prior?.forkPoint, retried: prior?.retried });
+    setTimeout(
+      () =>
+        this.scheduler.enqueue({
+          key: item.key,
+          branch: `feat/${item.issue}`,
+          run: () => this.run(item, cfg, base, undefined, retryError),
+        }),
+      0,
+    );
+  }
+
   /** One work item, from the fork to its applied outcome. Handed to the scheduler, and
    *  it settles when the CHILD exits — so the cap and the branch lock hold for the
    *  child's whole life rather than just for the fork call. */
-  private async run(item: WorkItemRef, cfg: RepoConfig, base: string, resume?: Job["resume"]): Promise<void> {
+  private async run(
+    item: WorkItemRef,
+    cfg: RepoConfig,
+    base: string,
+    resume?: Job["resume"],
+    retryError?: string,
+  ): Promise<void> {
     const job: Job = {
       key: item.key,
       repo: item.repo,
@@ -449,6 +525,7 @@ export class Assignor {
       runLogPath: this.paths.runLogPath(item.repo, String(item.issue)),
       eventLogPath: this.paths.eventLogPath,
       resume,
+      retryError,
     };
     // Milestone 1 of exactly two (constraint 12) — every one posts a comment on the
     // issue, so a third is thread spam.
@@ -566,6 +643,11 @@ export class Assignor {
       sessionId: outcome.sessionId,
       base: prior?.base,
       forkPoint: outcome.forkPoint ?? prior?.forkPoint,
+      // Carried the same way, and for the sharpest version of the same reason (#39
+      // constraint 8): this is the record the retry ladder reads. Dropped here, every
+      // failure looks like the item's first, and an item that cannot be run successfully
+      // retries on real quota for as long as anything keeps re-admitting it.
+      retried: prior?.retried,
     });
     // Milestone 2 of exactly two (constraint 12). A gate is neither tick nor cross — it
     // asks the human something, and rendering it as a failure tells them work broke when
@@ -575,6 +657,26 @@ export class Assignor {
       target: item.issue,
     });
     this.settle(item);
+    // Every failed work item, live or swept up by the next boot, reaches the policy HERE
+    // and nowhere else (#39 constraint 1): this is the one sink both paths already share,
+    // so there is no second reading of what a failure means that could drift from this
+    // one. AFTER `settle`, deliberately — settle hands the claim back, and the retry the
+    // policy may start takes it again.
+    // The text handed over is the child's own summary (a provider's message, a tool's
+    // error, the parent's dead-child line) and NEVER prose Sunday composed: "the agent ran
+    // and reported this itself" travels as the typed flag beside it (constraint 3).
+    if (outcome.status === "failed") {
+      this.failure.failed({
+        text: outcome.summary,
+        repo: item.repo,
+        item,
+        agentFailed: outcome.agentFailed,
+        // The one way a work item is started again after a failure (constraint 10). Handed
+        // over rather than reached for: the policy decides WHETHER there is another run in
+        // this item, and every (re)start still goes through a claim.
+        retry: (retryError) => this.restart(item, retryError),
+      });
+    }
   }
 
   /** The tail of an apply: the result file, the lock, then the claim. Its own method

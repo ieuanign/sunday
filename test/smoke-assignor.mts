@@ -19,6 +19,8 @@ import {
   type ForkWorkItem,
   type Paths,
 } from "../assignor/index.mts";
+import { FailurePolicy } from "../assignor/failure.mts";
+import { PauseStore } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
 import type { Job } from "../issue/run.mts";
@@ -91,6 +93,8 @@ function harness(reads: Partial<GitHub> = {}) {
 
   const claimed: string[] = [];
   const released: string[] = [];
+  /** What the failure policy would mark on the issue (#39) — its own seam, one write wide. */
+  const labelled: string[] = [];
   const github: GitHub = {
     claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
     release: (repo, issue) => void released.push(`${repo}#${issue}`),
@@ -135,17 +139,28 @@ function harness(reads: Partial<GitHub> = {}) {
 
   const logger = new Logger(dests);
   const state = new StateStore(resolve(caseDir, "state.json"));
+  const scheduler = createScheduler(2, logger.child("scheduler"));
   const assignor = new Assignor({
     repos: TABLE,
     github,
     log: logger.child("assignor"),
-    scheduler: createScheduler(2, logger.child("scheduler")),
+    scheduler,
     state,
     fork,
     paths,
+    // The real policy, over this case's own pause file and state: what it DOES about each
+    // scope is `test/smoke-failure.mts`'s subject, and what matters here is that no case in
+    // this file reaches the real `var/pause.json` or writes a label to a real repo.
+    failure: new FailurePolicy({
+      pause: new PauseStore(resolve(caseDir, "pause.json")),
+      scheduler,
+      state,
+      github: { addLabels: async (repo, issue, names) => void labelled.push(`${repo}#${issue} +${names.join(",")}`) },
+      log: logger.child("failure"),
+    }),
   });
 
-  return { assignor, state, lines, comments, claimed, released, forked, finish, paths };
+  return { assignor, state, lines, comments, claimed, released, labelled, forked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
@@ -568,22 +583,118 @@ try {
 
     // A resumed child that dies leaves no outcome AT ALL, and a resume forks from
     // nothing — so there is no second fork point to record and the first one stands.
+    // Through the failure AND through the retry the policy starts on it (#39): both
+    // replace the whole record, so both have to carry it.
     await h.finish(KEY, undefined, { code: 1, signal: null });
     ok(
       "fork point: a resumed child that leaves no outcome does not erase it",
-      h.state.get(KEY)?.status === "failed" && h.state.get(KEY)?.forkPoint === FORK_POINT,
+      h.state.get(KEY)?.forkPoint === FORK_POINT,
       JSON.stringify(h.state.get(KEY)),
     );
 
     // …but a FRESH run is a new branch, created wherever the base is now. Yesterday's
     // fork point is not where, and a restack aimed at it would replay commits that are
-    // already in this branch's ancestry.
+    // already in this branch's ancestry. (The retry has to end first — its own failure is
+    // the agent's OWN verdict, which is nobody's to retry again, so the item settles at
+    // `failed` and a human re-labelling it is what starts the next attempt.)
+    await tick();
+    await tick();
+    await h.finish(KEY, {
+      key: KEY,
+      status: "failed",
+      summary: "I could not make this work.",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      agentFailed: true,
+    });
     h.assignor.handle(delivery());
     await tick();
     ok(
       "fork point: a fresh re-admission clears it — the run that starts now has not created its branch yet",
       h.state.get(KEY)?.status === "in-flight" && h.state.get(KEY)?.forkPoint === undefined,
       JSON.stringify(h.state.get(KEY)),
+    );
+  }
+
+  // ── the durable failure state (#39): the one retry an unrecognised failure gets, and
+  //    the quarantine it lands in when that retry fails too. Both live in the state file
+  //    (constraint 7) — an in-memory retry flag hands every restart a fresh agent run on
+  //    real quota, and a quarantine that reads as `failed` is re-admitted by the next
+  //    reconcile, which is the loop this issue exists to stop ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    // What #39's policy leaves behind when it spends the retry: the flag written durably,
+    // and the item restarted carrying it.
+    h.state.set(KEY, { ...h.state.get(KEY)!, retried: true });
+    await h.finish(KEY, { key: KEY, status: "failed", summary: "boom", finishedAt: "2026-07-25T00:00:00.000Z" });
+
+    ok(
+      "retry budget: applying the second failure keeps the retry SPENT — `set` replaces the whole record, and dropping it here is a run that retries forever",
+      h.state.get(KEY)?.retried === true,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    h.assignor.handle(delivery()); // the label is still on, and the quarantine label is not
+    await tick();
+    ok(
+      "retry budget: a fresh admission drops it — an item started again has its retry back, or it quarantines on its first failure ever",
+      h.state.get(KEY)?.status === "in-flight" && h.state.get(KEY)?.retried === undefined,
+      JSON.stringify(h.state.get(KEY)),
+    );
+
+    // …and quarantine is where that ladder ends: a state DISTINCT from `failed`, because a
+    // failed item is exactly what admission and reconcile pick back up. What lifts it is
+    // the LABEL coming off — the one signal both a live `labeled` delivery and a reconcile
+    // carry, since each hands admission the issue's current labels.
+    // A second item, so the guards below are driven on a work item with no child of its
+    // own on it — what is being tested is admission, not the PID lock beneath it.
+    const other = "acme/finance#58";
+    const before = h.forked.length;
+    h.state.set(other, { status: "quarantined", retried: true });
+    h.assignor.handle(delivery({ number: 58, labels: ["sunday", "ready-for-agent", "quarantined"] }));
+    await tick();
+
+    ok(
+      "quarantine: a quarantined item wearing the label is NOT re-admitted, where the same delivery re-admits a failed one",
+      h.forked.length === before && h.state.get(other)?.status === "quarantined",
+      `${h.forked.length} forks, state ${JSON.stringify(h.state.get(other))}`,
+    );
+    ok("quarantine: and the skip says so, naming the label a human takes off to end it", said(h.lines, "state=quarantined") && said(h.lines, "quarantined` label"), JSON.stringify(h.lines.map((l) => l.message)));
+
+    h.assignor.handle(delivery({ number: 58 })); // the human took the label off and re-labelled it
+    await tick();
+    ok(
+      "release: the label gone, the item is admitted like any other — with its retry budget back",
+      h.forked.length === before + 1 && h.state.get(other)?.status === "in-flight" && h.state.get(other)?.retried === undefined,
+      `${h.forked.length} forks, state ${JSON.stringify(h.state.get(other))}`,
+    );
+  }
+
+  // ── the retry (#39): a failed item the policy decides is worth one more run is started
+  //    through the Assignor's own claim-and-enqueue, not around it. A restart that skipped
+  //    the claim would leave an issue that reads as free while an agent is on it ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(KEY, { key: KEY, status: "failed", summary: "something entirely unexpected", finishedAt: "2026-07-25T00:00:00.000Z" });
+    // The enqueue is deferred by a turn: the apply runs INSIDE the run the scheduler still
+    // counts as in-flight, and an enqueue there is deduped away as "already queued".
+    await tick();
+    await tick();
+
+    ok("retry: the item is forked a second time", h.forked.length === 2, JSON.stringify(h.forked.map((j) => j.key)));
+    ok(
+      "retry: claimed exactly as an admission claims — `settle` handed the claim back, and an unclaimed retry reads as a free issue",
+      h.claimed.join(",") === `${KEY},${KEY}`,
+      h.claimed.join(","),
+    );
+    ok("retry: and recorded in-flight, so a parent that comes back up knows someone is on it", h.state.get(KEY)?.status === "in-flight", JSON.stringify(h.state.get(KEY)));
+    ok(
+      "retry: the job is the same shape an admission builds — same config, same paths, on the base the item was admitted on",
+      h.forked[1]?.base === "main" && h.forked[1]?.config.imageName === "sunday-finance" && h.forked[1]?.resultPath === h.paths.resultPath(KEY),
+      JSON.stringify(h.forked[1]),
     );
   }
 
@@ -800,14 +911,22 @@ try {
     await tick();
     await h.finish(key, undefined, { code: 3, signal: null }); // exited, wrote nothing
 
-    ok("dead child: the item is recorded failed rather than left in-flight", h.state.get(key)?.status === "failed", JSON.stringify(h.state.get(key)));
+    ok(
+      "dead child: the item is not left in-flight with a claim nobody will release — it is recorded, and handed its one retry (#39)",
+      h.state.get(key)?.retried === true,
+      JSON.stringify(h.state.get(key)),
+    );
     ok("dead child: the comment carries the exit code — the only thing known about it", h.comments.at(-1)?.message.includes("3") === true, JSON.stringify(h.comments.at(-1)));
     ok("dead child: the claim is released, so a human re-labelling it can retry", h.released.join(",") === key, h.released.join(","));
     ok("dead child: and the lock it died holding is cleared", readLock(h.paths.pidPath(key)) === undefined, JSON.stringify(readLock(h.paths.pidPath(key))));
 
-    h.assignor.handle(delivery());
+    h.assignor.handle(delivery()); // the label is still on the issue; GitHub redelivers
     await tick();
-    ok("dead child: a failed item is retried on a re-label, unlike a finished one", h.forked.length === 2, JSON.stringify(h.forked.map((j) => j.key)));
+    ok(
+      "dead child: the retry is the one run on it — a redelivery while it is in-flight starts nothing beside it",
+      h.forked.length === 2,
+      JSON.stringify(h.forked.map((j) => j.key)),
+    );
   }
 
   // ── a child killed by a signal has no exit code at all, and "code null" tells a human
@@ -833,7 +952,11 @@ try {
     await tick();
     await h.finish(key, undefined, { code: null, signal: null, error: "spawn /nonexistent/node-binary ENOENT" });
 
-    ok("unstarted child: the item is recorded failed rather than left in-flight", h.state.get(key)?.status === "failed", JSON.stringify(h.state.get(key)));
+    ok(
+      "unstarted child: the item is not left in-flight either — recorded, and handed its one retry",
+      h.state.get(key)?.retried === true,
+      JSON.stringify(h.state.get(key)),
+    );
     ok(
       "unstarted child: the comment carries what stopped it, and claims no exit code it never had",
       h.comments.at(-1)?.message.includes("ENOENT") === true && h.comments.at(-1)?.message.includes("null") === false,

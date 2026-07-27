@@ -11,7 +11,9 @@
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { FailurePolicy } from "../assignor/failure.mts";
 import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
+import { PauseStore } from "../assignor/pause.mts";
 import { hasUnansweredSummon, Reconciler } from "../assignor/reconcile.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
@@ -117,7 +119,11 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
 
   const scheduler = createScheduler(10, logger.child("scheduler"));
   const state = new StateStore(resolve(caseDir, "state.json"));
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths });
+  // The real policy over this case's own pause file (#39): re-deriving admits work, and
+  // what a failed one MEANS is `test/smoke-failure.mts`'s subject — what matters here is
+  // that no case in this file can reach the real `var/pause.json`.
+  const failure = new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, state, github, log: logger.child("failure") });
+  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
   const reconciler = new Reconciler({ repos: TABLE, github, assignor, log: logger.child("reconcile") });
 
   /** Everything the queue knows about, running or waiting — a work item that reached the

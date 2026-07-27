@@ -158,7 +158,11 @@ async function run() {
     await tick();
     const failure = h.lines.find((l) => l.message.includes("fork died"));
     ok("failure: a rejected run is reported with what went wrong", failure?.message.includes("boom") === true, JSON.stringify(h.lines.map((l) => l.message)));
-    ok("failure: reported as info — recording the failed item is the apply path's job", failure?.level === "info", JSON.stringify(failure));
+    // Raised from `info` with #39: the apply path now really does classify every failed
+    // outcome and act on its scope, so a rejection that got past it reached NO policy at
+    // all — a work item nobody will retry, quarantine or even count. At `info` that line
+    // is buried in the run log; at `error` it is a durable event and a phone alert.
+    ok("failure: reported at error — a rejection here means the apply path never saw it", failure?.level === "error", JSON.stringify(failure));
     ok("failure: the branch and the slot are released, so the next item runs", h.started.includes("after"), h.started.join(","));
   }
 

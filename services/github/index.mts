@@ -11,6 +11,17 @@ import { sh, shA } from "#lib/sh.mts";
  *  delivery that arrives mid-run is rejected by admission on the strength of it. */
 export const CLAIM_LABEL = "agent-working";
 
+/** The label that says a work item failed twice and has been set aside (#39). It is the
+ *  RELEASE signal as much as the record: admission refuses a quarantined item while this
+ *  is on the issue, and a human takes it off to hand the item back. Seeded by
+ *  `scripts/repo-init.sh` alongside the rest. */
+export const QUARANTINE_LABEL = "quarantined";
+
+/** The label that says the agent RAN and reported the failure itself — its own verdict,
+ *  not something that blew up around it. Nothing retries one: the run happened, and a
+ *  second one would spend a whole agent run re-deciding what it already decided. */
+export const AGENT_FAILED_LABEL = "agent-failed";
+
 /** How many open issues one repo's re-derive reads, ported unchanged from v1. Boot runs
  *  this per routed repo, so it is the ceiling on how long a restart takes to get back to
  *  work — and a repo with more open issues than this has a backlog no restart should be
@@ -113,6 +124,17 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
+/** What the FAILURE POLICY is allowed to do to GitHub: apply a label, and nothing else.
+ *  Its own seam for the same reason `GitHubForwarder` is one — the policy sits on every
+ *  failure path, and a wider seam is a wider set of writes a handled failure could make.
+ *  `Gh` implements it exactly once, as `addLabels`. */
+export interface GitHubLabels {
+  /** Mark the issue: `quarantined` when a work item is set aside, `agent-failed` when the
+   *  agent reported its own defeat. BEST-EFFORT at the call site — durable state is what
+   *  actually stops the item being re-admitted (#39 constraint 9). */
+  addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+}
+
 /** What the forwarder supervisor is allowed to do to GitHub: drop the dev webhook a
  *  hard-killed `gh webhook forward` left behind, and nothing else. Its own seam, as
  *  narrow as it gets — the one method is a DELETE against somebody else's repo, and the
@@ -177,7 +199,7 @@ export interface GitHubRun {
  *  Left out of the smokes on purpose, like `githubDestination()`: it needs the CLI, a
  *  token and the network. What CAN be wrong is WHEN Sunday claims, releases and
  *  re-derives, and the Assignor's and Reconciler's smokes drive that over a substitute. */
-export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder {
+export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLabels {
   claim(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--add-label", CLAIM_LABEL]);
   }
