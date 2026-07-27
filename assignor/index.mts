@@ -14,8 +14,8 @@ import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/
 import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import { resolveBase, type BaseDecision } from "./dag.mts";
-// Type-only in BOTH directions (`assignor/failure.mts` names `WorkItemRef` the same way),
-// so neither module reaches the other's runtime import graph.
+// Type-only: the policy is a shape here (it is injected, constraint 8), so `failure.mts`
+// never reaches this module's runtime import graph.
 import type { FailurePolicy } from "./failure.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
