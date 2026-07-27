@@ -58,6 +58,8 @@ interface Scenario {
   /** The base does not resolve — a blocker's branch deleted between admission and the
    *  run. */
   resolveRefError?: string;
+  /** This run is #39's one retry, carrying what the previous attempt died on. */
+  retryError?: string;
 }
 
 /** A real IssueModule over the real Logger, with the three world-reaching services stood
@@ -172,6 +174,7 @@ function harness(s: Scenario = {}) {
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
     ...(s.resume ? { resume: s.resume } : {}),
+    ...(s.retryError ? { retryError: s.retryError } : {}),
   };
 
   const module = new IssueModule({ agent, github, git, log: new Logger(dests).child("issue") });
@@ -468,6 +471,39 @@ function harness(s: Scenario = {}) {
   const h = harness();
   await h.run();
   ok("fresh: a fresh run touches no label at all", h.labelsRemoved.length === 0 && h.labelsAdded.length === 0, h.trace.join(" → "));
+}
+
+// ── the one retry (#39): this run is the second attempt at an item that failed once, and
+//    the error it died on goes to the agent. That error is the ONLY thing this run knows
+//    that the last one did not — without it the retry is the same run again on fresh quota ──
+{
+  const died = "TypeError: Cannot read properties of undefined (reading 'invoice')";
+  const h = harness({ retryError: died });
+  const outcome = await h.run();
+  const prompt = h.requests[0]?.prompt ?? "";
+
+  ok("retry: the previous run's error is in the prompt the agent is handed", prompt.includes(died), prompt);
+  ok(
+    "retry: and it is marked as the last attempt's, not as part of the issue — an unlabelled error reads as something the human wrote",
+    prompt.includes("previous"),
+    prompt,
+  );
+  ok(
+    "retry: the baseline and the issue are still there — a retry is a FRESH run with one extra fact, not a resume",
+    prompt.includes("Work acme/finance issue #57") && prompt.includes(TITLE) && prompt.includes(`<${RESULT_TAG}>`),
+    prompt,
+  );
+  ok("retry: it resumes no session — the run that failed is gone", h.requests[0]?.resumeSession === undefined, String(h.requests[0]?.resumeSession));
+  ok("retry: and nothing else about the run changes — it ships its PR like any other", outcome.status === "done" && h.created.length === 1, JSON.stringify(outcome));
+}
+{
+  const h = harness();
+  await h.run();
+  ok(
+    "fresh: a run that is nobody's retry says nothing about a previous attempt",
+    h.requests[0]?.prompt.includes("previous") === false,
+    h.requests[0]?.prompt ?? "",
+  );
 }
 
 // ── an agent that blows up is one failed work item, never a thrown run ──

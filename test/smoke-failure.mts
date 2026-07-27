@@ -25,7 +25,7 @@ import { StateStore } from "../assignor/state.mts";
 import type { Job } from "../issue/run.mts";
 import { acquireLock } from "../lib/lock.mts";
 import { writeOutcome, type Outcome } from "../lib/outcome.mts";
-import type { GitHub } from "../services/github/index.mts";
+import type { GitHub, GitHubLabels } from "../services/github/index.mts";
 import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
 
 let fails = 0;
@@ -220,7 +220,7 @@ const slug = (key: string) => key.replace(/[^A-Za-z0-9._-]/g, "-");
  *  Assignor that routes failures INTO it — the two things that reach the world (GitHub,
  *  the fork) substituted, and every path pointed into this case's own dir so the real
  *  `var/` is never touched. */
-function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
+function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?: boolean } = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   /** Every line, at any level — the run log is the one destination every level routes to. */
   const lines: LogLine[] = [];
@@ -237,14 +237,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
 
   const scheduler = createScheduler(2, logger.child("scheduler"));
   const pause = over.pause ?? new PauseStore(resolve(caseDir, "pause.json"));
-  const policy = new FailurePolicy({
-    pause,
-    scheduler,
-    log: logger.child("failure"),
-    // Constraint 11: the timing constants are injected, so the suite drives a REAL timer
-    // at millisecond scale instead of a mocked clock.
-    resumeGraceMs: over.resumeGraceMs ?? 5,
-  });
+  const state = new StateStore(resolve(caseDir, "state.json"));
 
   const claimed: string[] = [];
   const released: string[] = [];
@@ -256,6 +249,18 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+  };
+
+  /** The policy's own seam, narrower than the Assignor's: one label write, which is a
+   *  real edit to a real repo. `labelFails` is the repo that was never seeded with the
+   *  label — `gh` answers "not found", and durable state has to carry the quarantine
+   *  anyway. */
+  const labelled: string[] = [];
+  const labels: GitHubLabels = {
+    addLabels: async (repo, issue, names) => {
+      if (over.labelFails) throw new Error(`gh: '${names.join(",")}' not found`);
+      labelled.push(`${repo}#${issue} +${names.join(",")}`);
+    },
   };
 
   const paths: Paths = {
@@ -275,7 +280,17 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
     return new Promise((settle) => exits.set(job.key, settle));
   };
 
-  const state = new StateStore(resolve(caseDir, "state.json"));
+  const policy = new FailurePolicy({
+    pause,
+    scheduler,
+    state,
+    github: labels,
+    log: logger.child("failure"),
+    // Constraint 11: the timing constants are injected, so the suite drives a REAL timer
+    // at millisecond scale instead of a mocked clock.
+    resumeGraceMs: over.resumeGraceMs ?? 5,
+  });
+
   const assignor = new Assignor({
     repos: TABLE,
     github,
@@ -311,7 +326,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
   };
 
   const started = () => forked.map((j) => j.key);
-  return { policy, scheduler, pause, state, lines, comments, claimed, released, admit, finish, started };
+  return { policy, assignor, scheduler, pause, state, lines, comments, claimed, released, labelled, forked, admit, finish, started };
 }
 
 /** The item every act case below is about, and a second one queued alongside it: whether
@@ -465,6 +480,195 @@ try {
     await h.finish(58, { status: "done", summary: "shipped it" });
     ok("record: and runs all the way to done", h.state.get("acme/finance#58")?.status === "done", JSON.stringify(h.state.all()));
     ok("record: a successful outcome is never classified", !h.lines.some((l) => l.message.includes("shipped it") && l.module === "failure"));
+  }
+
+  // ── the item ladder, first rung: an unrecognised failure is neither a halt nor a dead
+  //    item. It is RESTARTED once, carrying its own error into the prompt — the one thing
+  //    a fresh run would not know — and the retry is spent DURABLY, because a restart that
+  //    forgot it hands every failed item another agent run on real quota (constraint 7) ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.admit(58);
+    const before = h.comments.length;
+    await h.finish(57, { status: "failed", summary: "something entirely unexpected happened" });
+
+    ok(
+      "unknown: the item is started again — once, and through the Assignor's own claim-and-enqueue",
+      await until(() => h.started().filter((k) => k === ITEM.key).length === 2),
+      h.started().join(","),
+    );
+    const retry = h.forked.at(-1);
+    ok(
+      "unknown: the retry hands the agent the error the last run died on, which is the whole point of retrying it",
+      retry?.retryError?.includes("something entirely unexpected") === true,
+      JSON.stringify(retry?.retryError),
+    );
+    ok("unknown: it is claimed again, like any other start — an unclaimed run looks free to the next delivery", h.claimed.filter((k) => k === ITEM.key).length === 2, h.claimed.join(","));
+    ok("unknown: on the base the item was admitted on, re-asserted rather than re-derived", retry?.base === "main", JSON.stringify(retry?.base));
+    ok(
+      "unknown: the retry is spent durably, so a restart cannot hand this item a second one",
+      h.state.get(ITEM.key)?.status === "in-flight" && h.state.get(ITEM.key)?.retried === true,
+      JSON.stringify(h.state.get(ITEM.key)),
+    );
+    ok(
+      "unknown: the raw error reaches the issue exactly once — the outcome milestone carries it, and the policy says what Sunday is DOING (constraint 6)",
+      h.comments.filter((c) => c.message.includes("something entirely unexpected")).length === 1,
+      JSON.stringify(h.comments.slice(before).map((c) => c.message)),
+    );
+    ok(
+      "unknown: and it says that at info — a retry is the mechanism working, not something a human has to act on",
+      h.lines.find((l) => l.module === "failure" && l.message.includes("retry"))?.level === "info",
+      JSON.stringify(h.lines.filter((l) => l.module === "failure").map((l) => `${l.level} ${l.message}`)),
+    );
+    ok("unknown: and the work item queued alongside it is untouched", h.started().includes("acme/finance#58"), h.started().join(","));
+  }
+
+  // ── …and the rung after it: the retry failed too, so the item is SET ASIDE. Quarantine
+  //    is durable and distinct from `failed` (constraint 7) — a failed item is exactly what
+  //    the next reconcile re-admits, which is the loop this issue exists to stop — and it
+  //    is the one thing on this ladder a human is told about, because only a human can end
+  //    it ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.admit(58);
+    await h.finish(57, { status: "failed", summary: "something entirely unexpected happened" });
+    await until(() => h.started().filter((k) => k === ITEM.key).length === 2);
+    await h.finish(57, { status: "failed", summary: "the retry died the same way" });
+
+    ok("quarantine: the item is set aside, in a state reconcile does NOT pick back up", h.state.get(ITEM.key)?.status === "quarantined", JSON.stringify(h.state.get(ITEM.key)));
+    ok(
+      "quarantine: the label goes on, which is what a human takes off to hand the item back",
+      h.labelled.join(",").includes("acme/finance#57 +quarantined"),
+      h.labelled.join(","),
+    );
+    const said = h.lines.find((l) => l.module === "failure" && l.message.includes("quarantine"));
+    ok("quarantine: reported at error — the P1 notification ADR-0002 asks for, which is what reaches a phone", said?.level === "error", JSON.stringify(said));
+    ok(
+      "quarantine: addressed at the issue, so the release instruction lands where the human is reading",
+      said?.context.repo === "acme/finance" && said.context.target === 57,
+      JSON.stringify(said?.context),
+    );
+    ok("quarantine: and it says how to release it — a set-aside item with no instructions is a dead one", said?.message.includes("quarantined") === true, JSON.stringify(said?.message));
+    ok("quarantine: the item is not started a third time — the retry is one, and it is spent", h.started().filter((k) => k === ITEM.key).length === 2, h.started().join(","));
+
+    // The whole of ADR-0002 in one assertion: the work item beside this one does not just
+    // survive the quarantine, it finishes.
+    await h.finish(58, { status: "done", summary: "shipped it" });
+    ok(
+      "quarantine: and the work item beside it runs all the way to done — nothing else is affected",
+      !h.scheduler.isPaused() && h.state.get("acme/finance#58")?.status === "done",
+      JSON.stringify(h.state.all()),
+    );
+  }
+
+  // ── the label is a SIGNAL and durable state is the guard, which is what makes the label
+  //    write best-effort (constraint 9). The likely failure is a repo onboarded before this
+  //    label existed — and a policy that threw there would leave the item unquarantined, on
+  //    a path reached from a timer with nobody above it (ADR-0001) ──
+  {
+    const h = harness({ labelFails: true });
+    await h.admit(57);
+    await h.finish(57, { status: "failed", summary: "something entirely unexpected happened" });
+    await until(() => h.started().filter((k) => k === ITEM.key).length === 2);
+    await h.finish(57, { status: "failed", summary: "the retry died the same way" });
+    await tick(); // the label write is a promise; its failure lands on the next turn
+
+    ok("label failure: the quarantine is recorded anyway — durable state is what stops the item being re-admitted", h.state.get(ITEM.key)?.status === "quarantined", JSON.stringify(h.state.get(ITEM.key)));
+    const failed = h.lines.find((l) => l.message.includes("could not be labelled"));
+    ok("label failure: and the write that failed is said out loud, naming the one-line fix", failed?.message.includes("gh label create quarantined") === true, JSON.stringify(failed?.message));
+    ok(
+      "label failure: to whoever can fix the repo, and NOT to the issue — that thread has had its one comment",
+      failed?.level === "error" && failed.context.repo === "acme/finance" && failed.context.target === undefined,
+      JSON.stringify(failed),
+    );
+    ok("label failure: and nothing stops — a failure handled badly must not become a halt", !h.scheduler.isPaused(), JSON.stringify(h.pause.read()));
+  }
+
+  // ── …and the release. The signal is the LABEL's absence, because `labeled` and reconcile
+  //    are the only two ways a label change reaches admission — and both hand it the
+  //    issue's CURRENT labels, so one guard serves the live delivery and the re-derive
+  //    alike. Released, the item starts with its retry budget back: an item that kept a
+  //    spent retry would quarantine on its first failure after every release ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.finish(57, { status: "failed", summary: "something entirely unexpected happened" });
+    await until(() => h.started().filter((k) => k === ITEM.key).length === 2);
+    await h.finish(57, { status: "failed", summary: "the retry died the same way" });
+    const held = h.started().length;
+
+    // The trigger label landing again — a human re-labelling an issue they have not
+    // actually released. GitHub redelivers these for as long as the label is on.
+    h.assignor.handle({ event: "issues", action: "labeled", repo: ITEM.repo, number: 57, labels: ["sunday", "quarantined"], onPullRequest: false });
+    await tick();
+    ok("release: a delivery while the label is on does not start it again", h.started().length === held, h.started().join(","));
+
+    // The same issue as the next boot's reconcile hands it over — same seam, same labels.
+    await h.assignor.considerIssue({ repo: ITEM.repo, number: 57, labels: ["sunday", "quarantined"] });
+    ok("release: and neither does a reconcile — one guard, so the live and recovery paths cannot drift", h.started().length === held, h.started().join(","));
+    ok("release: the item is still set aside while it is held", h.state.get(ITEM.key)?.status === "quarantined", JSON.stringify(h.state.get(ITEM.key)));
+
+    // A human takes the label off and re-labels it.
+    await h.assignor.considerIssue({ repo: ITEM.repo, number: 57, labels: ["sunday"] });
+    ok("release: the label gone, the item is admitted again", h.started().length === held + 1, h.started().join(","));
+    ok(
+      "release: with its retry budget back — a released item that kept a spent retry quarantines on its first failure ever",
+      h.state.get(ITEM.key)?.status === "in-flight" && h.state.get(ITEM.key)?.retried === undefined,
+      JSON.stringify(h.state.get(ITEM.key)),
+    );
+  }
+
+  // ── the agent RAN and reported its own defeat. There is nothing to retry — the run
+  //    happened, and a second one spends real quota re-deciding what it already decided —
+  //    and nothing to quarantine either: the issue is the problem, and a human re-labelling
+  //    it is what starts the next attempt ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.finish(57, {
+      status: "failed",
+      summary: "Could not make the integration test pass.\n\nsignal fail, but no commits — nothing to ship.",
+      agentFailed: true,
+    });
+    await tick();
+
+    ok("run-failed: the issue is labelled agent-failed, which is what a human triages on", h.labelled.join(",").includes("acme/finance#57 +agent-failed"), h.labelled.join(","));
+    ok("run-failed: it is NOT started again — the agent ran, and its verdict is not a blip", h.started().filter((k) => k === ITEM.key).length === 1, h.started().join(","));
+    ok(
+      "run-failed: nor set aside — it stays `failed`, which is the state a re-label picks back up",
+      h.state.get(ITEM.key)?.status === "failed",
+      JSON.stringify(h.state.get(ITEM.key)),
+    );
+    ok("run-failed: and the retry budget is left unspent, because nothing spent it", h.state.get(ITEM.key)?.retried === undefined, JSON.stringify(h.state.get(ITEM.key)));
+    ok("run-failed: the agent's own words cost the issue no second comment — the outcome milestone carried them", h.comments.filter((c) => c.message.includes("integration test")).length === 1, JSON.stringify(h.comments.map((c) => c.message)));
+  }
+
+  // ── a blip gets the same single retry, and ends differently: `failed` is where a
+  //    transient failure stops, because the next reconcile re-admits one and somebody
+  //    else's 502 is not a reason to set a work item aside for a human. (Named ceiling: one
+  //    retry, not a bounded backoff loop — if that proves too few, the upgrade is a count
+  //    instead of the boolean.) ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.finish(57, { status: "failed", summary: "429 Too Many Requests — retry-after: 30" });
+    ok("transient: the item is started again", await until(() => h.started().filter((k) => k === ITEM.key).length === 2), h.started().join(","));
+    ok(
+      "transient: with NO error handed to the agent — the blip was not its fault, and somebody else's 502 in the prompt is noise",
+      h.forked.at(-1)?.retryError === undefined,
+      JSON.stringify(h.forked.at(-1)?.retryError),
+    );
+
+    await h.finish(57, { status: "failed", summary: "gh: Server Error (HTTP 502)" });
+    ok(
+      "transient: the second failure stops at `failed` — the next reconcile re-admits it, where a quarantine never would",
+      h.state.get(ITEM.key)?.status === "failed",
+      JSON.stringify(h.state.get(ITEM.key)),
+    );
+    ok("transient: and nothing is labelled — a blip is not something to set aside for a human", h.labelled.length === 0, h.labelled.join(","));
+    ok("transient: nor started a third time", h.started().filter((k) => k === ITEM.key).length === 2, h.started().join(","));
   }
 
   // ── an auth halt armed WHILE a quota window is running outranks it: the quota's timer

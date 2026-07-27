@@ -129,7 +129,15 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
   const pause = new PauseStore(pausePath);
   // The real policy over this case's own pause store — the same one boot re-arms from, so
   // nothing here can arm a halt in one place and read it from another (#39).
-  const failure = new FailurePolicy({ pause, scheduler, log: logger.child("failure") });
+  const failure = new FailurePolicy({
+    pause,
+    scheduler,
+    state,
+    // Boot writes no label of its own; the policy's seam is stubbed so nothing here can
+    // reach a real repo.
+    github: { addLabels: async () => {} },
+    log: logger.child("failure"),
+  });
   const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
 
   /** What the build saw when it ran — above all whether the queue was HELD, which is the
@@ -393,9 +401,12 @@ try {
     acquireLock(h.paths.pidPath(dead), spawnSync(process.execPath, ["-e", ""]).pid!); // a pid that has certainly exited
     await h.boot.run();
 
-    ok("sweep: an in-flight item whose child left nothing behind is recorded failed, not left in-flight", h.state.get(gone)?.status === "failed", JSON.stringify(h.state.get(gone)));
+    // Recorded through the same `record` the live path uses, which is what hands it to the
+    // failure policy (#39): the spent retry is the mark that it got there, and the item is
+    // started again rather than left in-flight for nobody.
+    ok("sweep: an in-flight item whose child left nothing behind is recorded and picked back up, not left in-flight", h.state.get(gone)?.retried === true, JSON.stringify(h.state.get(gone)));
     ok("sweep: and its claim is released, so a human re-labelling it gets a retry", h.released.includes(gone), h.released.join(","));
-    ok("sweep: a dead lock is not a live child — that item is settled too", h.state.get(dead)?.status === "failed" && h.released.includes(dead), `${JSON.stringify(h.state.get(dead))} ${h.released.join(",")}`);
+    ok("sweep: a dead lock is not a live child — that item is settled too", h.state.get(dead)?.retried === true && h.released.includes(dead), `${JSON.stringify(h.state.get(dead))} ${h.released.join(",")}`);
     ok("sweep: and the lock the dead child never released is cleared", readLock(h.paths.pidPath(dead)) === undefined, JSON.stringify(readLock(h.paths.pidPath(dead))));
     ok("sweep: the comment says what is actually known — that the work item ended with nothing to show", h.comments.every((l) => l.message.includes("no outcome")), JSON.stringify(h.comments.map((l) => l.message)));
     ok("sweep: an item that is not in-flight is nobody's to settle — it was applied already", h.state.get(settled)?.status === "done" && !h.released.includes(settled), `${JSON.stringify(h.state.get(settled))} ${h.released.join(",")}`);
@@ -412,7 +423,7 @@ try {
     h.state.set(second, { status: "in-flight" });
     await h.boot.run();
 
-    ok("sweep: an item that fails on the way out does not strand the ones behind it", h.state.get(second)?.status === "failed" && h.released.includes(second), `${JSON.stringify(h.state.get(second))} ${h.released.join(",")}`);
+    ok("sweep: an item that fails on the way out does not strand the ones behind it", h.state.get(second)?.retried === true && h.released.includes(second), `${JSON.stringify(h.state.get(second))} ${h.released.join(",")}`);
     ok("sweep: and the one that failed is named, since it is a work item still holding its claim", said(h.lines, first) && said(h.lines, "502"), JSON.stringify(h.lines.map((l) => l.message)));
     ok("sweep: boot still finishes — the queue is released, not stranded held", !h.scheduler.isPaused(), JSON.stringify(h.scheduler.snapshot()));
   }

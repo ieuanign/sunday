@@ -64,10 +64,32 @@ const RESUME_REMINDER =
 
 /** A fresh run's prompt: the repo's baseline with its placeholders filled, then the issue
  *  itself. The baseline TEXT is passed in — the run module reads no files (the entry
- *  point resolves every path it is handed). */
-export function freshPrompt(baseline: string, repo: string, issue: number, title: string, body: string): string {
+ *  point resolves every path it is handed).
+ *
+ *  `retryError` is present on #39's ONE retry: what the previous attempt died on. It goes
+ *  in LAST, and fenced and labelled as the previous run's — unmarked it reads as part of
+ *  the issue the human wrote, and an agent that treats a stack trace as a requirement
+ *  spends its run on the wrong problem. */
+export function freshPrompt(
+  baseline: string,
+  repo: string,
+  issue: number,
+  title: string,
+  body: string,
+  retryError?: string,
+): string {
   const resolved = baseline.replaceAll("{{REPO}}", repo).replaceAll("{{ISSUE}}", String(issue));
-  return `${resolved}\n\n---\n\n# Issue #${issue}: ${title}\n\n${body}\n`;
+  const prompt = `${resolved}\n\n---\n\n# Issue #${issue}: ${title}\n\n${body}\n`;
+  if (!retryError) return prompt;
+  return (
+    `${prompt}\n---\n\n# The previous attempt at this issue failed\n\n` +
+    `Sunday already ran this issue once and it ended with the error below. It is the ` +
+    `previous run's failure, not part of the issue: work out what it means for the work, ` +
+    `and do not treat it as a requirement.\n\n` +
+    "```\n" +
+    `${retryError}\n` +
+    "```\n"
+  );
 }
 
 /** A gate resume's prompt: the human's answer, and the reminder that carries the tag.

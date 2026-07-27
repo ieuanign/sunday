@@ -23,6 +23,8 @@
 
 import type { PauseState, PauseStore } from "./pause.mts";
 import type { Scheduler } from "./scheduler.mts";
+import type { StateStore } from "./state.mts";
+import { AGENT_FAILED_LABEL, QUARANTINE_LABEL, type GitHubLabels } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 // Type-only in BOTH directions (`assignor/index.mts` imports this class the same way), so
 // nothing of this pair survives into the runtime import graph.
@@ -226,6 +228,19 @@ export function classify(text: string, options: ClassifyOptions = {}): Failure {
  *  clock skew straight back into the wall — which re-arms the pause for another window. */
 const RESUME_GRACE_MS = 60_000;
 
+/** Start this work item again, carrying the error the last run died on when there is one
+ *  to carry. Handed to `failed()` BY THE CALLER rather than held as a dependency: the
+ *  Assignor owns every (re)start of a work item and takes this policy in its constructor,
+ *  so the one restart there is passed in per failure — which is also what makes a caller
+ *  with nothing to restart (boot's image sweep) unable to ask for one by accident. */
+export type RestartWorkItem = (retryError?: string) => void;
+
+/** The classes that get the one retry. `run-failed` is deliberately not among them — the
+ *  agent RAN and reported its own verdict, so a second run would spend real quota
+ *  re-deciding what it already decided — and neither is anything that reaches further
+ *  than one item. */
+const RETRYABLE: readonly FailureClass[] = ["transient", "unknown"];
+
 /** One failure, as the path that caught it has it. */
 export interface FailureInput {
   /** The failure's own text — an agent seam's flattened message, a build's output tail,
@@ -240,6 +255,9 @@ export interface FailureInput {
   agentFailed?: boolean;
   /** The class for text that matches nothing; boot passes `setup`. */
   fallback?: FailureClass;
+  /** How this work item is started again, for the one retry an item-scope failure gets.
+   *  Absent from a caller that has no work item to restart at all. */
+  retry?: RestartWorkItem;
 }
 
 /** Everything the policy needs and constructs none of: the durable pause it arms, the
@@ -247,6 +265,13 @@ export interface FailureInput {
 export interface FailurePolicyDeps {
   pause: PauseStore;
   scheduler: Scheduler;
+  /** Where the retry budget and the quarantine LIVE (constraint 7). Both are read and
+   *  written here rather than kept in memory: a spent retry that died with the process
+   *  hands every restart another agent run on real quota, and a quarantine that did not
+   *  survive is re-admitted by the next reconcile. */
+  state: StateStore;
+  /** The one label write the policy makes. Best-effort, always. */
+  github: GitHubLabels;
   log: ModuleLogger;
   /** Constraint 11: injected with a real default, so the suite drives the auto-resume
    *  with a real timer at millisecond scale instead of waiting out a quota window. */
@@ -266,12 +291,16 @@ export class FailurePolicy {
   // rejects `constructor(private x)`.
   private readonly pause: PauseStore;
   private readonly scheduler: Scheduler;
+  private readonly state: StateStore;
+  private readonly github: GitHubLabels;
   private readonly log: ModuleLogger;
   private readonly resumeGrace: number;
 
   constructor(deps: FailurePolicyDeps) {
     this.pause = deps.pause;
     this.scheduler = deps.scheduler;
+    this.state = deps.state;
+    this.github = deps.github;
     this.log = deps.log;
     this.resumeGrace = deps.resumeGraceMs ?? RESUME_GRACE_MS;
   }
@@ -284,15 +313,99 @@ export class FailurePolicy {
         this.halt(failure);
         return;
       }
-      // Everything else: recorded, and the rest of the pipeline carries on. Stopping the
-      // repo and the retry-then-quarantine ladder are the commits after this one; what is
-      // already true here is the change ADR-0002 asks for — v1 halted on every one of
-      // these. `info`, because the failure's own text is on the milestone the caller
-      // already posted (constraint 6) and there is nothing yet for a human to do.
+      if (failure.scope === "item" && input.item) {
+        this.item(failure, input.item, input.retry);
+        return;
+      }
+      // Repo scope, and an item-scope failure with no work item to act on: recorded, and
+      // the rest of the pipeline carries on. Stopping the repo is the commit after this
+      // one; what is already true here is the change ADR-0002 asks for — v1 halted on
+      // every one of these. `info`, because the failure's own text is on the milestone the
+      // caller already posted (constraint 6) and there is nothing yet for a human to do.
       // Constraint 5 again: a repo-scope line carries the repo and NOT the item, so one
       // broken image does not comment on whichever issue found it first.
       const context = failure.scope === "repo" ? { repo: input.repo } : { repo: input.repo, target: input.item?.issue };
       this.log.info(`· ${failure.class} (${failure.scope}) ${input.item?.key ?? input.repo} — ${failure.summary}`, context);
+    });
+  }
+
+  /** Stop ONE work item, and only it — the change ADR-0002 is about. The ladder is a rung
+   *  long so far: an item whose retry is unspent is started again, carrying its own error
+   *  when it has one worth reading.
+   *
+   *  The budget is written BEFORE the restart, and durably: a parent killed between the
+   *  two leaves an item that has already spent its retry, which is the safe way round —
+   *  the other order retries forever on real quota. */
+  private item(failure: Failure, item: WorkItemRef, retry?: RestartWorkItem): void {
+    const about = { repo: item.repo, target: item.issue };
+    // The agent ran and reported its own defeat: marked for a human to triage, and that is
+    // all. Retrying it would spend a whole agent run re-deciding what it already decided,
+    // and setting it aside would be Sunday quarantining an ISSUE that is simply hard.
+    if (failure.class === "run-failed") {
+      this.label(item, AGENT_FAILED_LABEL);
+      this.log.info(`· ${failure.class} (item) ${item.key} — ${failure.summary}`, about);
+      return;
+    }
+    const prior = this.state.get(item.key);
+    if (retry && prior?.retried !== true && RETRYABLE.includes(failure.class)) {
+      this.state.set(item.key, { ...(prior ?? { status: "failed" }), retried: true });
+      // `unknown` hands its own error back — the ONE thing a fresh run would not know, and
+      // the whole reason a second one is worth the quota. `transient` hands back nothing:
+      // the blip was not the agent's fault, and somebody else's 502 in the prompt is noise.
+      retry(failure.class === "unknown" ? failure.excerpt : undefined);
+      // `info`: the failure's own text is on the outcome milestone the caller already
+      // posted (constraint 6), and a retry is the mechanism working rather than something
+      // a human has to act on.
+      this.log.info(`↻ retry ${item.key} — ${failure.summary}`, about);
+      return;
+    }
+    // The retry is spent and it failed the same way. An `unknown` twice over is an item
+    // nothing here knows how to fix, so it is set aside rather than run a third time.
+    if (failure.class === "unknown") {
+      this.quarantine(item, failure);
+      return;
+    }
+    this.log.info(`· ${failure.class} (item) ${item.key} — ${failure.summary}`, about);
+  }
+
+  /** Set one work item aside. DURABLE and distinct from `failed` (constraint 7): a failed
+   *  item is exactly what the next reconcile re-admits, and an item that cannot succeed
+   *  would loop through its retry on real quota for as long as anything kept re-admitting
+   *  it — which is the defect ADR-0002 replaces the global halt with.
+   *
+   *  Written OVER the `failed` the caller's own record just wrote: one redundant write on
+   *  the rare quarantine path buys an untouched apply ordering, and it is self-correcting
+   *  — a parent killed between the two leaves the item `failed` with its retry spent, and
+   *  its next failure quarantines it. */
+  private quarantine(item: WorkItemRef, failure: Failure): void {
+    const prior = this.state.get(item.key);
+    this.state.set(item.key, { ...(prior ?? {}), status: "quarantined" });
+    this.label(item, QUARANTINE_LABEL);
+    // `error` is the priority channel (`services/logger.mts` ROUTES): it reaches the phone
+    // AND the issue, which is what makes this line both the P1 notification ADR-0002 asks
+    // for and the release instruction — a set-aside item nobody can find is a lost one.
+    // The ONE comment this failure gets (constraint 6): the error's own text is already on
+    // the outcome milestone, and this says what Sunday has done about it.
+    this.log.error(
+      `⏸ quarantined ${item.key} — ${failure.summary}, twice. Everything else keeps running. ` +
+        `To hand it back: remove the \`${QUARANTINE_LABEL}\` label and re-add the trigger label.`,
+      { repo: item.repo, target: item.issue },
+    );
+  }
+
+  /** Mark the issue. BEST-EFFORT, always (constraint 9): durable state is what actually
+   *  stops the item being re-admitted, so a label write that fails must not take the
+   *  policy down with it — and the most likely failure is a repo onboarded before this
+   *  label existed, which is a one-line fix worth naming.
+   *
+   *  Said with the repo and NO target, so it reaches whoever can fix that and never the
+   *  issue thread: the acted-on failure has had its one comment already (constraint 6). */
+  private label(item: WorkItemRef, name: string): void {
+    void this.github.addLabels(item.repo, item.issue, [name]).catch((err: unknown) => {
+      const why = err instanceof Error ? err.message : String(err);
+      this.log.error(`✗ ${item.key} could not be labelled ${name} — ${why} (gh label create ${name} --repo ${item.repo})`, {
+        repo: item.repo,
+      });
     });
   }
 

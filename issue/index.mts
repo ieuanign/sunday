@@ -49,6 +49,10 @@ export interface IssueRunInput {
   logPath: string;
   /** Continue the session a previous run gated on, with the human's answer. */
   resume?: { sessionId: string; reply: string };
+  /** What the PREVIOUS attempt at this item died on, when this run is #39's one retry.
+   *  Handed to the agent in the prompt: it is the only thing this run knows that the last
+   *  one did not, and without it a retry is the same run again on fresh quota. */
+  retryError?: string;
 }
 
 /** Everything a run reaches the world through, and constructs none of. */
@@ -119,7 +123,7 @@ export class IssueModule {
         repo: { fullName: input.repo, childDir: input.childDir, imageName: input.imageName },
         prompt: input.resume
           ? resumePrompt(input.resume.reply)
-          : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body),
+          : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body, input.retryError),
         branch,
         // RESOLVED, never a bare branch name: handed one, the library prefers a stale
         // local branch over the origin's (#33's contract).

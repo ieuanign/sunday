@@ -112,7 +112,9 @@ else
 fi
 
 # 4. Seed the pipeline labels on the child's tracker (idempotent — ignore "exists").
-for label in ready-for-agent auto-dev agent-working awaiting-human agent-failed; do
+#    `quarantined` is the one a HUMAN acts on: Sunday applies it to a work item that failed
+#    twice, and removing it is what hands the item back (#39).
+for label in ready-for-agent auto-dev agent-working awaiting-human agent-failed quarantined; do
   if [ "$DRY" = 1 ]; then
     say "  [dry] gh label create ${label} --repo ${full}"
   else

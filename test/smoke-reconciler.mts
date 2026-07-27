@@ -122,7 +122,7 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   // The real policy over this case's own pause file (#39): re-deriving admits work, and
   // what a failed one MEANS is `test/smoke-failure.mts`'s subject — what matters here is
   // that no case in this file can reach the real `var/pause.json`.
-  const failure = new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, log: logger.child("failure") });
+  const failure = new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, state, github, log: logger.child("failure") });
   const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
   const reconciler = new Reconciler({ repos: TABLE, github, assignor, log: logger.child("reconcile") });
 

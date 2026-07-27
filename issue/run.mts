@@ -54,6 +54,10 @@ export interface Job {
   /** Present when this run CONTINUES the session an earlier one gated on: the handle the
    *  parent kept in durable state, and what the human replied. Absent is a fresh run. */
   resume?: { sessionId: string; reply: string };
+  /** The error the PREVIOUS run of this item died on, when this run is #39's one retry.
+   *  It goes into the prompt: it is the only thing this run knows that the last one did
+   *  not, and without it the retry is the same run again on fresh quota. */
+  retryError?: string;
 }
 
 /** What the child sends over IPC once its outcome is durable. A NOTIFICATION only:
@@ -135,6 +139,9 @@ async function runIssue(): Promise<Outcome> {
       // Undefined on a fresh run, which is what the module reads as "start from the
       // baseline prompt" — the parent decides which of the two this is.
       resume: job.resume,
+      // Likewise the parent's decision: present only on the ONE retry a failed item gets
+      // (#39), carrying what the attempt before this died on.
+      retryError: job.retryError,
     });
   } catch (err) {
     return {

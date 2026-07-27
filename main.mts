@@ -74,7 +74,7 @@ const pause = new PauseStore(pausePath);
 
 // BEFORE the Assignor, which takes it: a failed work item is classified and acted on
 // there, and only quota, auth and a dead container daemon reach this far (ADR-0002).
-const failure = new FailurePolicy({ pause, scheduler, log: logger.child("failure") });
+const failure = new FailurePolicy({ pause, scheduler, state, github, log: logger.child("failure") });
 
 const assignor = new Assignor({
   repos,
