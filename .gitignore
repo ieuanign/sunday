@@ -15,6 +15,7 @@
 !/.claude/skills/code-review-mp/
 !/.claude/skills/diagnosing-bugs/
 !/.claude/skills/implement/
+!/.claude/skills/handoff/
 
 # Config secrets (the template .env.example stays tracked)
 /.env
