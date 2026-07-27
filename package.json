@@ -10,7 +10,6 @@
     "#assignor/*": "./assignor/*",
     "#issue/*": "./issue/*",
     "#pr/*": "./pr/*",
-    "#listener/*": "./listener/*",
     "#scripts/*": "./scripts/*",
     "#boot.mts": "./boot.mts"
   },
