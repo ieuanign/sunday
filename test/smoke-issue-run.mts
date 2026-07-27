@@ -1,13 +1,15 @@
 // test/smoke-issue-run.mts — hermetic smoke for the thing one issue run DECIDES (V2,
-// issue #36). It drives the real IssueModule over the real Logger with the three things
+// issue #36). It drives the real IssueModule over the real Logger with the four things
 // that reach the world substituted — the agent (quota), GitHub (real writes to a real
-// repo) and git (a checkout on disk) — so what is asserted is what a run decides from an
-// agent's signal, not how the commands are built.
+// repo), git (a checkout on disk) and the image probe (docker) — so what is asserted is
+// what a run decides from an agent's signal and from what it asserts around it (#38),
+// not how the commands are built.
 //   devbox run node test/smoke-issue-run.mts
 // The module touches no filesystem of its own, so this case needs no temp dir at all.
 // $0, offline, no docker, no network, no tokens.
 
 import { IssueModule, type IssueRunInput } from "../issue/index.mts";
+import type { ImagePresent } from "../issue/preconditions.mts";
 import { RESULT_TAG, type IssueResult } from "../issue/prompt.mts";
 import type { Agent, AgentRunRequest, AgentRunResult } from "../services/agent/index.mts";
 import type { Git } from "../services/git.mts";
@@ -29,11 +31,20 @@ const PR_URL = "https://github.com/acme/finance/pull/99";
  *  as its start point, and therefore the fork point the run reports (#42). */
 const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
 
+/** The labels this repo admits an issue on, and what the fake issue wears by default —
+ *  the before-work set asserts the second still contains the first (#38). */
+const TRIGGER_LABELS = ["sunday", "ready-for-agent"];
+
 /** What this case's fakes answer with. Everything else is the ordinary happy path: an
  *  agent that says `ready`, a branch one commit ahead, and no PR open yet. */
 interface Scenario {
   /** The base the Assignor chose for this item — `feat/<blocker>` when it stacked it. */
   base?: string;
+  /** The issue's state as the run reads it back, lowercased. Anything but `open` is a
+   *  run that must not start (#38). */
+  state?: string;
+  /** The labels the issue wears NOW — the trigger labels by default. */
+  labels?: string[];
   result?: IssueResult;
   /** The agent fails instead of answering. */
   agentError?: string;
@@ -46,8 +57,12 @@ interface Scenario {
   /** What the agent adapter resolved and how long the run took, for the footer. */
   model?: string;
   durationMs?: number;
-  /** A PR already open for this head — the retry case. */
+  /** A PR already open for this head BEFORE the run starts — a run that must not start
+   *  (#38): that PR is already serving the issue. */
   openPr?: string;
+  /** A PR that appears for this head only AFTER the agent ran — the create RACING (#36),
+   *  which is what the ship-time adoption is for. */
+  openPrAtShip?: string;
   sessionId?: string;
   preservedWorktreePath?: string;
   resume?: { sessionId: string; reply: string };
@@ -58,6 +73,16 @@ interface Scenario {
   /** The base does not resolve — a blocker's branch deleted between admission and the
    *  run. */
   resolveRefError?: string;
+  /** The origin does not have the base at all — a blocker that merged and had its head
+   *  branch deleted while this item waited in the queue. */
+  baseGone?: boolean;
+  /** The origin has the base when the run starts and not when it goes to ship: the
+   *  blocker's PR merged during the agent run (the captured finance#57 race). */
+  baseGoneAtShip?: boolean;
+  /** This repo's sandbox image is not on the host — pruned since boot built it. */
+  imageMissing?: boolean;
+  /** Docker cannot answer at all: a dead daemon, which is every repo's problem. */
+  imageProbeError?: string;
   /** This run is #39's one retry, carrying what the previous attempt died on. */
   retryError?: string;
 }
@@ -82,10 +107,14 @@ function harness(s: Scenario = {}) {
   };
 
   const requests: AgentRunRequest<IssueResult>[] = [];
+  /** Which side of the agent run a seam is being asked on — the whole point of asking
+   *  twice is that the world can change in between. */
+  let agentRan = false;
   const agent: Agent = {
     // The trailing comma is not a typo: `<T>` alone is reserved syntax in a `.mts` file.
     run: async <T,>(request: AgentRunRequest<T>): Promise<AgentRunResult<T>> => {
       trace.push("agent");
+      agentRan = true;
       requests.push(request as unknown as AgentRunRequest<IssueResult>);
       if (s.agentError) throw new Error(s.agentError);
       return {
@@ -106,7 +135,7 @@ function harness(s: Scenario = {}) {
   const github: GitHubRun = {
     readIssue: async () => {
       if (s.readIssueError) throw new Error(s.readIssueError);
-      return { title: TITLE, body: BODY, state: "open", labels: [] };
+      return { title: TITLE, body: BODY, state: s.state ?? "open", labels: s.labels ?? TRIGGER_LABELS };
     },
     addLabels: async (_repo, _issue, labels) => {
       trace.push("addLabels");
@@ -116,7 +145,10 @@ function harness(s: Scenario = {}) {
       trace.push("removeLabels");
       labelsRemoved.push(...labels);
     },
-    openPrForHead: async () => s.openPr,
+    openPrForHead: async () => {
+      trace.push("openPrForHead");
+      return agentRan ? (s.openPr ?? s.openPrAtShip) : s.openPr;
+    },
     createPr: async (pr) => {
       trace.push("createPr");
       created.push(pr);
@@ -130,8 +162,16 @@ function harness(s: Scenario = {}) {
   const counted: string[] = [];
   const statted: string[] = [];
   const resolved: string[] = [];
+  /** Every branch the ORIGIN was asked about, in order — one before the run starts and
+   *  one immediately before the push. */
+  const remoteChecked: string[] = [];
   const git: Git = {
-    remoteBranchExists: async () => true,
+    remoteBranchExists: async (_dir, branch) => {
+      trace.push("remoteBranchExists");
+      remoteChecked.push(branch);
+      if (s.baseGone) return false;
+      return !(s.baseGoneAtShip && agentRan);
+    },
     excludeScratch: async () => void trace.push("exclude"),
     fetchPrune: async () => void trace.push("fetch"),
     resolveRef: async (_dir, ref) => {
@@ -165,6 +205,14 @@ function harness(s: Scenario = {}) {
     },
   };
 
+  const imagesProbed: string[] = [];
+  const imagePresent: ImagePresent = async (imageName) => {
+    trace.push("imagePresent");
+    imagesProbed.push(imageName);
+    if (s.imageProbeError) throw new Error(s.imageProbeError);
+    return !s.imageMissing;
+  };
+
   const input: IssueRunInput = {
     key: "acme/finance#57",
     repo: "acme/finance",
@@ -172,13 +220,14 @@ function harness(s: Scenario = {}) {
     childDir: "/repos/finance",
     base: s.base ?? "main",
     imageName: "sunday-finance",
+    triggerLabels: TRIGGER_LABELS,
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
     ...(s.resume ? { resume: s.resume } : {}),
     ...(s.retryError ? { retryError: s.retryError } : {}),
   };
 
-  const module = new IssueModule({ agent, github, git, log: new Logger(dests).child("issue") });
+  const module = new IssueModule({ agent, github, git, imagePresent, log: new Logger(dests).child("issue") });
   return {
     run: () => module.run(input),
     trace,
@@ -194,6 +243,8 @@ function harness(s: Scenario = {}) {
     counted,
     statted,
     resolved,
+    remoteChecked,
+    imagesProbed,
   };
 }
 
@@ -282,7 +333,7 @@ function harness(s: Scenario = {}) {
   );
 }
 {
-  const h = harness({ openPr: "https://github.com/acme/finance/pull/12" });
+  const h = harness({ openPrAtShip: "https://github.com/acme/finance/pull/12" });
   await h.run();
   ok("stat: an adopted PR keeps the body it was opened with, so nothing is measured for it", h.statted.length === 0, h.statted.join(", "));
 }
@@ -366,10 +417,13 @@ function harness(s: Scenario = {}) {
   );
 }
 
-// ── a retried run whose first attempt already opened the PR adopts it (AC6) ──
+// ── a PR that appeared for this head WHILE the agent worked is adopted (AC6): the
+//    create is what races, and `gh pr create` dies on "a pull request already exists".
+//    A PR that was already open before the run started is a different thing entirely —
+//    the run never begins (#38, below) ──
 {
   const already = "https://github.com/acme/finance/pull/12";
-  const h = harness({ openPr: already });
+  const h = harness({ openPrAtShip: already });
   const outcome = await h.run();
 
   ok("adopt: no second PR is created — `gh pr create` would have died on the first", h.created.length === 0, String(h.created.length));
@@ -656,6 +710,170 @@ function harness(s: Scenario = {}) {
     JSON.stringify(outcome),
   );
   ok("fork point: and the agent never runs, so no quota is spent on a run that cannot base", h.requests.length === 0, String(h.requests.length));
+}
+
+// ── the before-work set (#38): five assertions between the issue read and the run's
+//    first write of any kind. A whole queue wait elapses between the Assignor admitting
+//    an item and the child's first line, and what it was handed can have gone stale ──
+
+/** Everything a run does that WRITES or COSTS — a label edit, the checkout, the agent,
+ *  the push, the PR. A precondition that stops a run must let none of it happen: that is
+ *  the whole point of asking before starting rather than failing part-way through. */
+const SPENDS = ["removeLabels", "addLabels", "exclude", "fetch", "resolveRef", "agent", "push", "createPr", "deleteBranch", "removeWorktree"];
+const spent = (trace: string[]): string[] => trace.filter((call) => SPENDS.includes(call));
+
+{
+  // The human closed the issue while it sat in the queue.
+  const h = harness({ state: "closed" });
+  const outcome = await h.run();
+
+  ok("closed: nothing is written, run or spent — no label, no checkout, no agent", spent(h.trace).length === 0, h.trace.join(" → "));
+  ok("closed: the outcome names the assertion that stopped it, typed", outcome.precondition === "issue-closed", JSON.stringify(outcome));
+  ok("closed: and the work item is failed", outcome.status === "failed", JSON.stringify(outcome));
+  ok("closed: the summary tells the human which condition it was", outcome.summary.includes("closed"), outcome.summary);
+  ok("closed: the child posts no comment of its own — the parent's outcome milestone is the one report", h.comments.length === 0, String(h.comments.length));
+}
+
+{
+  // A human pulled one of the trigger labels while the item waited — taking the issue back.
+  const h = harness({ labels: ["sunday"] });
+  const outcome = await h.run();
+
+  ok("unlabelled: nothing is written, run or spent", spent(h.trace).length === 0, h.trace.join(" → "));
+  ok("unlabelled: the outcome names the assertion, typed", outcome.precondition === "labels-missing", JSON.stringify(outcome));
+  ok("unlabelled: and the work item is failed", outcome.status === "failed", JSON.stringify(outcome));
+  ok("unlabelled: the summary names the label that came off, not just 'a label'", outcome.summary.includes("ready-for-agent"), outcome.summary);
+}
+{
+  // The Assignor applied the claim to this very item before forking it, so re-running
+  // admission here would refuse EVERY run (constraint 2). The child asks two questions
+  // only: is the issue open, and are its trigger labels still on.
+  const h = harness({ labels: [...TRIGGER_LABELS, "agent-working", "awaiting-human"] });
+  const outcome = await h.run();
+
+  ok("claimed: the run's own claim is not a refusal — the child never re-runs admission", outcome.precondition === undefined && outcome.status === "done", JSON.stringify(outcome));
+}
+
+{
+  // An earlier run shipped and died before its outcome landed, or a human opened the PR.
+  // Either way the branch's work is on the table already.
+  const already = "https://github.com/acme/finance/pull/12";
+  const h = harness({ openPr: already });
+  const outcome = await h.run();
+
+  ok("pr open: nothing is written, run or spent", spent(h.trace).length === 0, h.trace.join(" → "));
+  ok("pr open: the outcome names the assertion, typed", outcome.precondition === "pull-request-open", JSON.stringify(outcome));
+  ok(
+    "pr open: the item is DONE — that PR already serves the issue, and `failed` would re-fork it on every reconcile",
+    outcome.status === "done",
+    JSON.stringify(outcome),
+  );
+  ok("pr open: the summary carries the PR a human should go and look at", outcome.summary.includes(already), outcome.summary);
+}
+
+{
+  // The blocker this item was stacked on merged while the item waited, and GitHub deleted
+  // its head branch: the base it was admitted onto is gone.
+  const h = harness({ base: "feat/9", baseGone: true });
+  const outcome = await h.run();
+
+  ok("base gone: nothing is written, run or spent", spent(h.trace).length === 0, h.trace.join(" → "));
+  ok("base gone: the outcome names the assertion, typed", outcome.precondition === "base-missing", JSON.stringify(outcome));
+  ok("base gone: and the work item is failed", outcome.status === "failed", JSON.stringify(outcome));
+  ok("base gone: the summary names the base that vanished", outcome.summary.includes("feat/9"), outcome.summary);
+  ok(
+    "base gone: the ORIGIN is what was asked, by branch name — a local `origin/feat/9` is only as fresh as a fetch this run never got to",
+    h.remoteChecked.join(",") === "feat/9",
+    h.remoteChecked.join(","),
+  );
+}
+
+{
+  // Boot built this repo's image hours ago and a `docker image prune` has taken it since.
+  const h = harness({ imageMissing: true });
+  const outcome = await h.run();
+
+  ok("image gone: nothing is written, run or spent", spent(h.trace).length === 0, h.trace.join(" → "));
+  ok("image gone: the outcome names the assertion, typed", outcome.precondition === "image-missing", JSON.stringify(outcome));
+  ok("image gone: and the work item is failed", outcome.status === "failed", JSON.stringify(outcome));
+  ok(
+    "image gone: the summary names THIS repo's image — the fix is a rebuild of that one",
+    outcome.summary.includes("sunday-finance") && h.imagesProbed.join(",") === "sunday-finance",
+    `${outcome.summary} | ${h.imagesProbed.join(",")}`,
+  );
+}
+{
+  // Docker itself cannot answer. That is not a missing image — it is every repo's problem.
+  const h = harness({ imageProbeError: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" });
+  const outcome = await h.run();
+
+  ok(
+    "docker down: an ordinary failed outcome carrying docker's own words, NOT `image-missing` — one stops the whole pipeline, the other stops one repo",
+    outcome.precondition === undefined && outcome.status === "failed" && outcome.summary.includes("Cannot connect to the Docker daemon"),
+    JSON.stringify(outcome),
+  );
+  ok("docker down: and the agent still never runs", !h.trace.includes("agent"), h.trace.join(" → "));
+}
+
+{
+  // The human answered — and in the meantime somebody closed the issue. A resume is
+  // subject to the same set as a fresh run.
+  const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices." }, state: "closed" });
+  const outcome = await h.run();
+
+  ok("resume stopped: the outcome names the assertion", outcome.precondition === "issue-closed", JSON.stringify(outcome));
+  ok(
+    "resume stopped: `awaiting-human` is NOT removed — an item that lost the label and never ran is neither gated nor working",
+    h.labelsRemoved.length === 0 && h.labelsAdded.length === 0,
+    `${h.labelsRemoved.join(", ")} | ${h.labelsAdded.join(", ")}`,
+  );
+  ok(
+    "resume stopped: the gated branch and its worktree survive — they are the only copy of the commits the gate was taken on",
+    h.deleted.length === 0 && h.removedWorktrees.length === 0,
+    h.trace.join(" → "),
+  );
+}
+{
+  const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices." } });
+  await h.run();
+
+  ok(
+    "order: the whole before-work set is asked BEFORE the run's first write of any kind — the label edit, the exclude, the fetch and the agent all come after it",
+    h.trace.lastIndexOf("imagePresent") < h.trace.indexOf("removeLabels") && h.trace.indexOf("removeLabels") < h.trace.indexOf("exclude"),
+    h.trace.join(" → "),
+  );
+}
+
+// ── the before-ship re-assertion (AC2): a whole agent run elapses between this run's
+//    fetch and its push. The captured 2026-07-25 finance#57 race merged the base 25s
+//    after that run's `fetch -p` and three minutes before its create ──
+{
+  const h = harness({ base: "feat/9", baseGoneAtShip: true });
+  const outcome = await h.run();
+
+  ok("ship: the run DID start — the base was there when it was asked the first time", h.trace.includes("agent"), h.trace.join(" → "));
+  ok("ship: and then nothing ships — no push, no PR", h.pushed.length === 0 && h.created.length === 0, h.trace.join(" → "));
+  ok(
+    "ship: nothing is retargeted to main either — a stacked branch has to be REBASED onto its new base before it can target it (ADR-0003), which is #43's machinery",
+    h.created.length === 0,
+    JSON.stringify(h.created),
+  );
+  ok("ship: the outcome carries the same typed reason the before-work set uses", outcome.precondition === "base-missing" && outcome.status === "failed", JSON.stringify(outcome));
+  ok(
+    "ship: the origin was asked TWICE — once before the run, once after the agent came back",
+    h.remoteChecked.join(",") === "feat/9,feat/9" && h.trace.lastIndexOf("remoteBranchExists") > h.trace.indexOf("agent"),
+    `${h.remoteChecked.join(",")} | ${h.trace.join(" → ")}`,
+  );
+  ok("ship: the run still cleans up after itself", h.deleted.includes("feat/57"), h.trace.join(" → "));
+}
+{
+  const h = harness();
+  await h.run();
+  ok(
+    "ship: the re-assertion sits immediately before the push — asked any earlier it is the same stale answer the fetch already gave",
+    h.trace.indexOf("push") - h.trace.lastIndexOf("remoteBranchExists") === 1,
+    h.trace.join(" → "),
+  );
 }
 
 console.log(fails === 0 ? "\nAll issue-run smokes pass." : `\n${fails} FAILED`);
