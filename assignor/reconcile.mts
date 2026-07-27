@@ -4,11 +4,16 @@
 // pipeline is stopped. GitHub replays none of that, so without this pass the work it
 // represents is simply lost — an outage becomes a loss rather than a delay.
 //
-// It DECIDES NOTHING. Every issue it finds is handed to the same admission seam a live
-// webhook delivery goes through, so the recovery path and the live path cannot drift —
-// which is the exact defect class this rewrite exists to kill, and the reason the seam is
-// exposed rather than a `Delivery` synthesised here (a synthetic one would put an event
-// in the log that never happened).
+// It DECIDES NOTHING. Every issue and every pull request it finds is handed to the same
+// admission seam a live webhook delivery goes through, so the recovery path and the live
+// path cannot drift — which is the exact defect class this rewrite exists to kill, and the
+// reason the seam is exposed rather than a `Delivery` synthesised here (a synthetic one
+// would put an event in the log that never happened).
+//
+// A repo's pass has two halves, and the second is #44's: an `@sunday` comment on a PULL
+// REQUEST is its own work item, and the webhook that carries one fires exactly as many
+// times as the one on an issue does — once. What makes it re-derivable with no state of
+// ours is the reply marker: a summon newer than Sunday's newest reply is outstanding.
 //
 // Two things are true of the recovery path and not the live one, and both happen BEFORE
 // the hand-off:
@@ -24,8 +29,14 @@
 
 import { admitIssue, type Assignor } from "#assignor/index.mts";
 import type { RepoConfig } from "#config/repos.mts";
-import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
-import { CLAIM_LABEL, type GitHubReconcile, type IssueComment, type OpenIssue } from "#services/github/index.mts";
+import { isSummon, SUNDAY_MARKER, unansweredSummons } from "#lib/markers.mts";
+import {
+  CLAIM_LABEL,
+  type GitHubReconcile,
+  type IssueComment,
+  type OpenIssue,
+  type OpenPullRequest,
+} from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 
 /** Everything reconcile needs and constructs none of: the routing table it sweeps, the
@@ -63,9 +74,11 @@ export class Reconciler {
     for (const repo of Object.keys(this.repos)) await this.repo(repo);
   }
 
-  /** One repo's open issues, in one bounded read (`OPEN_ISSUE_LIMIT`) — boot's duration
-   *  must not be a function of somebody else's backlog. Isolated per issue as well as per
-   *  repo: reconsidering one reaches GitHub too.
+  /** One repo's pass, both halves of it: the open issues, then the open pull requests
+   *  (#44). Two reads and two loops rather than one, and ISOLATED from each other — a
+   *  `gh issue list` that 502s says nothing about the pull requests, and a work item lost
+   *  because the other half's read failed is exactly the outage-becomes-loss this module
+   *  exists to prevent.
    *
    *  Public because a blackout is per repo: a forwarder that dropped for one repo missed
    *  events for that repo alone, and sweeping the whole table to catch it up spends every
@@ -79,6 +92,14 @@ export class Reconciler {
    *  an unhandled one and the process dies under `restart: always` (ADR-0001). GitHub
    *  stays the truth either way, so the next pass simply asks again. */
   async repo(repo: string): Promise<void> {
+    await this.issues(repo);
+    await this.pullRequests(repo);
+  }
+
+  /** One repo's open issues, in one bounded read (`OPEN_ISSUE_LIMIT`) — boot's duration
+   *  must not be a function of somebody else's backlog. Isolated per issue as well as per
+   *  repo: reconsidering one reaches GitHub too. */
+  private async issues(repo: string): Promise<void> {
     try {
       const issues = await this.github.listOpenIssues(repo);
       this.log.info(`⟲ ${repo}: re-deriving from ${issues.length} open issue(s)`);
@@ -92,6 +113,60 @@ export class Reconciler {
     } catch (err) {
       this.log.error(`✗ ${repo} not re-derived — ${describe(err)}`, { repo });
     }
+  }
+
+  /** The same, for one repo's open pull requests (`OPEN_PR_LIMIT`): a comment run is a
+   *  work item like any other, and the summon that starts one arrives as a webhook that
+   *  fires exactly once. Down, restarted, blacked out — and a human's request is gone.
+   *
+   *  Isolated per pull request as well as per repo, for the reason the issue half is:
+   *  deciding one reads two comment streams and then admission reads the PR itself, all of
+   *  it somebody else's service. */
+  private async pullRequests(repo: string): Promise<void> {
+    try {
+      const prs = await this.github.listOpenPrs(repo);
+      this.log.info(`⟲ ${repo}: re-deriving from ${prs.length} open pull request(s)`);
+      for (const pr of prs) {
+        try {
+          await this.pullRequest(repo, pr);
+        } catch (err) {
+          this.log.error(`✗ ${repo}#pr${pr.number} not reconsidered — ${describe(err)}`, { repo });
+        }
+      }
+    } catch (err) {
+      this.log.error(`✗ ${repo} pull requests not re-derived — ${describe(err)}`, { repo });
+    }
+  }
+
+  /** One open pull request: hand it to admission if — and only if — a summon on it is
+   *  still outstanding. The read is the DERIVATION and not a guard, which is why nothing
+   *  of admission's is repeated here (constraint 3): what the sweep answers is the one
+   *  question a delivery answered by existing at all, and every question after it belongs
+   *  to the same `considerPrComment` the live route reaches.
+   *
+   *  Both streams, filtered SEPARATELY: GitHub's ids are monotonic only inside one id
+   *  space, so an inline comment's id says nothing about a conversation reply's. The
+   *  conversation goes first and short-circuits — most summons are written there, and the
+   *  inline read is a round-trip that then buys nothing.
+   *
+   *  "Answered" is the REPLY marker and never `SUNDAY_MARKER` (constraint 7): the two
+   *  milestone comments a work item posts land on this same thread, and counting one as an
+   *  answer buries a summon that arrived mid-run under a comment that never addressed it —
+   *  where the issue half's `hasUnansweredSummon` has no reply of its own to compare
+   *  against and reads any comment of ours as the answer. */
+  private async pullRequest(repo: string, open: OpenPullRequest): Promise<void> {
+    const conversation = await this.github.issueComments(repo, open.number);
+    const outstanding =
+      unansweredSummons(conversation).length > 0 ||
+      unansweredSummons(await this.github.reviewComments(repo, open.number)).length > 0;
+    if (!outstanding) return;
+    this.log.info(`⟲ ${repo}#pr${open.number} — a summon nobody has replied to`, { repo });
+    // AWAITED, and the labels are the pull request's OWN (#44 constraint 2): admission
+    // reaches GitHub, so a floating rejection would settle outside the per-PR catch above
+    // and take the parent down (ADR-0001) — and an item quarantined after failing twice is
+    // refused on the strength of these labels, which an empty list would hand straight
+    // back to an agent on every pass.
+    await this.assignor.considerPrComment({ repo, number: open.number, labels: open.labels });
   }
 
   /** One open issue: release the claim nobody is on, then hand it to the admission seam

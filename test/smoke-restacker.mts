@@ -42,7 +42,7 @@ const FULL_NAME = "sunday-fixture/child";
  *  so the only way to assert them is to hold the seam. */
 class FakeGitHub implements GitHubRestack {
   /** The forward edge the dependent scan reads: what is open, and what blocks it. */
-  openPrs: OpenPullRequest[] = [];
+  openPrs: Omit<OpenPullRequest, "labels">[] = [];
   blocks: Record<number, number[]> = {};
   /** Issues whose blocker read FAILS, the way a 502 does (constraint 7). */
   unreadable = new Set<number>();
@@ -54,7 +54,10 @@ class FakeGitHub implements GitHubRestack {
   retargetError?: string;
 
   async listOpenPrs(): Promise<OpenPullRequest[]> {
-    return this.openPrs;
+    // Labels filled in here rather than on every scenario's literal: the dependent scan
+    // reads a PR's number and head and nothing else — labels are #44's re-derive asking
+    // the same read whether an item is quarantined.
+    return this.openPrs.map((pr) => ({ ...pr, labels: [] }));
   }
 
   async blockedBy(_repo: string, issue: number): Promise<Blocker[]> {

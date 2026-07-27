@@ -130,6 +130,14 @@ export interface GitHubReconcile extends GitHub {
   /** Apply labels to an issue — the missed summon, replayed as the label the human would
    *  have had to add. Admission then reaches it through its ordinary path. */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** Every open pull request in a routed repo, capped (`OPEN_PR_LIMIT`) — the other half
+   *  of a repo's pass (#44). Redeclared rather than inherited from `GitHubRestack`, the
+   *  way `addLabels` is: a restack asks what is open to find dependents and a re-derive
+   *  asks to find unanswered summons, and `Gh` still implements it exactly once. */
+  listOpenPrs(repo: string): Promise<OpenPullRequest[]>;
+  /** One pull request's INLINE comments, oldest first. Read alongside `issueComments`
+   *  because a summon lands on either stream, and neither can answer for the other. */
+  reviewComments(repo: string, pr: number): Promise<ReviewComment[]>;
   /** Give the claim back, OFF the event loop — the async twin of `release`, and the only
    *  one re-deriving may use. Both edit the same label; what differs is how many of them
    *  there can be. The Assignor's `release` is reached once per item it is applying an
@@ -141,12 +149,18 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
-/** One open pull request, as the restack's dependent scan reads them. */
+/** One open pull request, as the restack's dependent scan and #44's re-derive read them. */
 export interface OpenPullRequest {
   number: number;
   /** The head branch. `feat/<n>` is one of ours; anything else is somebody's own work
    *  and the scan leaves it alone. */
   head: string;
+  /** The labels on it right now. REQUIRED, for the reason `WorkItemRef.kind` is (#44
+   *  constraint 2): a re-derived pull request is handed to the same admission the live
+   *  delivery reaches, and that admission refuses a QUARANTINED item on the strength of
+   *  this list. An empty default would re-admit an item set aside after failing twice —
+   *  on every boot, every blackout catch-up and every repo recheck. */
+  labels: string[];
 }
 
 /** A merged pull request's head — the fork-point recovery's last resort (ADR-0003).
@@ -481,12 +495,12 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
       "--state",
       "open",
       "--json",
-      "number,headRefName",
+      "number,headRefName,labels",
       "--limit",
       String(OPEN_PR_LIMIT),
     ]);
-    const prs = JSON.parse(out) as { number: number; headRefName: string }[];
-    return prs.map((pr) => ({ number: pr.number, head: pr.headRefName }));
+    const prs = JSON.parse(out) as { number: number; headRefName: string; labels: { name: string }[] }[];
+    return prs.map((pr) => ({ number: pr.number, head: pr.headRefName, labels: pr.labels.map((l) => l.name) }));
   }
 
   async mergedPrForHead(repo: string, head: string): Promise<MergedPullRequest | undefined> {

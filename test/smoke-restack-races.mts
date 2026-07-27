@@ -126,7 +126,9 @@ function aheadOfMain(fx: Fixture, branch: string): number {
 {
   const fx = makeFixture("restack-deleted-branch");
   fx.stubGh({
-    "pr list": '[{"number":110,"headRefName":"feat/10"}]',
+    // `labels` as `gh pr list --json …,labels` really answers it: the dependent scan
+    // ignores them, and #44's re-derive reads the same call to see what is quarantined.
+    "pr list": '[{"number":110,"headRefName":"feat/10","labels":[]}]',
     "dependencies/blocked_by": "9\tclosed",
     // The retarget the step performs once the rebase lands: the base the PR named is
     // the branch that just merged and was deleted with it.
@@ -198,7 +200,7 @@ function aheadOfMain(fx: Fixture, branch: string): number {
 {
   const fx = makeFixture("restack-force-pushed-blocker");
   fx.stubGh({
-    "pr list": '[{"number":120,"headRefName":"feat/10"}]',
+    "pr list": '[{"number":120,"headRefName":"feat/10","labels":[]}]',
     "dependencies/blocked_by": "9\tclosed",
     // The retarget the step performs once the rebase lands. Stubbed so it cannot
     // reach a real repository.
