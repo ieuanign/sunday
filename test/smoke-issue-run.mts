@@ -25,10 +25,15 @@ const BASELINE = `Work {{REPO}} issue #{{ISSUE}}. Finish with one <${RESULT_TAG}
 const TITLE = "Stop losing the closing keyword";
 const BODY = "Merged fail-PRs leave their issue open forever.";
 const PR_URL = "https://github.com/acme/finance/pull/99";
+/** What the base resolves to in this case's checkout — the commit the agent is handed
+ *  as its start point, and therefore the fork point the run reports (#42). */
+const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
 
 /** What this case's fakes answer with. Everything else is the ordinary happy path: an
  *  agent that says `ready`, a branch one commit ahead, and no PR open yet. */
 interface Scenario {
+  /** The base the Assignor chose for this item — `feat/<blocker>` when it stacked it. */
+  base?: string;
   result?: IssueResult;
   /** The agent fails instead of answering. */
   agentError?: string;
@@ -50,6 +55,9 @@ interface Scenario {
   cleanupError?: string;
   /** The footer's file-stat read blows up — a `git` blip AFTER the push. */
   diffStatError?: string;
+  /** The base does not resolve — a blocker's branch deleted between admission and the
+   *  run. */
+  resolveRefError?: string;
 }
 
 /** A real IssueModule over the real Logger, with the three world-reaching services stood
@@ -119,9 +127,16 @@ function harness(s: Scenario = {}) {
   const removedWorktrees: string[] = [];
   const counted: string[] = [];
   const statted: string[] = [];
+  const resolved: string[] = [];
   const git: Git = {
     excludeScratch: async () => void trace.push("exclude"),
     fetchPrune: async () => void trace.push("fetch"),
+    resolveRef: async (_dir, ref) => {
+      trace.push("resolveRef");
+      resolved.push(ref);
+      if (s.resolveRefError) throw new Error(s.resolveRefError);
+      return FORK_POINT;
+    },
     push: async (_dir, branch) => {
       trace.push("push");
       pushed.push(branch);
@@ -152,6 +167,7 @@ function harness(s: Scenario = {}) {
     repo: "acme/finance",
     issue: 57,
     childDir: "/repos/finance",
+    base: s.base ?? "main",
     imageName: "sunday-finance",
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
@@ -173,6 +189,7 @@ function harness(s: Scenario = {}) {
     removedWorktrees,
     counted,
     statted,
+    resolved,
   };
 }
 
@@ -467,8 +484,8 @@ function harness(s: Scenario = {}) {
   ok("request: on the work item's own branch", request?.branch === "feat/57", request?.branch ?? "");
   ok(
     "request: from an ALREADY-RESOLVED remote ref — handed a bare name the library prefers a stale local branch",
-    request?.startPoint === "origin/main",
-    request?.startPoint ?? "",
+    request?.startPoint === FORK_POINT && h.resolved.join(",") === "origin/main",
+    `${request?.startPoint ?? ""} from ${h.resolved.join(",")}`,
   );
   ok("request: the agent's output goes to this run's own log file", request?.logPath === "/var/log/acme/finance/57/run.log", request?.logPath ?? "");
   ok(
@@ -491,10 +508,93 @@ function harness(s: Scenario = {}) {
     h.trace.join(" → "),
   );
   ok(
+    "order: and the base is resolved AFTER the fetch — resolved before it, the fork point is yesterday's commit",
+    h.trace.indexOf("fetch") < h.trace.indexOf("resolveRef") && h.trace.indexOf("resolveRef") < h.trace.indexOf("agent"),
+    h.trace.join(" → "),
+  );
+  ok(
     "log: every line the child emits is addressed to its issue, and none of them reaches GitHub",
     h.lines.length > 0 && h.lines.every((l) => l.level === "info" && l.context.repo === "acme/finance" && l.context.target === 57),
     h.lines.map((l) => `${l.level} ${JSON.stringify(l.context)}`).join(" | "),
   );
+}
+
+// ── a STACKED run (#42): the Assignor decided this item bases on its blocker's branch,
+//    so every ref the run measures against follows it — and the run recomputes none of
+//    it (constraint 8), because the answer minutes later may not be the same one ──
+{
+  const h = harness({ base: "feat/9" });
+  await h.run();
+
+  ok(
+    "stacked: the agent branches off the BLOCKER's branch as the origin has it, not off main",
+    h.resolved.join(",") === "origin/feat/9" && h.requests[0]?.startPoint === FORK_POINT,
+    `${h.requests[0]?.startPoint ?? ""} from ${h.resolved.join(",")}`,
+  );
+  ok("stacked: commits are counted from that base — against main they would include the blocker's", h.counted.join(", ") === "origin/feat/9..feat/57", h.counted.join(", "));
+  ok("stacked: and the diff the footer states is measured from it too", h.statted.join(", ") === "origin/feat/9...feat/57", h.statted.join(", "));
+  ok(
+    "stacked: the PR targets the blocker's BRANCH NAME — GitHub resolves it on the remote and knows nothing about a local checkout's refs",
+    h.created[0]?.base === "feat/9",
+    h.created[0]?.base ?? "",
+  );
+  ok("stacked: the footer says which base the PR went to", h.created[0]?.body.includes("base `feat/9`") === true, h.created[0]?.body ?? "");
+}
+{
+  const h = harness({ base: "feat/9", ahead: 0 });
+  const outcome = await h.run();
+  ok(
+    "stacked: an empty run says what it is empty against — 'no commits ahead of main' would be a lie",
+    outcome.summary.includes("no commits") && h.lines.some((l) => l.message.includes("feat/9")),
+    `${outcome.summary} | ${h.lines.map((l) => l.message).join(" | ")}`,
+  );
+}
+
+// ── the fork point (#42/ADR-0003): the commit the branch was actually created from.
+//    The agent library creates the branch AT the start point it is handed, so reporting
+//    the SHA that was handed over records it by construction — a re-derivation later
+//    would name wherever the base has moved to since ──
+{
+  const h = harness({ base: "feat/9" });
+  const outcome = await h.run();
+
+  ok(
+    "fork point: the run reports the commit it handed the agent, not the ref it asked about",
+    outcome.forkPoint === FORK_POINT && h.requests[0]?.startPoint === FORK_POINT,
+    JSON.stringify(outcome),
+  );
+}
+{
+  const h = harness({ result: { signal: "gate", description: "Blocked on a product call." }, sessionId: "sess-abc123" });
+  const outcome = await h.run();
+
+  ok(
+    "fork point: a gated run reports it too — its branch survives the gate, and is what a restack aims at",
+    outcome.forkPoint === FORK_POINT,
+    JSON.stringify(outcome),
+  );
+}
+{
+  const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices." } });
+  const outcome = await h.run();
+
+  ok(
+    "fork point: a RESUMED run reports none — the branch was already there, so it forked from nothing and the recorded fork point stands",
+    outcome.forkPoint === undefined,
+    JSON.stringify(outcome),
+  );
+}
+{
+  // The blocker merged and GitHub deleted its head branch between admission and the run.
+  const h = harness({ base: "feat/9", resolveRefError: "fatal: Needed a single revision" });
+  const outcome = await h.run();
+
+  ok(
+    "fork point: a base that no longer resolves fails the run rather than starting the agent from nowhere",
+    outcome.status === "failed" && outcome.summary.includes("Needed a single revision"),
+    JSON.stringify(outcome),
+  );
+  ok("fork point: and the agent never runs, so no quota is spent on a run that cannot base", h.requests.length === 0, String(h.requests.length));
 }
 
 console.log(fails === 0 ? "\nAll issue-run smokes pass." : `\n${fails} FAILED`);

@@ -97,6 +97,12 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
       if (over.releaseThrows === `${repo}#${issue}`) throw new Error("gh issue edit failed: HTTP 502");
       released.push(`${repo}#${issue}`);
     },
+    // Admission's blocker read (#42), answering "nothing blocks this issue": boot admits
+    // nothing of its own, so no case here reaches these.
+    blockedBy: async () => [],
+    issueState: async () => "closed",
+    readIssue: async () => ({ title: "", body: "" }),
+    openPrForHead: async () => undefined,
   };
 
   const paths: Paths = {

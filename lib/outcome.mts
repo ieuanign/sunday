@@ -33,6 +33,12 @@ export interface Outcome {
    *  resume. The child that holds it is gone by the time anyone reads this, so the
    *  handle survives here or the human's answer starts the work over from nothing. */
   sessionId?: string;
+  /** The commit this run's branch was CREATED FROM (#42), when this run created it. The
+   *  boundary between a blocker's commits and this item's own, and what #43 restacks
+   *  against — so it is recorded from the SHA the agent was actually handed rather than
+   *  re-derived later from a branch that has moved since (ADR-0003). Absent on a resumed
+   *  run: the branch was already there, so that run forked from nothing. */
+  forkPoint?: string;
 }
 
 /** The answers a read can give. Absence is the common one — no file means nothing to
@@ -92,6 +98,10 @@ function isOutcome(value: unknown): value is Outcome {
     // Optional, so absent is fine — but present and not a string is not: the handle is
     // handed to the agent as a session to resume, and the wrong type there restarts the
     // work instead of continuing it.
-    (o.sessionId === undefined || typeof o.sessionId === "string")
+    (o.sessionId === undefined || typeof o.sessionId === "string") &&
+    // Likewise optional, and likewise checked: a restack aims at the commit this names,
+    // and this file's own warning is that a field the guard skips is how a finished run
+    // becomes an unreadable outcome — or here, a fork point that is not a commit.
+    (o.forkPoint === undefined || typeof o.forkPoint === "string")
   );
 }

@@ -129,6 +129,36 @@ try {
     ok("unreadable: a status the pipeline has no meaning for", status.state === "unreadable", JSON.stringify(status));
   }
 
+  // ── the fork point (#42): the commit the run's branch was created from, which is what
+  //    #43 restacks against. Optional — every run before this existed reported none, and
+  //    a resumed one reports none either — but a field the guard does not know about is
+  //    what makes a perfectly good outcome unreadable, so it is checked like the rest ──
+  {
+    const path = resolve(dir, "results", "fork-point.json");
+    const forked: Outcome = {
+      key: "acme/finance#57",
+      status: "done",
+      summary: "PR: https://github.com/acme/finance/pull/99",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      forkPoint: "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e",
+    };
+    writeOutcome(path, forked);
+    const read = readOutcome(path);
+    ok(
+      "fork point: the commit the branch was created from survives the file",
+      read.state === "ok" && read.outcome.forkPoint === forked.forkPoint,
+      JSON.stringify(read),
+    );
+
+    writeFileSync(path, JSON.stringify({ ...forked, forkPoint: 57 }));
+    const wrong = readOutcome(path);
+    ok(
+      "fork point: present and not a string is unreadable — a restack aims at a commit, not a number",
+      wrong.state === "unreadable",
+      JSON.stringify(wrong),
+    );
+  }
+
   // ── atomic: the parent can read the results dir at any instant, including the one in
   //    which a child is mid-write. The file it reads is therefore either the whole old
   //    outcome or the whole new one — never half of either (constraint 3) ──

@@ -48,6 +48,9 @@ function jobFor(key: string, issue: number): Job {
     // A child checkout that cannot be there and a prompt file that is not either:
     // `repos/` holds REAL clones, so a job naming a real one would fetch from the origin.
     config: { path: "repos/not-a-child", imageName: "sunday-finance", promptFile: missingPrompt, triggerLabels: ["sunday"] },
+    // The base the Assignor chose (#42). Nothing this smoke drives reaches git, so the
+    // unstacked one is what every case here carries.
+    base: "main",
     resultPath: resolve(dir, "results", `${slug}.json`),
     pidPath: resolve(dir, "running", `${slug}.pid`),
     runLogPath: resolve(dir, "log", "acme", "finance", String(issue), "run.log"),

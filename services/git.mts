@@ -42,6 +42,13 @@ export interface Git {
    *  deleted on merge must not survive locally as a base that still looks alive
    *  (ADR-0003). */
   fetchPrune(childDir: string): Promise<void>;
+  /** The commit `ref` names, right now. A run resolves its base with this AFTER the
+   *  fetch and hands the SHA to the agent as its start point, so the commit the branch
+   *  gets created from is recorded by construction rather than by argument (ADR-0003 —
+   *  the fork point has to sit in the dependent's own ancestry). Throws when `ref` does
+   *  not resolve: a blocker's branch deleted between admission and the run is a failed
+   *  run, never a start point that is not a commit. */
+  resolveRef(childDir: string, ref: string): Promise<string>;
   /** Publish `branch` to the origin — the run's one write to the child's remote. */
   push(childDir: string, branch: string): Promise<void>;
   /** Commits on `branch` that `baseRef` does not have. Zero when `branch` does not
@@ -77,6 +84,13 @@ export class GitCli implements Git {
 
   async fetchPrune(childDir: string): Promise<void> {
     await shA("git", ["fetch", "-p", "origin"], childDir);
+  }
+
+  async resolveRef(childDir: string, ref: string): Promise<string> {
+    // `--verify` so the answer is one revision or nothing: a bare `rev-parse` echoes an
+    // unresolved name back on STDOUT alongside its error, which is a fork point that is
+    // a branch name rather than a commit.
+    return await shA("git", ["rev-parse", "--verify", ref], childDir);
   }
 
   async push(childDir: string, branch: string): Promise<void> {

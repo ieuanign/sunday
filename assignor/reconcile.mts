@@ -100,7 +100,12 @@ export class Reconciler {
   private async issue(repo: string, open: OpenIssue): Promise<void> {
     const labels = await this.unclaim(repo, open);
     if (!labels) return;
-    this.assignor.considerIssue({ repo, number: open.number, labels: await this.replaySummon(repo, open.number, labels) });
+    // AWAITED (#42): admission asks GitHub what blocks the issue, so it is async now and a
+    // floating one would settle outside the caller's per-issue try/catch — an unhandled
+    // rejection takes the parent down under `restart: always` (ADR-0001). Waiting also
+    // keeps the sweep serial, which is what stops a 200-issue backlog opening 200
+    // concurrent `gh` reads at once.
+    await this.assignor.considerIssue({ repo, number: open.number, labels: await this.replaySummon(repo, open.number, labels) });
   }
 
   /** Apply the labels a missed summon should have caused, and answer with the labels the

@@ -23,7 +23,9 @@ const OPEN_ISSUE_LIMIT = 200;
 const FORWARDER_HOOK_URL = "https://webhook-forwarder.github.com/hook";
 
 /** What the Assignor is allowed to do to GitHub. Narrow deliberately: it is the seam a
- *  test substitutes, and every method on it is a real edit to a real repo. */
+ *  test substitutes, and every write on it is a real edit to a real repo. The reads
+ *  answer ONE question — what blocks this issue, and can it be stacked on — which is
+ *  the only thing admission asks the network (#42). */
 export interface GitHub {
   /** Take the issue. A claim applied without a run starting strands the issue until
    *  #35's orphan sweep, so it is taken as late as it can be and released as early. */
@@ -31,6 +33,28 @@ export interface GitHub {
   /** Give it back. NEVER while a child may still be alive — a released claim readmits
    *  the issue, and a second agent on it is a duplicate run and real quota. */
   release(repo: string, issue: number): void;
+  /** Every issue that blocks this one, each with its state inline — GitHub's native
+   *  dependency links, in one call.
+   *
+   *  THROWS when the read fails, and that is the contract: admission cannot tell a
+   *  502 from an answer, so it defers rather than guesses. v1 swallowed the failure
+   *  into an empty list (`listener/dag.mts:45`), which reads as "nothing blocks this"
+   *  and admitted a blocked issue onto `main` — a silent wrong answer that starts a
+   *  real agent run. An EMPTY result is a different answer entirely: this repo has no
+   *  native links, and the body fallback still gets its turn. */
+  blockedBy(repo: string, issue: number): Promise<Blocker[]>;
+  /** One issue's state, lowercased. The body fallback resolves each ref it finds
+   *  through this — the native read already carries state inline. */
+  issueState(repo: string, issue: number): Promise<string>;
+  /** The issue as text, for the `## Blocked by` fallback when a repo has no native
+   *  links. Redeclared rather than inherited from `GitHubRun`, the way `addLabels`
+   *  is: a run reads an issue to title its PR and admission reads one to find its
+   *  blockers, and `Gh` still implements it exactly once. */
+  readIssue(repo: string, issue: number): Promise<IssueDetail>;
+  /** The open PR for this head, if there already is one. Stacking's gate: a blocker
+   *  with no PR open has no branch worth forking from yet. Redeclared for the same
+   *  reason `readIssue` is. */
+  openPrForHead(repo: string, head: string): Promise<string | undefined>;
 }
 
 /** One open issue, as re-deriving work needs to see it — the number a work item is keyed
@@ -48,6 +72,16 @@ export interface OpenIssue {
 export interface IssueComment {
   id: number;
   body: string;
+}
+
+/** One issue that blocks another. */
+export interface Blocker {
+  number: number;
+  /** Lowercased issue state ("open" | "closed"). Normalised HERE because the two
+   *  reads it can come from disagree on casing — the REST dependencies endpoint says
+   *  `open`, `gh issue view --json state` says `OPEN` — and a caller comparing
+   *  against the wrong one silently sees every blocker as unclosed. */
+  state: string;
 }
 
 /** What re-deriving outstanding work from GitHub is allowed to do: read what is open,
@@ -221,6 +255,33 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder {
   async readIssue(repo: string, issue: number): Promise<IssueDetail> {
     const out = await shA("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,body"]);
     return JSON.parse(out) as IssueDetail;
+  }
+
+  async blockedBy(repo: string, issue: number): Promise<Blocker[]> {
+    // No `try`, deliberately — the swallow is the defect (`listener/dag.mts:45`). The
+    // endpoint answers on every routed repo, exits 0 with EMPTY stdout when an issue
+    // has no dependencies, and exits non-zero with `gh: … (HTTP …)` on stderr when the
+    // read fails; `shA` turns the latter into a throw, which is exactly the
+    // "unknown, defer" the caller needs. A repo that genuinely lacked the endpoint
+    // would 404 loudly here rather than admit silently.
+    const out = await shA("gh", [
+      "api",
+      `repos/${repo}/issues/${issue}/dependencies/blocked_by`,
+      "--jq",
+      ".[] | [.number, .state] | @tsv",
+    ]);
+    return out
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => {
+        const [number, state] = line.split("\t");
+        return { number: Number(number), state: state.toLowerCase() };
+      });
+  }
+
+  async issueState(repo: string, issue: number): Promise<string> {
+    const out = await shA("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "state", "--jq", ".state"]);
+    return out.toLowerCase();
   }
 
   async openPrForHead(repo: string, head: string): Promise<string | undefined> {
