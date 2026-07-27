@@ -12,6 +12,9 @@ import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/
 import { CLAIM_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import { resolveBase, type BaseDecision } from "./dag.mts";
+// Type-only in BOTH directions (`assignor/failure.mts` names `WorkItemRef` the same way),
+// so neither module reaches the other's runtime import graph.
+import type { FailurePolicy } from "./failure.mts";
 import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 
@@ -83,6 +86,11 @@ export interface AssignorDeps {
   state: StateStore;
   fork: ForkWorkItem;
   paths: Paths;
+  /** What a failed work item MEANS and what is done about it (#39). Injected rather than
+   *  constructed for the same reason everything else here is — and because the policy
+   *  reaches back into this object for the retry, so one of the two has to be built
+   *  first. */
+  failure: FailurePolicy;
 }
 
 /** `issues` actions that should (re)consider an issue. NOT `unlabeled`/`edited`: those
@@ -203,6 +211,7 @@ export class Assignor {
   private readonly state: StateStore;
   private readonly fork: ForkWorkItem;
   private readonly paths: Paths;
+  private readonly failure: FailurePolicy;
   /** Items waiting on a blocker, by work-item key. IN MEMORY ONLY (constraint 6):
    *  GitHub is the truth and #35's reconcile hands every open issue back to admission,
    *  so a restart rebuilds this map from the world rather than from a file that could
@@ -217,6 +226,7 @@ export class Assignor {
     this.state = deps.state;
     this.fork = deps.fork;
     this.paths = deps.paths;
+    this.failure = deps.failure;
   }
 
   /** Route one delivery. EVERY one leaves a line behind, including the event types this
@@ -580,6 +590,22 @@ export class Assignor {
       target: item.issue,
     });
     this.settle(item);
+    // Every failed work item, live or swept up by the next boot, reaches the policy HERE
+    // and nowhere else (#39 constraint 1): this is the one sink both paths already share,
+    // so there is no second reading of what a failure means that could drift from this
+    // one. AFTER `settle`, deliberately — settle hands the claim back, and the retry the
+    // policy may start takes it again.
+    // The text handed over is the child's own summary (a provider's message, a tool's
+    // error, the parent's dead-child line) and NEVER prose Sunday composed: "the agent ran
+    // and reported this itself" travels as the typed flag beside it (constraint 3).
+    if (outcome.status === "failed") {
+      this.failure.failed({
+        text: outcome.summary,
+        repo: item.repo,
+        item,
+        agentFailed: outcome.agentFailed,
+      });
+    }
   }
 
   /** The tail of an apply: the result file, the lock, then the claim. Its own method

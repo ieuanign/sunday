@@ -19,6 +19,8 @@ import {
   type ForkWorkItem,
   type Paths,
 } from "../assignor/index.mts";
+import { FailurePolicy } from "../assignor/failure.mts";
+import { PauseStore } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
 import type { Job } from "../issue/run.mts";
@@ -135,14 +137,19 @@ function harness(reads: Partial<GitHub> = {}) {
 
   const logger = new Logger(dests);
   const state = new StateStore(resolve(caseDir, "state.json"));
+  const scheduler = createScheduler(2, logger.child("scheduler"));
   const assignor = new Assignor({
     repos: TABLE,
     github,
     log: logger.child("assignor"),
-    scheduler: createScheduler(2, logger.child("scheduler")),
+    scheduler,
     state,
     fork,
     paths,
+    // The real policy, over this case's own pause file: what it DOES about each scope is
+    // `test/smoke-failure.mts`'s subject, and what matters here is that no case in this
+    // file reaches the real `var/pause.json`.
+    failure: new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, log: logger.child("failure") }),
   });
 
   return { assignor, state, lines, comments, claimed, released, forked, finish, paths };

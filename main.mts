@@ -20,6 +20,7 @@ import { loadRepos } from "#config/repos.mts";
 // refers to `issue/`, so editing it takes effect on the next work item with no restart
 // (ADR-0001).
 import { createForkWorkItem } from "#assignor/fork.mts";
+import { FailurePolicy } from "#assignor/failure.mts";
 import { Assignor } from "#assignor/index.mts";
 import { PauseStore } from "#assignor/pause.mts";
 import { Reconciler } from "#assignor/reconcile.mts";
@@ -67,6 +68,13 @@ const state = new StateStore(statePath);
 // One `Gh`: the Assignor takes the two writes it is allowed (claim, release) and
 // reconcile the wider read seam, off the same CLI and the same token.
 const github = new Gh();
+// One pause store, shared with boot below: the policy ARMS the pause and boot RE-ARMS
+// whatever it left behind, and two stores on two paths would leave a halt nothing lifts.
+const pause = new PauseStore(pausePath);
+
+// BEFORE the Assignor, which takes it: a failed work item is classified and acted on
+// there, and only quota, auth and a dead container daemon reach this far (ADR-0002).
+const failure = new FailurePolicy({ pause, scheduler, log: logger.child("failure") });
 
 const assignor = new Assignor({
   repos,
@@ -76,6 +84,7 @@ const assignor = new Assignor({
   state,
   fork: createForkWorkItem(),
   paths: { resultPath, pidPath, runLogPath, eventLogPath },
+  failure,
 });
 
 const reconciler = new Reconciler({ repos, github, assignor, log: logger.child("reconcile") });
@@ -85,7 +94,7 @@ const sandbox = new SandboxService(logger);
 const boot = new Boot({
   repos,
   scheduler,
-  pause: new PauseStore(pausePath),
+  pause,
   state,
   assignor,
   buildImages: (table, parentRoot) => sandbox.buildImages(table, parentRoot),

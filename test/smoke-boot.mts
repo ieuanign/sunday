@@ -15,6 +15,7 @@ import { dirname, resolve } from "node:path";
 
 import { Boot, type BuildImages, type Reconcile, readRoutingTable } from "../boot.mts";
 import type { RepoConfig } from "#config/repos.mts";
+import { FailurePolicy } from "../assignor/failure.mts";
 import { Assignor, type ForkWorkItem, type Paths } from "../assignor/index.mts";
 import { PauseStore, rearmAction } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
@@ -126,7 +127,10 @@ function harness(over: { buildImages?: BuildImages; reconcile?: Reconcile; relea
   // something on it the store did not write is how "unreadable" gets driven at all.
   const pausePath = resolve(caseDir, "pause.json");
   const pause = new PauseStore(pausePath);
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths });
+  // The real policy over this case's own pause store — the same one boot re-arms from, so
+  // nothing here can arm a halt in one place and read it from another (#39).
+  const failure = new FailurePolicy({ pause, scheduler, log: logger.child("failure") });
+  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, failure });
 
   /** What the build saw when it ran — above all whether the queue was HELD, which is the
    *  whole reason the build sits inside the hold. */

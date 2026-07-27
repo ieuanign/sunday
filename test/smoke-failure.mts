@@ -1,22 +1,47 @@
 // test/smoke-failure.mts — hermetic smoke for the failure taxonomy (assignor/failure.mts):
-// what a failure IS (its class) and how far it reaches (its scope).
+// what a failure IS (its class), how far it reaches (its scope), and what Sunday DOES
+// about it.
 //   node test/smoke-failure.mts
-// Drives the PURE classifier with the failure text each path actually produces — the agent
-// seam's flattened message, a build sweep's reason, the parent's own dead-child line. $0,
-// no network, no docker.
+// The first half drives the PURE classifier with the failure text each path actually
+// produces — the agent seam's flattened message, a build sweep's reason, the parent's own
+// dead-child line. The second half drives the real `FailurePolicy` over the real scheduler,
+// pause store, state store and Assignor, with the two things that reach the world
+// substituted (GitHub and the fork). $0, no network, no docker.
 //
 // The quota/auth/transient patterns are PROVISIONAL: the real provider's text is not known
 // until the first live quota hit or 403, so these fixtures encode the patterns rather than
 // prove them. What they DO prove is the shape — that every class lands on a scope, and that
 // the two discriminators captured in production still hold.
 
-import { classify } from "../assignor/failure.mts";
+import { rmSync } from "node:fs";
+import { resolve } from "node:path";
+
+import type { RepoConfig } from "#config/repos.mts";
+import { classify, FailurePolicy } from "../assignor/failure.mts";
+import { Assignor, type ChildExit, type Delivery, type ForkWorkItem, type Paths } from "../assignor/index.mts";
+import { PauseStore } from "../assignor/pause.mts";
+import { createScheduler } from "../assignor/scheduler.mts";
+import { StateStore } from "../assignor/state.mts";
+import type { Job } from "../issue/run.mts";
+import { acquireLock } from "../lib/lock.mts";
+import { writeOutcome, type Outcome } from "../lib/outcome.mts";
+import type { GitHub } from "../services/github/index.mts";
+import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
 
 let fails = 0;
 const ok = (label: string, cond: boolean, detail = "") => {
   if (!cond) fails++;
   console.log(`${cond ? "✓" : "✗"} ${label}${cond ? "" : `\n    ${detail}`}`);
 };
+const tick = () => new Promise((r) => setTimeout(r, 0)); // flush the scheduler's microtasks
+
+/** Wait for something a TIMER does, bounded so a regression is a failing assertion rather
+ *  than a smoke that hangs the whole suite. */
+async function until(cond: () => boolean, ms = 2_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 2));
+  return cond();
+}
 
 // ── quota: the whole subscription is spent, so every run would hit the same wall ──
 {
@@ -168,5 +193,319 @@ const ok = (label: string, cond: boolean, detail = "") => {
   ok("excerpt: bounding the capture does not change the class", e.class === "setup" && e.scope === "pipeline", JSON.stringify({ class: e.class, scope: e.scope }));
 }
 
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
+// ─────────────────────────────────────────────────────────────────────────────────────
+// The ACT layer. Only `pipeline` stops everything — that is the whole of ADR-0002, and
+// the fixtures below drive it through the real pause store, the real scheduler and the
+// real Assignor rather than asserting on a classification nobody acted on.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** One routed repo, with one trigger label: nothing here is about admission. */
+const TABLE: Record<string, RepoConfig> = {
+  "acme/finance": {
+    path: "repos/finance",
+    imageName: "sunday-finance",
+    promptFile: "docs/prompt.md",
+    triggerLabels: ["sunday"],
+  },
+};
+
+const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-failure-${process.pid}`);
+let caseNo = 0;
+
+/** `lib/paths.mts`'s own key-to-segment rule, so the harness names files the way the real
+ *  layout would. */
+const slug = (key: string) => key.replace(/[^A-Za-z0-9._-]/g, "-");
+
+/** A real `FailurePolicy` over the real scheduler and the real pause store, plus the real
+ *  Assignor that routes failures INTO it — the two things that reach the world (GitHub,
+ *  the fork) substituted, and every path pointed into this case's own dir so the real
+ *  `var/` is never touched. */
+function harness(over: { pause?: PauseStore; resumeGraceMs?: number } = {}) {
+  const caseDir = resolve(dir, `case-${caseNo++}`);
+  /** Every line, at any level — the run log is the one destination every level routes to. */
+  const lines: LogLine[] = [];
+  /** What would actually be posted on an issue. A pipeline-scope line must never get
+   *  here: a halt has no business commenting on whichever item happened to hit it. */
+  const comments: LogLine[] = [];
+  const logger = new Logger({
+    console: () => {},
+    runLog: (line) => void lines.push(line),
+    eventLog: () => {},
+    github: (line) => void comments.push(line),
+    phone: () => {},
+  } satisfies Destinations);
+
+  const scheduler = createScheduler(2, logger.child("scheduler"));
+  const pause = over.pause ?? new PauseStore(resolve(caseDir, "pause.json"));
+  const policy = new FailurePolicy({
+    pause,
+    scheduler,
+    log: logger.child("failure"),
+    // Constraint 11: the timing constants are injected, so the suite drives a REAL timer
+    // at millisecond scale instead of a mocked clock.
+    resumeGraceMs: over.resumeGraceMs ?? 5,
+  });
+
+  const claimed: string[] = [];
+  const released: string[] = [];
+  const github: GitHub = {
+    claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
+    release: (repo, issue) => void released.push(`${repo}#${issue}`),
+    // Nothing here is about dependencies: every issue is unblocked.
+    blockedBy: async () => [],
+    issueState: async () => "closed",
+    readIssue: async () => ({ title: "", body: "" }),
+    openPrForHead: async () => undefined,
+  };
+
+  const paths: Paths = {
+    resultPath: (key) => resolve(caseDir, "results", `${slug(key)}.json`),
+    pidPath: (key) => resolve(caseDir, "running", `${slug(key)}.pid`),
+    runLogPath: (fullName, flow) => resolve(caseDir, "log", fullName, flow, "run.log"),
+    eventLogPath: resolve(caseDir, "log", "events.jsonl"),
+  };
+
+  /** The fork, stood in for: it settles only when the case says the child exited, exactly
+   *  as the real one does — so a queued second item is genuinely still waiting. */
+  const forked: Job[] = [];
+  const exits = new Map<string, (exit: ChildExit) => void>();
+  const fork: ForkWorkItem = (job) => {
+    forked.push(job);
+    acquireLock(job.pidPath, process.pid);
+    return new Promise((settle) => exits.set(job.key, settle));
+  };
+
+  const state = new StateStore(resolve(caseDir, "state.json"));
+  const assignor = new Assignor({
+    repos: TABLE,
+    github,
+    log: logger.child("assignor"),
+    scheduler,
+    state,
+    fork,
+    paths,
+    failure: policy,
+  });
+
+  const delivery = (number: number): Delivery => ({
+    event: "issues",
+    action: "labeled",
+    repo: "acme/finance",
+    number,
+    labels: ["sunday"],
+    onPullRequest: false,
+  });
+
+  /** Admit one issue the way a webhook does, and let it reach the fork. */
+  const admit = async (number: number) => {
+    assignor.handle(delivery(number));
+    await tick();
+  };
+
+  /** The child finishing: what it left on disk, then the exit the parent settles on. */
+  const finish = async (number: number, outcome: Partial<Outcome> & Pick<Outcome, "status" | "summary">) => {
+    const key = `acme/finance#${number}`;
+    writeOutcome(paths.resultPath(key), { key, finishedAt: "2026-07-26T00:00:00.000Z", ...outcome });
+    exits.get(key)?.({ code: 0, signal: null });
+    await tick();
+  };
+
+  const started = () => forked.map((j) => j.key);
+  return { policy, scheduler, pause, state, lines, comments, claimed, released, admit, finish, started };
+}
+
+/** The item every act case below is about, and a second one queued alongside it: whether
+ *  the OTHER work item keeps running is the entire difference between a scope and a halt. */
+const ITEM = { key: "acme/finance#57", repo: "acme/finance", issue: 57 };
+
+/** The halt line — pipeline scope, so it is the one line that carries no repo at all. */
+const halted = (lines: LogLine[]) => lines.find((l) => l.message.includes("halt"));
+
+try {
+  // ── quota: the subscription's window is spent, so every run would hit the same wall.
+  //    The pause is armed DURABLY as well as in memory — the scheduler's flag dies with
+  //    the process, and a restart that read no file would spend the quota it is waiting on ──
+  {
+    const h = harness({ resumeGraceMs: 30 });
+    const resetAt = Date.now() + 40;
+    h.policy.failed({
+      text: `Usage limit reached. Your limit resets at ${new Date(resetAt).toISOString()}`,
+      repo: ITEM.repo,
+      item: ITEM,
+    });
+
+    ok("quota: the scheduler is paused, so nothing new starts anywhere", h.scheduler.isPaused());
+    const armed = h.pause.read();
+    ok("quota: the pause is durable, so a restart inside the window stays paused", armed !== undefined, JSON.stringify(armed));
+    ok(
+      "quota: the resume is the reset PLUS the grace — resuming exactly at it races the provider",
+      armed?.resumeAt === resetAt + 30,
+      JSON.stringify(armed),
+    );
+
+    // The halt is only worth anything if it actually holds work back: an item admitted
+    // into the window is claimed and queued, and starts when the window closes.
+    await h.admit(58);
+    ok("quota: work admitted into the window is held, not started", h.started().length === 0, h.started().join(","));
+
+    ok("quota: the window closing resumes the pipeline by itself", await until(() => !h.scheduler.isPaused()));
+    ok(
+      "quota: and disarms the pause on disk, or the next boot re-applies a window that has closed",
+      h.pause.read() === undefined,
+      JSON.stringify(h.pause.read()),
+    );
+    await tick();
+    ok("quota: the work it held starts as soon as it resumes", h.started().join(",") === "acme/finance#58", h.started().join(","));
+  }
+
+  // ── a quota that named no reset has nothing to lift itself on. It waits for a human,
+  //    and must NOT guess a window: resuming on a guess feeds the backlog into the wall ──
+  {
+    const h = harness();
+    h.policy.failed({ text: "You have exceeded your usage limit for this period.", repo: ITEM.repo, item: ITEM });
+    ok("quota (no reset): the pipeline is paused", h.scheduler.isPaused());
+    ok("quota (no reset): with nothing to auto-resume on", h.pause.read()?.resumeAt === undefined, JSON.stringify(h.pause.read()));
+    await new Promise((r) => setTimeout(r, 30));
+    ok("quota (no reset): so it is still held a window later — a human lifts this one", h.scheduler.isPaused() && h.pause.read() !== undefined);
+  }
+
+  // ── auth: the credential is process-wide, so every run fails identically and instantly.
+  //    No reset exists — a token does not fix itself on a clock — and it is reported as a
+  //    failure rather than a wall ──
+  {
+    const h = harness();
+    h.policy.failed({ text: "Request failed: 403 Forbidden — invalid API key", repo: ITEM.repo, item: ITEM });
+    ok("auth: the pipeline is paused", h.scheduler.isPaused());
+    ok("auth: no resumeAt — a credential does not fix itself on a clock", h.pause.read()?.resumeAt === undefined, JSON.stringify(h.pause.read()));
+    ok("auth: reported at error, which is what reaches the phone", halted(h.lines)?.level === "error", JSON.stringify(halted(h.lines)));
+  }
+
+  // ── the level is the priority channel: a quota wall is operator-facing and NOT a break
+  //    (`alert`), an auth failure is something broken (`error`). Both reach the phone ──
+  {
+    const h = harness();
+    h.policy.failed({ text: "Claude usage limit reached — resets at 2099-01-01T00:00:00Z", repo: ITEM.repo, item: ITEM });
+    ok("quota: reported at alert — a wall Sunday is waiting out, not a break", halted(h.lines)?.level === "alert", JSON.stringify(halted(h.lines)));
+    ok("halt: the line says WHY the pipeline stopped", halted(h.lines)?.message.includes("quota exhausted") === true, JSON.stringify(halted(h.lines)));
+  }
+
+  // ── constraint 5: a pipeline-scope line carries NO repo and NO target, so a halt lands
+  //    on no issue thread. The item that happened to hit the wall did nothing wrong, and
+  //    the next 200 items would each carry the same comment ──
+  {
+    for (const [what, text] of [
+      ["quota", "Usage limit reached. Your limit resets at 2099-01-01T00:00:00Z"],
+      ["auth", "Request failed: 403 Forbidden — invalid API key"],
+    ] as const) {
+      const h = harness();
+      h.policy.failed({ text, repo: ITEM.repo, item: ITEM });
+      const line = halted(h.lines);
+      ok(`${what}: the halt names no repo and no issue`, line?.context.repo === undefined && line?.context.target === undefined, JSON.stringify(line));
+      ok(`${what}: so it reaches no issue thread`, h.comments.length === 0, JSON.stringify(h.comments.map((c) => c.message)));
+    }
+  }
+
+  // ── …and NOTHING ELSE does. This is the defect ADR-0002 removes: v1 halted the whole
+  //    pipeline on anything it did not recognise, which is why it sat stopped for hours on
+  //    one bad issue. Only the three above may arm the pause (constraint 4) ──
+  {
+    for (const [what, input] of [
+      ["unknown", { text: "something entirely unexpected happened" }],
+      ["a dead child", { text: "child exited with code 1 leaving no outcome" }],
+      ["transient", { text: "429 Too Many Requests — retry-after: 30" }],
+      ["a broken image", { text: "Provider 'docker' create failed: Image 'x:latest' not found locally." }],
+      // The teeth of constraint 3: the agent's own failure description is arbitrary text,
+      // and no phrase inside it may reach out and stop everyone else's work.
+      ["the agent's own verdict", { text: "I gave up: the usage limit reached in the task.", agentFailed: true }],
+    ] as const) {
+      const h = harness();
+      h.policy.failed({ ...input, repo: ITEM.repo, item: ITEM });
+      ok(`${what}: the pipeline keeps running`, !h.scheduler.isPaused(), JSON.stringify(h.lines.map((l) => l.message)));
+      ok(`${what}: and nothing is armed on disk, so the next boot starts working`, h.pause.read() === undefined, JSON.stringify(h.pause.read()));
+      ok(`${what}: and it is accounted for by a line`, h.lines.length > 0);
+    }
+
+    // The one setup failure that is not one repo's: no image anywhere can be built or run
+    // while the daemon is down, so this is the third thing allowed to stop the pipeline.
+    const d = harness();
+    d.policy.failed({ text: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock", repo: ITEM.repo });
+    ok("a dead container daemon: no sandbox can be created anywhere, so this one halts", d.scheduler.isPaused() && d.pause.read() !== undefined);
+    ok("a dead container daemon: reported at error — something is broken", halted(d.lines)?.level === "error", JSON.stringify(halted(d.lines)));
+  }
+
+  // ── the routing: a failure reaches the policy through ONE sink (constraint 1) —
+  //    `Assignor.record`, which the live path and boot's recovery sweep already share. A
+  //    second entry point is how v1's live and recovery paths drifted apart ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.admit(58);
+    ok("record: two work items are running", h.started().join(",") === "acme/finance#57,acme/finance#58", h.started().join(","));
+
+    await h.finish(57, { status: "failed", summary: "Usage limit reached. Your limit resets at 2099-01-01T00:00:00Z" });
+    ok("record: a failed outcome reaches the policy, and the wall in it halts the pipeline", h.scheduler.isPaused());
+    ok("record: with the pause armed durably", h.pause.read() !== undefined, JSON.stringify(h.pause.read()));
+    // Constraint 6: the raw error is the outcome milestone the apply already posted, and
+    // the halt says what Sunday is DOING — one copy of the error on the issue, not two.
+    const raw = h.comments.filter((c) => c.message.includes("Usage limit reached"));
+    ok("record: the raw error reaches the issue exactly once", raw.length === 1, JSON.stringify(h.comments.map((c) => c.message)));
+  }
+
+  // ── the other half of the same sink, and the whole point of the issue: an unrecognised
+  //    failure stops ONE work item, and every other item in every other repo keeps going ──
+  {
+    const h = harness();
+    await h.admit(57);
+    await h.finish(57, { status: "failed", summary: "something entirely unexpected happened" });
+    ok("record: an unrecognised failure leaves the pipeline running", !h.scheduler.isPaused(), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("record: and arms nothing on disk", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
+
+    await h.admit(58);
+    ok("record: so the next work item starts", h.started().includes("acme/finance#58"), h.started().join(","));
+    await h.finish(58, { status: "done", summary: "shipped it" });
+    ok("record: and runs all the way to done", h.state.get("acme/finance#58")?.status === "done", JSON.stringify(h.state.all()));
+    ok("record: a successful outcome is never classified", !h.lines.some((l) => l.message.includes("shipped it") && l.module === "failure"));
+  }
+
+  // ── an auth halt armed WHILE a quota window is running outranks it: the quota's timer
+  //    is not the auth halt's to lift, and resuming into a credential that is still broken
+  //    fails every queued item instantly and re-arms nothing that says so ──
+  {
+    const h = harness({ resumeGraceMs: 5 });
+    h.policy.failed({ text: `Usage limit reached. Your limit resets at ${new Date(Date.now() + 10).toISOString()}`, repo: ITEM.repo });
+    h.policy.failed({ text: "Request failed: 403 Forbidden — invalid API key", repo: ITEM.repo });
+    await new Promise((r) => setTimeout(r, 60)); // past the quota window
+
+    ok("a later halt wins: the quota window closing does not lift the auth halt", h.scheduler.isPaused());
+    ok("a later halt wins: and the auth halt is still armed on disk", h.pause.read()?.reason.includes("auth") === true, JSON.stringify(h.pause.read()));
+  }
+
+  // ── constraint 9: the policy NEVER throws. It sits on every failure path and is reached
+  //    from timers with nobody above them, so a throw is either a work item that dies
+  //    twice or an unhandled rejection that takes the parent down under `restart: always`.
+  //    And the in-memory pause goes on FIRST, so a disk that cannot be written still
+  //    leaves the pipeline stopped rather than spending the quota it was told about ──
+  {
+    /** A real store on a disk that will not take it: `gh` fails, and so does `write`. */
+    class FullDisk extends PauseStore {
+      override write(): void {
+        throw new Error("ENOSPC: no space left on device");
+      }
+    }
+    const h = harness({ pause: new FullDisk(resolve(dir, "full-disk", "pause.json")) });
+    let threw = false;
+    try {
+      h.policy.failed({ text: "Request failed: 403 Forbidden — invalid API key", repo: ITEM.repo, item: ITEM });
+    } catch {
+      threw = true;
+    }
+    ok("never throws: a durable write that fails does not reach the caller", !threw);
+    ok("never throws: and the pipeline is stopped anyway — the in-memory pause cannot fail", h.scheduler.isPaused());
+    ok("never throws: with what broke said out loud", h.lines.some((l) => l.message.includes("ENOSPC")), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
+} finally {
+  rmSync(dir, { recursive: true, force: true });
+}
 process.exit(fails === 0 ? 0 : 1);

@@ -16,6 +16,17 @@
 // The quota/auth/transient patterns are PROVISIONAL. The real provider's error text is not
 // known until the first live quota hit or 403, which is why an unrecognised failure still
 // carries its raw excerpt into the durable log — that capture is what tightens these.
+//
+// The ACT layer (`FailurePolicy`, below) is the other half: what Sunday DOES about a
+// failure of each scope. It is where the pause is armed, and it is reached from exactly
+// three places (constraint 1) — `Assignor.record`, `boot.images()` and #43's restack lane.
+
+import type { PauseState, PauseStore } from "./pause.mts";
+import type { Scheduler } from "./scheduler.mts";
+import type { ModuleLogger } from "#services/logger.mts";
+// Type-only in BOTH directions (`assignor/index.mts` imports this class the same way), so
+// nothing of this pair survives into the runtime import graph.
+import type { WorkItemRef } from "./index.mts";
 
 /** quota: the subscription's window is spent — every run would hit the same wall.
  *  auth: the credential is process-wide, so every run fails identically and instantly.
@@ -208,4 +219,150 @@ export function classify(text: string, options: ClassifyOptions = {}): Failure {
 
   const fallback = options.fallback ?? "unknown";
   return { class: fallback, scope: scopeOf(fallback, lower), summary: "unrecognised failure", excerpt: raw };
+}
+
+/** How long AFTER a quota's reset the pipeline starts spending again. The reset the
+ *  provider names is the instant the window opens, and resuming exactly on it races a
+ *  clock skew straight back into the wall — which re-arms the pause for another window. */
+const RESUME_GRACE_MS = 60_000;
+
+/** One failure, as the path that caught it has it. */
+export interface FailureInput {
+  /** The failure's own text — an agent seam's flattened message, a build's output tail,
+   *  the parent's dead-child line. Never prose Sunday composed (constraint 3). */
+  text: string;
+  /** Which repo it happened in. The only context a repo-scope line carries, and the
+   *  reason it is separate from `item`: boot's image build has no work item at all. */
+  repo: string;
+  /** The work item it happened to, when it happened to one. */
+  item?: WorkItemRef;
+  /** The agent RAN and reported this itself — a typed fact off the outcome. */
+  agentFailed?: boolean;
+  /** The class for text that matches nothing; boot passes `setup`. */
+  fallback?: FailureClass;
+}
+
+/** Everything the policy needs and constructs none of: the durable pause it arms, the
+ *  queue it stops, and the Logger it says everything through. */
+export interface FailurePolicyDeps {
+  pause: PauseStore;
+  scheduler: Scheduler;
+  log: ModuleLogger;
+  /** Constraint 11: injected with a real default, so the suite drives the auto-resume
+   *  with a real timer at millisecond scale instead of waiting out a quota window. */
+  resumeGraceMs?: number;
+}
+
+/** What Sunday DOES about a failure. One entry — `failed()` — which classifies, and then
+ *  acts as far as the scope reaches and no further: a `pipeline` failure stops everything,
+ *  and nothing else does (ADR-0002).
+ *
+ *  It NEVER throws (constraint 9). It sits on every failure path and is reached from
+ *  timers with nobody above them, so a throw here turns a handled failure into a dead work
+ *  item or an unhandled rejection that takes the parent down under `restart: always`
+ *  (ADR-0001). Durable state — the pause file — is what actually stops the pipeline. */
+export class FailurePolicy {
+  // Declared, not parameter properties: Node runs `.mts` in strip-only mode, which
+  // rejects `constructor(private x)`.
+  private readonly pause: PauseStore;
+  private readonly scheduler: Scheduler;
+  private readonly log: ModuleLogger;
+  private readonly resumeGrace: number;
+
+  constructor(deps: FailurePolicyDeps) {
+    this.pause = deps.pause;
+    this.scheduler = deps.scheduler;
+    this.log = deps.log;
+    this.resumeGrace = deps.resumeGraceMs ?? RESUME_GRACE_MS;
+  }
+
+  /** Classify a failure and act on it. The one entry point. */
+  failed(input: FailureInput): void {
+    this.guard(`the failure policy could not act on ${input.item?.key ?? input.repo}`, () => {
+      const failure = classify(input.text, { fallback: input.fallback, agentFailed: input.agentFailed });
+      if (failure.scope === "pipeline") {
+        this.halt(failure);
+        return;
+      }
+      // Everything else: recorded, and the rest of the pipeline carries on. Stopping the
+      // repo and the retry-then-quarantine ladder are the commits after this one; what is
+      // already true here is the change ADR-0002 asks for — v1 halted on every one of
+      // these. `info`, because the failure's own text is on the milestone the caller
+      // already posted (constraint 6) and there is nothing yet for a human to do.
+      // Constraint 5 again: a repo-scope line carries the repo and NOT the item, so one
+      // broken image does not comment on whichever issue found it first.
+      const context = failure.scope === "repo" ? { repo: input.repo } : { repo: input.repo, target: input.item?.issue };
+      this.log.info(`· ${failure.class} (${failure.scope}) ${input.item?.key ?? input.repo} — ${failure.summary}`, context);
+    });
+  }
+
+  /** Stop EVERYTHING: only `quota`, `auth` and a dead container daemon reach here
+   *  (constraint 4).
+   *
+   *  The queue first, the file second. The scheduler's flag is in-memory and cannot fail,
+   *  so pausing first means the wall is respected from this instant even if the disk write
+   *  is what breaks — and the file is what makes the pause survive the restart that would
+   *  otherwise spend the quota it is waiting on (`assignor/pause.mts`). */
+  private halt(failure: Failure): void {
+    this.scheduler.pause(failure.summary);
+    const resumeAt = failure.resetAt === undefined ? undefined : failure.resetAt + this.resumeGrace;
+    const armed: PauseState = { reason: failure.summary, since: Date.now(), resumeAt };
+    this.pause.write(armed);
+    // What Sunday is DOING about it — the failure's own text is already on the work item's
+    // outcome milestone (constraint 6), and this line is the one that pages a human.
+    // NO repo and NO target (constraint 5): a halt has no business commenting on whichever
+    // work item happened to be the one that hit the wall, and the next hundred would each
+    // carry the same comment. `services/logger.mts` needs both to address an issue, so
+    // carrying neither is the whole mechanism.
+    // `alert` for a quota and `error` for everything else that gets here: they reach the
+    // same sinks, and what differs is what the durable event says happened — a quota wall
+    // is Sunday waiting out somebody else's window, an auth failure (or a dead daemon) is
+    // something broken that a human has to go and fix.
+    const line = `⏸ pipeline halted — ${failure.summary}${
+      resumeAt === undefined ? " — awaiting a human resume" : `, resuming ${new Date(resumeAt).toISOString()}`
+    }`;
+    if (failure.class === "quota") this.log.alert(line);
+    else this.log.error(line);
+    if (resumeAt !== undefined) this.scheduleResume(armed, resumeAt);
+  }
+
+  /** Lift the pause when the window closes. A quota wall is the one failure with a KNOWN
+   *  end, and without this the pipeline waits for a human to notice a window that expired
+   *  hours ago — which is v1's halt wearing a timestamp.
+   *
+   *  It re-reads the file and lifts only the pause it armed ITSELF: a LATER one (an auth
+   *  halt armed while this window ran) is not this timer's to lift, and resuming into a
+   *  credential that is still broken fails every queued item instantly. Matched on the
+   *  whole record rather than on `since` alone, because two failures landing in the same
+   *  millisecond is exactly how the auth halt gets lifted by somebody else's window.
+   *
+   *  Boot owns the OTHER half of this: a pause left armed by a parent that died is
+   *  re-armed and re-scheduled from the file (`boot.mts` `rearm`), because this timer died
+   *  with the process that set it. */
+  private scheduleResume(armed: PauseState, resumeAt: number): void {
+    setTimeout(
+      () =>
+        this.guard(`the ${armed.reason} pause could not be lifted`, () => {
+          const found = this.pause.read();
+          if (found?.since !== armed.since || found.reason !== armed.reason) {
+            this.log.info(`· the ${armed.reason} window closed, and a later pause is holding the pipeline`);
+            return;
+          }
+          this.pause.clear();
+          this.scheduler.resume();
+          this.log.info(`▶ pipeline resumed — the window closed (${armed.reason})`);
+        }),
+      Math.max(0, resumeAt - Date.now()),
+    );
+  }
+
+  /** Every entry this class has, wrapped (constraint 9): `failed()` is on every failure
+   *  path, and the auto-resume fires from a timer with no caller at all. */
+  private guard(what: string, act: () => void): void {
+    try {
+      act();
+    } catch (err) {
+      this.log.error(`✗ ${what} — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }

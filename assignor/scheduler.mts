@@ -78,11 +78,12 @@ export function createScheduler(maxConcurrency: number, log: ModuleLogger): Sche
     Promise.resolve()
       .then(() => item.run())
       .catch((err: unknown) =>
-        // Reported, never swallowed — but `info`, like every non-milestone line here: it
-        // is the apply path that records a failed work item durably (and #39 that
-        // classifies it), so escalating from the scheduler would double-report a failure
-        // to the operator with none of that context.
-        log.info(`✗ ${item.key} failed: ${err instanceof Error ? err.message : String(err)}`),
+        // The BACKSTOP, and `error` since #39: the apply path classifies every failed
+        // outcome and acts on its scope, so a rejection that escaped it reached no policy
+        // at all — nothing recorded it, nothing will retry or quarantine it, and the work
+        // item is simply gone. It carries no repo or target, so it pages an operator
+        // without commenting on an issue the scheduler knows nothing about.
+        log.error(`✗ ${item.key} failed: ${err instanceof Error ? err.message : String(err)}`),
       )
       .finally(() => {
         heldBranches.delete(item.branch);
