@@ -62,6 +62,24 @@ async function until(cond: () => boolean, ms = 2_000): Promise<boolean> {
 
   const o = classify("OAuth authentication failed");
   ok("auth: a credential failure in other words is still auth", o.class === "auth" && o.scope === "pipeline", JSON.stringify(o));
+
+  // #39: `credential` and `authentication` matched BARE, and auth is `pipeline` — so an item
+  // failure whose text merely NAMED a credential file halted the whole backlog. Reachable
+  // from any repo with such a path, which is most of them.
+  const p = classify("Merge conflict in src/auth/credentials.ts");
+  ok("auth: a credential in a file PATH is one item's problem, not a wall", p.class === "unknown" && p.scope === "item", JSON.stringify(p));
+
+  const t = classify("npm test failed: test/authentication.test.ts — 2 assertions failed");
+  ok("auth: a failing authentication test stops its own item", t.class === "unknown" && t.scope === "item", JSON.stringify(t));
+
+  // The other direction, and the WORSE failure of the two: a real wall that stops halting
+  // feeds the entire backlog into the same 403, one wasted run at a time. So a credential
+  // word next to a word that says it was refused still halts, whichever way round it reads.
+  const g = classify("gh: HTTP 401: Bad credentials (https://api.github.com/user)");
+  ok("auth: a refused credential still stops the pipeline", g.class === "auth" && g.scope === "pipeline", JSON.stringify(g));
+
+  const x = classify("The OAuth token has expired — run /login");
+  ok("auth: an expired token still stops the pipeline", x.class === "auth" && x.scope === "pipeline", JSON.stringify(x));
 }
 
 // ── setup: the sandbox image is per-repo, so a broken one stops that repo and nothing

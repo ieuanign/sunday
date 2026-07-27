@@ -91,6 +91,33 @@ const RETRY_AFTER = /retry[\s-]?after[^0-9]{0,10}\d+|\b\d+\s*seconds?\b/;
 const TRANSIENT =
   /\b429\b|too many requests|rate.?limit|\b5\d\d\b|graphql: something went wrong|bad gateway|service unavailable|timeout|timed out|econnrefused|econnreset|etimedout|socket hang ?up|network|fetch failed|enotfound|eai_again/;
 
+/** Words that NAME a credential without saying anything is wrong with one — `credentials.ts`
+ *  in a merge conflict, a failing `authentication.test.ts`, a path under `oauth/`. They used
+ *  to match BARE, and auth is `pipeline`: an item failure whose text merely mentioned a
+ *  credential shredded the entire backlog (#39). No earlier pattern can fix that, because the
+ *  incidental mention rides in on an item failure of ANY shape — so the gate belongs here. */
+const CREDENTIAL = "credentials?|authentication|oauth";
+
+/** The credential named as the broken thing: "invalid credentials", "bad credential". Read in
+ *  EITHER order, so `expired oauth token` and `oauth token has expired` both land. */
+const REFUSED = "invalid|expired|revoked|missing|bad";
+
+/** …and the verdicts that only count AFTER it: "authentication failed", "credentials denied".
+ *  Ahead of it they ARE the defect — "failed to read credentials.ts" is one item's problem. */
+const REFUSED_AFTER = `${REFUSED}|failed|failure|error|denied|rejected|required`;
+
+/** A credential is the process's, so a refused one fails every run identically — the second
+ *  of the three failures allowed to stop the pipeline. `403`, `forbidden`, `unauthorized` and
+ *  an `invalid api key` say that on their own; the ambiguous words must sit next to a word
+ *  that says the credential was refused, with only a short filler between and never across a
+ *  `.` or a `/` — which is what keeps a file path out and a real 403 in. Being too strict here
+ *  is the worse failure: a wall that stops halting burns the whole backlog on the same 403. */
+const AUTH = new RegExp(
+  "\\b403\\b|forbidden|unauthorized|invalid api key|invalid.{0,12}token" +
+    `|(?:${REFUSED})[^./\\n]{0,12}(?:${CREDENTIAL})` +
+    `|(?:${CREDENTIAL})[^./\\n]{0,16}(?:${REFUSED_AFTER})`,
+);
+
 const EXCERPT_MAX = 2000;
 
 /** Keep the TAIL — provider errors and a build's failing RUN line land at the end. */
@@ -187,7 +214,7 @@ export function classify(text: string, options: ClassifyOptions = {}): Failure {
     };
   }
 
-  if (/\b403\b|forbidden|unauthorized|invalid api key|invalid.{0,12}token|authentication|credential|oauth/.test(lower)) {
+  if (AUTH.test(lower)) {
     return { class: "auth", scope: SCOPE.auth, summary: "auth failure (403 / invalid credential)", excerpt: raw };
   }
 
