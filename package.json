@@ -8,7 +8,8 @@
     "#lib/*": "./lib/*",
     "#services/*": "./services/*",
     "#assignor/*": "./assignor/*",
-    "#issue/*": "./issue/*"
+    "#issue/*": "./issue/*",
+    "#pr/*": "./pr/*"
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {
