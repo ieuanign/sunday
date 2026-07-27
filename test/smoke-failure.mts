@@ -428,6 +428,29 @@ try {
     ok("quota (no reset): so it is still held a window later — a human lifts this one", h.scheduler.isPaused() && h.pause.read() !== undefined);
   }
 
+  // ── nor does a quota whose reset is further out than a timer can hold. `setTimeout`
+  //    CLAMPS a delay over ~24.8 days to 1ms instead of refusing it, so a nonsense reset —
+  //    the likeliest product of the PROVISIONAL patterns until real provider text tightens
+  //    them — would lift the pause almost at once and feed the backlog straight back into
+  //    the wall. An unusable reset gets the same answer as an absent one: a human lifts it ──
+  {
+    const h = harness();
+    h.policy.failed({ text: "Usage limit reached. Your limit resets at 2099-01-01T00:00:00Z", repo: ITEM.repo, item: ITEM });
+    ok("quota (unholdable reset): the pipeline is paused", h.scheduler.isPaused());
+    ok(
+      "quota (unholdable reset): with nothing to auto-resume on, so the next boot re-arms it as a human's to lift",
+      h.pause.read()?.resumeAt === undefined,
+      JSON.stringify(h.pause.read()),
+    );
+    ok(
+      "quota (unholdable reset): and the reset it named is reported rather than silently dropped",
+      halted(h.lines)?.message.includes("2099-01-01") === true && halted(h.lines)?.message.includes("further out than a timer can hold") === true,
+      JSON.stringify(halted(h.lines)),
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    ok("quota (unholdable reset): so no clamped timer lifts it a moment later", h.scheduler.isPaused() && h.pause.read() !== undefined);
+  }
+
   // ── auth: the credential is process-wide, so every run fails identically and instantly.
   //    No reset exists — a token does not fix itself on a clock — and it is reported as a
   //    failure rather than a wall ──

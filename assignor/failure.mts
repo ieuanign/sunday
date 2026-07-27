@@ -228,6 +228,16 @@ export function classify(text: string, options: ClassifyOptions = {}): Failure {
  *  clock skew straight back into the wall — which re-arms the pause for another window. */
 const RESUME_GRACE_MS = 60_000;
 
+/** Node's `setTimeout` ceiling — 2^31-1 ms, ~24.8 days. A longer delay is not refused: it
+ *  is silently CLAMPED to 1ms, and THAT silent clamp is the danger. A reset far enough out
+ *  to overflow it would lift the pause almost immediately and feed the whole backlog back
+ *  into the wall it is waiting on — a wrong answer rather than an error, which is the shape
+ *  ADR-0002 exists to design out. It is not a hypothetical: the quota patterns above are
+ *  PROVISIONAL until real provider text tightens them, so a mis-parse producing a nonsense
+ *  far-future timestamp is likeliest right now. A reset no timer can hold therefore gets
+ *  the same answer as a reset the provider never named — the pipeline waits for a human. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /** Does an incoming halt say anything the ARMED one does not? Compared on the only thing a
  *  halt decides — whether the pipeline lifts itself, and when — rather than on the reason
  *  text: three agents hitting the same wall a second apart word it identically, and an auth
@@ -547,7 +557,13 @@ export class FailurePolicy {
    *  is what breaks — and the file is what makes the pause survive the restart that would
    *  otherwise spend the quota it is waiting on (`assignor/pause.mts`). */
   private halt(failure: Failure): void {
-    const resumeAt = failure.resetAt === undefined ? undefined : failure.resetAt + this.resumeGrace;
+    const reset = failure.resetAt === undefined ? undefined : failure.resetAt + this.resumeGrace;
+    // A reset no timer can hold is dropped HERE, before anything is armed, rather than
+    // where the timer is set (see MAX_TIMER_MS): the pause file, the dedup below, the line
+    // this logs and the next boot's re-arm (`boot.mts`, which re-schedules whatever
+    // `resumeAt` it finds) must all agree that this one waits for a human — an armed
+    // `resumeAt` nothing can fire is the same lie written down.
+    const resumeAt = reset !== undefined && reset - Date.now() <= MAX_TIMER_MS ? reset : undefined;
     // Deduplicated for the same reason a repo stop is, and harder: the wall is
     // PROCESS-WIDE, so every agent in flight hits it within seconds of the first and each
     // failed outcome reaches here on its own. `alert`/`error` route to the phone with no
@@ -578,7 +594,9 @@ export class FailurePolicy {
     // is Sunday waiting out somebody else's window, an auth failure (or a dead daemon) is
     // something broken that a human has to go and fix.
     const line = `⏸ pipeline halted — ${failure.summary}${
-      resumeAt === undefined ? " — awaiting a human resume" : `, resuming ${new Date(resumeAt).toISOString()}`
+      resumeAt !== undefined
+        ? `, resuming ${new Date(resumeAt).toISOString()}`
+        : `${reset === undefined ? "" : " — that reset is further out than a timer can hold"} — awaiting a human resume`
     }`;
     if (failure.class === "quota") this.log.alert(line);
     else this.log.error(line);
