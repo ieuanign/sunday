@@ -67,6 +67,16 @@ const paths = await import("../lib/paths.mts");
   );
 }
 
+// ── restack worktree: ephemeral, under var/ — never inside the child checkout (#21) ──
+{
+  const wt = paths.restackWorktreePath("acme/finance", "feat/57");
+  ok(
+    "restack: one flat worktree dir per repo+branch under var/restack",
+    relative(repoRoot, wt) === "var/restack/acme-finance-feat-57",
+    wt,
+  );
+}
+
 // ── result + PID lock: one flat file per work-item key (the key carries `/` and `#`) ──
 {
   const result = paths.resultPath("acme/finance#57");
@@ -98,6 +108,7 @@ const paths = await import("../lib/paths.mts");
     paths.tokenReportDir("acme/finance"),
     paths.resultPath("acme/finance#57"),
     paths.pidPath("acme/finance#pr12"),
+    paths.restackWorktreePath("acme/finance", "feat/57"),
   ];
   const stray = all.filter((p) => p !== varRoot && !p.startsWith(`${varRoot}${sep}`));
   ok("layout: every durable path is under var/", stray.length === 0, stray.join("\n    "));

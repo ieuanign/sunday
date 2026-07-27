@@ -10,7 +10,7 @@
 import type { Outcome } from "#lib/outcome.mts";
 import type { Agent, AgentRunResult } from "#services/agent/index.mts";
 import type { DiffStat, Git } from "#services/git.mts";
-import type { GitHubRun } from "#services/github/index.mts";
+import { AWAITING_HUMAN_LABEL, type GitHubRun } from "#services/github/index.mts";
 import type { LogContext, ModuleLogger } from "#services/logger.mts";
 import { composeBody } from "./body.mts";
 import { freshPrompt, RESULT_TAG, resultSchema, resumePrompt, type IssueResult } from "./prompt.mts";
@@ -18,9 +18,6 @@ import { freshPrompt, RESULT_TAG, resultSchema, resumePrompt, type IssueResult }
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
-
-/** The label that says this run stopped to ask, and the item is the human's now. */
-const AWAITING_HUMAN = "awaiting-human";
 
 /** One issue run, fully resolved. Every path is absolute and every file already read: the
  *  entry point (`issue/run.mts`) resolves them from the Job, so nothing in here derives a
@@ -102,7 +99,7 @@ export class IssueModule {
         // Straight away, not at the end: from here on the item is working, not waiting on
         // anybody. The resuming child does this itself so the Assignor's GitHub seam stays
         // the two writes it takes.
-        await this.github.removeLabels(input.repo, input.issue, [AWAITING_HUMAN]);
+        await this.github.removeLabels(input.repo, input.issue, [AWAITING_HUMAN_LABEL]);
       }
       // The floor's sub-agents write inside the worktree; excluded, or the library
       // preserves the dirty worktree and cleanup cannot delete the branch. Idempotent,
@@ -137,7 +134,7 @@ export class IssueModule {
       const { signal, description, question } = result.output;
       if (signal === "gate") {
         gated = true;
-        await this.github.addLabels(input.repo, input.issue, [AWAITING_HUMAN]);
+        await this.github.addLabels(input.repo, input.issue, [AWAITING_HUMAN_LABEL]);
         this.log.info("gate — asked the human, awaiting-human", about);
         // The question travels as the SUMMARY: the parent's outcome milestone posts it as
         // the one comment this work item gets, and it reaches the human even if the parent

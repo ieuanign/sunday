@@ -22,11 +22,21 @@ export const QUARANTINE_LABEL = "quarantined";
  *  second one would spend a whole agent run re-deciding what it already decided. */
 export const AGENT_FAILED_LABEL = "agent-failed";
 
+/** The label that says a HUMAN has to act before this moves again: an issue run that
+ *  stopped to ask, and a PR whose restack hit a conflict Sunday will not guess at (#43).
+ *  One home rather than a literal per writer — this is the string a human filters on. */
+export const AWAITING_HUMAN_LABEL = "awaiting-human";
+
 /** How many open issues one repo's re-derive reads, ported unchanged from v1. Boot runs
  *  this per routed repo, so it is the ceiling on how long a restart takes to get back to
  *  work — and a repo with more open issues than this has a backlog no restart should be
  *  trying to swallow in one pass. */
 const OPEN_ISSUE_LIMIT = 200;
+
+/** How many open PRs one repo's dependent scan reads, ported unchanged from v1. It runs
+ *  once per restack step (each one cascades), so it is the ceiling on how long a cascade
+ *  takes — and every PR read here costs a blocker read of its own. */
+const OPEN_PR_LIMIT = 100;
 
 /** The URL `gh webhook forward` registers its own dev webhook against. Matched EXACTLY
  *  when a stranded one is dropped — the delete is the one genuinely dangerous write in
@@ -124,6 +134,48 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
+/** One open pull request, as the restack's dependent scan reads them. */
+export interface OpenPullRequest {
+  number: number;
+  /** The head branch. `feat/<n>` is one of ours; anything else is somebody's own work
+   *  and the scan leaves it alone. */
+  head: string;
+}
+
+/** A merged pull request's head — the fork-point recovery's last resort (ADR-0003).
+ *  GitHub keeps `headRefOid` after the branch is deleted, and the matching
+ *  `refs/pull/<number>/head` still holds the commit, which is why both are needed. */
+export interface MergedPullRequest {
+  number: number;
+  headOid: string;
+}
+
+/** What a RESTACK is allowed to do to GitHub. Extends `GitHub` rather than standing
+ *  alone because the dependent scan asks the same question admission does — what blocks
+ *  this issue (`assignor/dag.mts`) — and reuses that read rather than a second copy of it.
+ *
+ *  Every write here addresses a PULL REQUEST, not an issue: what a restack moves is a
+ *  branch, and by the time one runs its dependent's issue may well be done. */
+export interface GitHubRestack extends GitHub {
+  /** Every open PR in a routed repo, capped (`OPEN_PR_LIMIT`). The FORWARD edge of the
+   *  dependent scan: GitHub's `.../dependencies/blocks` 404s, so nobody can ask "what
+   *  does this unblock" — the only way to find dependents is to read what is open and
+   *  ask each one what blocks IT. */
+  listOpenPrs(repo: string): Promise<OpenPullRequest[]>;
+  /** The merged PR that shipped this head, if there was one. `undefined` is a real
+   *  answer — the head never merged through a PR — and the caller treats it as "no
+   *  recoverable anchor", never as a licence to guess one. */
+  mergedPrForHead(repo: string, head: string): Promise<MergedPullRequest | undefined>;
+  /** Point a PR at a different base. A dependent whose blocker merged targets a branch
+   *  that no longer exists; without this the PR is unmergeable and its diff shows the
+   *  blocker's commits as its own. */
+  retargetPr(repo: string, pr: number, base: string): Promise<void>;
+  /** Label a PR — `awaiting-human` when a restack cannot be replayed. Separate from
+   *  `addLabels` because that one addresses an ISSUE, and the stuck thing here is a
+   *  branch whose issue may already be closed. */
+  labelPr(repo: string, pr: number, labels: string[]): Promise<void>;
+}
+
 /** What the FAILURE POLICY is allowed to do to GitHub: apply a label, and nothing else.
  *  Its own seam for the same reason `GitHubForwarder` is one — the policy sits on every
  *  failure path, and a wider seam is a wider set of writes a handled failure could make.
@@ -199,7 +251,7 @@ export interface GitHubRun {
  *  Left out of the smokes on purpose, like `githubDestination()`: it needs the CLI, a
  *  token and the network. What CAN be wrong is WHEN Sunday claims, releases and
  *  re-derives, and the Assignor's and Reconciler's smokes drive that over a substitute. */
-export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLabels {
+export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLabels, GitHubRestack {
   claim(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--add-label", CLAIM_LABEL]);
   }
@@ -324,6 +376,53 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
       '.[0].url // ""',
     ]);
     return url || undefined;
+  }
+
+  async listOpenPrs(repo: string): Promise<OpenPullRequest[]> {
+    const out = await shA("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "open",
+      "--json",
+      "number,headRefName",
+      "--limit",
+      String(OPEN_PR_LIMIT),
+    ]);
+    const prs = JSON.parse(out) as { number: number; headRefName: string }[];
+    return prs.map((pr) => ({ number: pr.number, head: pr.headRefName }));
+  }
+
+  async mergedPrForHead(repo: string, head: string): Promise<MergedPullRequest | undefined> {
+    // Newest first, so a head that merged more than once (reopened, re-merged) answers
+    // with the merge that actually left the branch where it is.
+    const out = await shA("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--head",
+      head,
+      "--state",
+      "merged",
+      "--json",
+      "number,headRefOid",
+      "--limit",
+      "1",
+    ]);
+    const prs = JSON.parse(out) as { number: number; headRefOid: string }[];
+    return prs.length === 0 ? undefined : { number: prs[0].number, headOid: prs[0].headRefOid };
+  }
+
+  async retargetPr(repo: string, pr: number, base: string): Promise<void> {
+    await shA("gh", ["pr", "edit", String(pr), "--repo", repo, "--base", base]);
+  }
+
+  async labelPr(repo: string, pr: number, labels: string[]): Promise<void> {
+    // One `--add-label` per label, for the reason `addLabels` spells out.
+    await shA("gh", ["pr", "edit", String(pr), "--repo", repo, ...labels.flatMap((label) => ["--add-label", label])]);
   }
 
   async dropForwarderHooks(repo: string): Promise<void> {
