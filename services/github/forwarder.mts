@@ -13,7 +13,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 
-import type { GitHubForwarder } from "./index.mts";
+import type { ForwardersDeps, GitHubForwarder, ReconcileRepo, SpawnForwarder } from "./types.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 
 /** The events Sunday relays, ported verbatim from the retired shell launcher. */
@@ -36,35 +36,6 @@ const SETTLE_MS = 30_000;
 /** How much of a dying forwarder's stderr the drop alert carries. Enough for gh's own
  *  last words, short enough for a phone. */
 const STDERR_TAIL = 400;
-
-/** How one repo's forwarder is actually started. Injected so a smoke can drive the real
- *  supervisor over a child that is not `gh`. */
-export type SpawnForwarder = (repo: string, url: string) => ChildProcess;
-
-/** Re-derive ONE repo's outstanding work — `assignor/reconcile.mts`'s `Reconciler.repo`,
- *  injected as a function. It is that pass rather than a second re-derive route because a
- *  live path and a recovery path that drift are the defect class this rewrite exists to
- *  kill (constraint 7), and it is per repo because a forwarder that dropped for one repo
- *  missed events for that repo alone — sweeping the table would spend every other repo's
- *  rate limit on a gap they never had. */
-export type ReconcileRepo = (repo: string) => Promise<void>;
-
-export interface ForwardersDeps {
-  /** The routed repos, `<owner>/<repo>` — the routing table's own keys. Names only: a
-   *  forwarder cares about nothing else in a repo's config. */
-  repos: string[];
-  /** The port the receiver ACTUALLY bound, so the forwarders can never be pointed at a
-   *  socket nothing is listening on. */
-  port: number;
-  github: GitHubForwarder;
-  /** What a recovered forwarder's repo is caught up with — the missed work a blackout
-   *  leaves behind, which v1 re-derived only on boot and therefore never. */
-  reconcile: ReconcileRepo;
-  log: ModuleLogger;
-  retryMs?: number;
-  settleMs?: number;
-  spawn?: SpawnForwarder;
-}
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

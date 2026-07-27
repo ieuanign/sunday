@@ -26,36 +26,17 @@ import type { Scheduler } from "./scheduler.mts";
 import type { StateStore } from "./state.mts";
 import { AGENT_FAILED_LABEL, QUARANTINE_LABEL, type GitHubLabels } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
-// Type-only in BOTH directions (`assignor/index.mts` imports this class the same way), so
-// nothing of this pair survives into the runtime import graph.
-import type { WorkItemRef } from "./index.mts";
-
-/** quota: the subscription's window is spent — every run would hit the same wall.
- *  auth: the credential is process-wide, so every run fails identically and instantly.
- *  setup: the sandbox could not be built or created — one repo's environment, unless the
- *    container daemon itself is down.
- *  transient: a blip (429, 5xx, network, a branch briefly checked out elsewhere).
- *  run-failed: the agent RAN and reported the failure itself.
- *  unknown: matched nothing. Not a halt any more — one work item is stopped, retried once
- *    with its own error, and quarantined if it fails again. */
-export type FailureClass = "quota" | "auth" | "setup" | "transient" | "run-failed" | "unknown";
-
-/** How far a failure reaches (CONTEXT.md): `pipeline` — every run would fail the same way;
- *  `repo` — this child repo is broken; `item` — only this work item is stuck. */
-export type FailureScope = "pipeline" | "repo" | "item";
-
-export interface Failure {
-  class: FailureClass;
-  scope: FailureScope;
-  /** One-line headline of WHAT happened — the pause reason, and the head of the act
-   *  layer's line. What Sunday is DOING about it is the act layer's to say. */
-  summary: string;
-  /** The failure text, tail-bounded: the capture that tightens these patterns. */
-  excerpt: string;
-  /** Absolute reset time (epoch ms) for a quota that named one. Absent → the pause has
-   *  nothing to lift itself on and waits for a human. */
-  resetAt?: number;
-}
+import type {
+  ClassifyOptions,
+  Failure,
+  FailureClass,
+  FailureInput,
+  FailurePolicyDeps,
+  FailureScope,
+  RepoRecheck,
+  RestartWorkItem,
+  WorkItemRef,
+} from "./types.mts";
 
 /** Which class reaches how far (ADR-0002). `setup` is the one class whose scope is not
  *  fixed here — see `scopeOf`. */
@@ -148,18 +129,6 @@ function parseResetTime(text: string): number | undefined {
  *  repo's image is that repo's problem, a dead daemon is everyone's. */
 function scopeOf(cls: FailureClass, lower: string): FailureScope {
   return cls === "setup" && DAEMON_DOWN.test(lower) ? "pipeline" : SCOPE[cls];
-}
-
-export interface ClassifyOptions {
-  /** The class for text that matches nothing. `unknown` (one item, retried once, then
-   *  quarantined) unless the caller knows better: boot passes `setup`, because a failure
-   *  that came out of an image build is that repo's environment whatever docker said. */
-  fallback?: FailureClass;
-  /** The agent RAN and reported the failure itself. A typed fact off the outcome, never a
-   *  pattern: the text on that path is prose SUNDAY composed around the agent's own
-   *  description, so matching it would both break the day that wording changes and let
-   *  anything the agent happened to write stop the pipeline. */
-  agentFailed?: boolean;
 }
 
 /** Classify a failure's text into a class and a scope. Never throws. */
@@ -280,83 +249,16 @@ function supersedes(resumeAt: number | undefined, armed: PauseState): boolean {
   return resumeAt === undefined || resumeAt > armed.resumeAt;
 }
 
-/** Start this work item again, carrying the error the last run died on when there is one
- *  to carry. Handed to `failed()` BY THE CALLER rather than held as a dependency: the
- *  Assignor owns every (re)start of a work item and takes this policy in its constructor,
- *  so the one restart there is passed in per failure — which is also what makes a caller
- *  with nothing to restart (boot's image sweep) unable to ask for one by accident. */
-export type RestartWorkItem = (retryError?: string) => void;
-
 /** The classes that get the one retry. `run-failed` is deliberately not among them — the
  *  agent RAN and reported its own verdict, so a second run would spend real quota
  *  re-deciding what it already decided — and neither is anything that reaches further
  *  than one item. */
 const RETRYABLE: readonly FailureClass[] = ["transient", "unknown"];
 
-/** One failure, as the path that caught it has it. */
-export interface FailureInput {
-  /** The failure's own text — an agent seam's flattened message, a build's output tail,
-   *  the parent's dead-child line. Never prose Sunday composed (constraint 3). */
-  text: string;
-  /** Which repo it happened in. The only context a repo-scope line carries, and the
-   *  reason it is separate from `item`: boot's image build has no work item at all. */
-  repo: string;
-  /** The work item it happened to, when it happened to one. */
-  item?: WorkItemRef;
-  /** The agent RAN and reported this itself — a typed fact off the outcome. */
-  agentFailed?: boolean;
-  /** The class for text that matches nothing; boot passes `setup`. */
-  fallback?: FailureClass;
-  /** How this work item is started again, for the one retry an item-scope failure gets.
-   *  Absent from a caller that has no work item to restart at all. */
-  retry?: RestartWorkItem;
-}
-
 /** How long a stopped repo waits before its image is tried again. Long, because the fix
  *  is a human editing a Dockerfile or starting the daemon, and each attempt is a real
  *  docker build — but not so long that a repo repaired in a minute sits idle for an hour. */
 const RECHECK_MS = 300_000;
-
-/** How a stopped repo heals, injected as a pair because neither half is any use alone:
- *  rebuild the image, and when it comes back clean re-derive that repo's outstanding work.
- *  Absent from a construction with no repo to heal (the smokes that only drive one scope).
- *
- *  Both halves are per-REPO and neither is reached for: the rebuild is `SandboxService`
- *  (docker, minutes) and the re-derive is #40's `Reconciler.repo` — the same per-repo pass
- *  the forwarder's blackout catch-up uses, so a repair and a blackout cannot drift into two
- *  ways of bringing a repo back. Constraint 13 as well: `assignor/` names neither module. */
-export interface RepoRecheck {
-  /** Build this repo's image again, and answer with why it is STILL broken — or nothing
-   *  at all, which is the signal the repair landed. Never rejects in production; a
-   *  rejection is treated as "still broken" all the same. */
-  rebuild: (repo: string) => Promise<string | undefined>;
-  /** Re-derive this repo's outstanding work from GitHub, once it can run again. */
-  reconcile: (repo: string) => Promise<void>;
-  /** Constraint 11: injected with a real default, so the suite drives the recheck with a
-   *  real timer at millisecond scale instead of waiting out five minutes. */
-  everyMs?: number;
-}
-
-/** Everything the policy needs and constructs none of: the durable pause it arms, the
- *  queue it stops, and the Logger it says everything through. */
-export interface FailurePolicyDeps {
-  pause: PauseStore;
-  scheduler: Scheduler;
-  /** Where the retry budget and the quarantine LIVE (constraint 7). Both are read and
-   *  written here rather than kept in memory: a spent retry that died with the process
-   *  hands every restart another agent run on real quota, and a quarantine that did not
-   *  survive is re-admitted by the next reconcile. */
-  state: StateStore;
-  /** The one label write the policy makes. Best-effort, always. */
-  github: GitHubLabels;
-  log: ModuleLogger;
-  /** Constraint 11: injected with a real default, so the suite drives the auto-resume
-   *  with a real timer at millisecond scale instead of waiting out a quota window. */
-  resumeGraceMs?: number;
-  /** How a stopped repo heals. Without it a repo stop holds until the next restart —
-   *  which is still only that repo, and is what a caller with no builder gets. */
-  recheck?: RepoRecheck;
-}
 
 /** What Sunday DOES about a failure. One entry — `failed()` — which classifies, and then
  *  acts as far as the scope reaches and no further: a `pipeline` failure stops everything,
