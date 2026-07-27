@@ -10,6 +10,7 @@
     "boot.mts",
     "assignor/**/*.mts",
     "issue/**/*.mts",
+    "pr/**/*.mts",
     "listener/**/*.mts",
     "config/**/*.mts",
     "test/**/*.mts",

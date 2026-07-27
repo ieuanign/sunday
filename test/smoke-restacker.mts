@@ -24,6 +24,7 @@ import {
   type IssueDetail,
   type MergedPullRequest,
   type OpenPullRequest,
+  type PrDetail,
 } from "../services/github/index.mts";
 import { Logger, type Destination, type Destinations, type LogLine } from "../services/logger.mts";
 import { makeFixture, ok, report, restackDrain, stubGhInEffect, type Fixture, type RestackDrain } from "./git-fixture.mts";
@@ -41,7 +42,7 @@ const FULL_NAME = "sunday-fixture/child";
  *  so the only way to assert them is to hold the seam. */
 class FakeGitHub implements GitHubRestack {
   /** The forward edge the dependent scan reads: what is open, and what blocks it. */
-  openPrs: OpenPullRequest[] = [];
+  openPrs: Omit<OpenPullRequest, "labels">[] = [];
   blocks: Record<number, number[]> = {};
   /** Issues whose blocker read FAILS, the way a 502 does (constraint 7). */
   unreadable = new Set<number>();
@@ -53,7 +54,10 @@ class FakeGitHub implements GitHubRestack {
   retargetError?: string;
 
   async listOpenPrs(): Promise<OpenPullRequest[]> {
-    return this.openPrs;
+    // Labels filled in here rather than on every scenario's literal: the dependent scan
+    // reads a PR's number and head and nothing else — labels are #44's re-derive asking
+    // the same read whether an item is quarantined.
+    return this.openPrs.map((pr) => ({ ...pr, labels: [] }));
   }
 
   async blockedBy(_repo: string, issue: number): Promise<Blocker[]> {
@@ -91,6 +95,9 @@ class FakeGitHub implements GitHubRestack {
   }
   async openPrForHead(): Promise<string | undefined> {
     throw new Error("the restack does not probe for open PRs");
+  }
+  async readPr(): Promise<PrDetail> {
+    throw new Error("the restack does not read pull requests");
   }
 }
 
@@ -146,7 +153,7 @@ function harness(fx: Fixture, github: FakeGitHub, git: RestackerDeps["git"] = ne
     pause,
     scheduler: fakeScheduler(paused),
     state,
-    github: { addLabels: async () => {} },
+    github: { addLabels: async () => {}, labelPr: async () => {} },
     log: logger.child("failure"),
   });
   const restacker = new Restacker({

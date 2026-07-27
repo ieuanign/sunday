@@ -9,12 +9,15 @@
 import { fork, type ForkOptions } from "node:child_process";
 import { resolve } from "node:path";
 
-// Type-only, and deliberately the only reference to the worker anywhere in the parent:
+// Type-only, and deliberately the only reference to either worker anywhere in the parent:
 // the job shape is a contract, the entry point itself is only ever reached by path.
 import type { Job } from "#issue/run.mts";
+import type { PrJob } from "#pr/run.mts";
 import type { ChildExit, ForkWorkItem } from "./index.mts";
 
-const worker = resolve(import.meta.dirname, "..", "issue", "run.mts");
+const issueWorker = resolve(import.meta.dirname, "..", "issue", "run.mts");
+/** The other lane (#44): a comment run on a pull request. */
+const prWorker = resolve(import.meta.dirname, "..", "pr", "run.mts");
 
 /** Fork one work item, and settle when the child EXITS — so the concurrency cap and the
  *  branch lock hold for the child's whole life rather than for the fork call. The job
@@ -27,11 +30,14 @@ const worker = resolve(import.meta.dirname, "..", "issue", "run.mts");
  *  `options` is here for the smoke, which needs a spawn that REALLY fails (an execPath
  *  that is not there); the parent passes none. */
 export function createForkWorkItem(options: ForkOptions = {}): ForkWorkItem {
-  return (job: Job) =>
+  return (job: Job | PrJob) =>
     new Promise<ChildExit>((settle) => {
+      // Which worker, off the JOB's own shape — a PR-comment run is the one that names a
+      // `pr`. Read here rather than handed over as a field, so the Assignor cannot build
+      // a job of one shape and route it to the other lane's entry point.
       // stdio inherited: a child's own lines belong in the same supervised log stream as
       // the parent's, alongside its durable per-run log.
-      const child = fork(worker, [JSON.stringify(job)], options);
+      const child = fork("pr" in job ? prWorker : issueWorker, [JSON.stringify(job)], options);
       // A child that never starts — no node binary to exec, no file descriptors left,
       // EACCES — emits `error` and NO `exit`. An `error` with no listener is an uncaught
       // exception on the EventEmitter, which would take this process down and every

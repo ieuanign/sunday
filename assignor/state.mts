@@ -32,6 +32,12 @@ export interface WorkItemState {
    *  (ADR-0003), neither of which the blocker's final tip does. Absent until a run has
    *  actually created the branch. */
   forkPoint?: string;
+  /** The pull request's HEAD BRANCH, for a `#pr<n>` item (#44). Read once at admission
+   *  and kept, because it is the scheduler's branch lock and the two paths that need it
+   *  later cannot ask GitHub again: a retry runs off a failure path, and an adoption runs
+   *  off a key found on disk after a restart. Absent on every issue item, whose branch is
+   *  `feat/<issue>` and needs no recording. */
+  head?: string;
   /** This item has already had its ONE retry (#39): it failed, was restarted once with its
    *  own error, and the next failure quarantines it instead of running the agent again.
    *  Durable and not in memory (constraint 7) — a retry is a whole extra agent run on real

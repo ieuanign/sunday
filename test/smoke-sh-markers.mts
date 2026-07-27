@@ -8,7 +8,7 @@
 // Sunday reads and writes, and the Assignor/Reconciler smokes drive that over a
 // substitute.)
 
-import { isSummon, sundayComment } from "../lib/markers.mts";
+import { isSummon, sundayComment, sundayReply, unansweredSummons } from "../lib/markers.mts";
 import { shA } from "../lib/sh.mts";
 
 let fails = 0;
@@ -61,6 +61,37 @@ const ok = (label: string, cond: boolean, detail = "") => {
   );
   // A different account whose name merely STARTS with ours is somebody else's mention.
   ok("summon: another handle that starts with sunday is not ours", !isSummon("cc @sundaybot for the deploy"), "matched another account");
+}
+
+// ── a REPLY to a summon: the same comment as any other of ours, plus the one marker
+//    that says it answered something. It quotes the request it is answering, so if it
+//    read back as a summon Sunday would answer itself forever on real quota ──
+{
+  const reply = sundayReply("You asked @sunday to add the retry — done in 3a1c9de.");
+  ok("reply: our own reply is never a summon, even quoting the request", !isSummon(reply), reply);
+}
+
+// ── which summons are still OUTSTANDING, decided on GitHub and in no state of ours:
+//    ids are monotonic, so a summon older than our newest reply was served — on this
+//    boot and on every boot after it ──
+{
+  const ids = (stream: { id: number; body: string }[]) => unansweredSummons(stream).map((c) => c.id).join(",");
+
+  // The milestone comments a work item posts land on the very thread it was summoned
+  // on. Judged as answers they would bury the summon under a comment that never
+  // addressed it, and no reconcile pass would ever pick it up again.
+  const milestoned = [
+    { id: 1, body: "@sunday the retry never backs off" },
+    { id: 2, body: sundayComment("▶ started — PR-comment run") },
+  ];
+  ok("unanswered: a milestone comment of ours does not answer the summon under it", ids(milestoned) === "1", ids(milestoned));
+
+  // A reply does — which is what makes a crashed or retried run idempotent: the replies
+  // it already posted are visible to the next attempt, so it does not spend a second
+  // agent run re-answering them. And a summon that landed WHILE the run was working is
+  // newer than that reply, so it survives to the next pass rather than being swallowed.
+  const answered = [...milestoned, { id: 3, body: sundayReply("Fixed in 3a1c9de.") }, { id: 4, body: "@sunday also the timeout" }];
+  ok("unanswered: a reply answers every summon older than it, and none newer", ids(answered) === "4", ids(answered));
 }
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);

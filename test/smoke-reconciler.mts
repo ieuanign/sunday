@@ -19,8 +19,8 @@ import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
 import type { RepoConfig } from "#config/repos.mts";
 import { acquireLock, readLock } from "../lib/lock.mts";
-import { sundayComment } from "../lib/markers.mts";
-import { CLAIM_LABEL, type GitHubReconcile, type IssueComment, type OpenIssue } from "../services/github/index.mts";
+import { sundayComment, sundayReply } from "../lib/markers.mts";
+import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue, type OpenPullRequest, type ReviewComment } from "../services/github/index.mts";
 import { Logger, type Destinations, type LogLine } from "../services/logger.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-reconciler-${process.pid}`);
@@ -51,7 +51,7 @@ let caseNo = 0;
  *  with GitHub substituted — every method on it is either a real edit to a real repo or a
  *  network read, and the whole point of the class is WHAT it asks GitHub and what it does
  *  with the answer. Paths point into this case's own dir, so the real `var/` is untouched. */
-function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<string, string>; comments?: Record<string, IssueComment[]>; releaseThrows?: string; claimThrows?: string } = {}) {
+function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<string, string>; comments?: Record<string, IssueComment[]>; releaseThrows?: string; claimThrows?: string; prs?: Record<string, OpenPullRequest[]>; prThrows?: Record<string, string>; review?: Record<string, ReviewComment[]>; commentsThrow?: string } = {}) {
   const caseDir = resolve(dir, `case-${caseNo++}`);
   const lines: LogLine[] = [];
   const comments: LogLine[] = [];
@@ -73,7 +73,7 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   // as the sweep runs, and a supervisor that SIGKILLs it (ADR-0001).
   const releasedSync: string[] = [];
   const labelled: string[] = [];
-  const github: GitHubReconcile = {
+  const github: GitHubReconcile & GitHubLabels = {
     claim: (repo, issue) => {
       // `gh issue edit` against somebody else's service, on the admission path this pass
       // hands every open issue to.
@@ -92,7 +92,12 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
       if (boom) throw new Error(boom);
       return over.issues?.[repo] ?? [];
     },
-    issueComments: async (repo, issue) => over.comments?.[`${repo}#${issue}`] ?? [],
+    issueComments: async (repo, issue) => {
+      // A PR's conversation IS its issue thread, so the same read answers both halves of
+      // the pass — and it is a network read that 502s like any other.
+      if (over.commentsThrow === `${repo}#${issue}`) throw new Error("gh api comments failed: HTTP 502");
+      return over.comments?.[`${repo}#${issue}`] ?? [];
+    },
     addLabels: async (repo, issue, labels) => void labelled.push(`${repo}#${issue} [${labels.join(", ")}]`),
     // Admission's blocker read (#42), answering "nothing blocks this issue": what this
     // file is about is which issues reconcile hands to admission, not what it decides.
@@ -100,6 +105,26 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // The PR half of a repo's pass (#44), and a `gh pr list` that fails the way the issue
+    // list does.
+    listOpenPrs: async (repo) => {
+      const boom = over.prThrows?.[repo];
+      if (boom) throw new Error(boom);
+      return over.prs?.[repo] ?? [];
+    },
+    reviewComments: async (repo, pr) => over.review?.[`${repo}#pr${pr}`] ?? [],
+    // Answered off the case's OWN open pull requests, so a re-derive that reached a PR
+    // this smoke never declared is a failure rather than a decision on invented data.
+    readPr: async (repo, pr) => {
+      const open = over.prs?.[repo]?.find((p) => p.number === pr);
+      if (!open) throw new Error(`readPr: ${repo}#${pr} is not an open pull request in this case`);
+      return { head: open.head, base: "main", state: "open" };
+    },
+    // The PR lane's label write (#44) — the failure policy takes this seam too, and no
+    // case here fails a PR item.
+    labelPr: async () => {
+      throw new Error("labelPr: no case in this smoke labels a pull request");
+    },
   };
 
   const paths: Paths = {
@@ -252,6 +277,78 @@ try {
     ok("summon: the replay is reported — Sunday added labels to a human's issue and the thread never says so", said(h.lines, "acme/finance#57") && said(h.lines, "summon"), JSON.stringify(h.lines.map((l) => l.message)));
   }
 
+  // ── the other half of a repo's pass (#44). A pull request is a work item too, and the
+  //    summon on one arrives as a webhook that fires exactly once: down, restarted or
+  //    blacked out, and it is gone. What makes it re-derivable with nothing of ours is the
+  //    reply marker — a summon newer than Sunday's newest REPLY is outstanding, whatever
+  //    the state file remembers ──
+  {
+    const human = (id: number, body: string) => ({ id, body });
+    const inline = (id: number, body: string) => ({ id, body, path: "src/pay.ts", line: 12 });
+    const h = harness({
+      prs: {
+        "acme/finance": [
+          { number: 110, head: "feat/10", labels: [] }, // asked, in the conversation
+          { number: 111, head: "feat/11", labels: [] }, // asked, and already answered
+          { number: 112, head: "feat/12", labels: [] }, // asked, inline on a file line
+          { number: 113, head: "feat/13", labels: [] }, // asked mid-run, and only milestoned
+          { number: 114, head: "feat/14", labels: [] }, // nobody asked
+        ],
+      },
+      comments: {
+        "acme/finance#110": [human(1, "@sunday the naming here is off")],
+        "acme/finance#111": [human(1, "@sunday fix the naming"), { id: 2, body: sundayReply("renamed it") }],
+        "acme/finance#113": [
+          { id: 1, body: sundayComment("▶ work started") },
+          human(2, "@sunday while you are in there, the log line too"),
+          { id: 3, body: sundayComment("✓ done — answered 1 comment(s)") },
+        ],
+        "acme/finance#114": [human(1, "looks good to me")],
+      },
+      review: {
+        "acme/finance#pr112": [inline(9, "@sunday this branch is unreachable")],
+        "acme/finance#pr111": [inline(9, "@sunday fix the naming"), inline(10, sundayReply("renamed it"))],
+      },
+    });
+    await h.reconciler.run();
+
+    ok("pr: an open pull request carrying a summon nobody answered is re-derived as its own work item", h.queued().includes("acme/finance#pr110"), `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
+    ok("pr: keyed `#pr<n>`, so it can never share a state entry, a lock or a result file with the issue that happens to be numbered the same", h.state.get("acme/finance#pr110")?.status === "in-flight" && h.state.get("acme/finance#110") === undefined, JSON.stringify(h.state.get("acme/finance#pr110")));
+    ok("pr: and it holds the pull request's own head branch, which is the lock keeping a comment run out of an issue run's checkout", h.state.get("acme/finance#pr110")?.head === "feat/10", JSON.stringify(h.state.get("acme/finance#pr110")));
+    ok("pr: one already replied to is left alone — re-deriving it is a whole agent run answering a question that has its answer", !h.queued().includes("acme/finance#pr111"), h.queued().join(","));
+    ok("pr: a summon left INLINE on a file line is re-derived too — the two streams are read separately, and neither can answer for the other", h.queued().includes("acme/finance#pr112"), h.queued().join(","));
+    ok("pr: a milestone comment does not answer anything — judged by Sunday's marker alone, the two every work item posts would bury a summon that landed mid-run forever", h.queued().includes("acme/finance#pr113"), h.queued().join(","));
+    ok("pr: a pull request nobody summoned Sunday on is not conscripted, exactly as an issue is not", !h.queued().includes("acme/finance#pr114"), h.queued().join(","));
+    ok("pr: and no claim is taken on any of them — `agent-working` is an ISSUE label, and the orphan sweep above walks issues only, so one left on a pull request is a state nothing ever releases", h.claimed.length === 0 && h.released.length === 0, `claimed=${h.claimed.join(",")} released=${h.released.join(",")}`);
+    ok("pr: each one that was re-derived says so, since a summon replayed weeks late is Sunday acting on a comment nobody remembers writing", said(h.lines, "acme/finance#pr110") && said(h.lines, "acme/finance#pr112"), JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  // ── the labels are read off the SAME list (#44 constraint 2). An item set aside after
+  //    failing twice is refused on the strength of the `quarantined` label, and a human
+  //    taking that label off is what hands it back. Re-derived with an empty label list it
+  //    would be handed back by the pass itself — on every boot, every blackout catch-up and
+  //    every repo recheck, each one a real agent run on real quota ──
+  {
+    const h = harness({
+      prs: {
+        "acme/finance": [
+          { number: 110, head: "feat/10", labels: [QUARANTINE_LABEL] },
+          { number: 111, head: "feat/11", labels: [] }, // set aside too, and handed back by a human
+        ],
+      },
+      comments: {
+        "acme/finance#110": [{ id: 1, body: "@sunday the naming here is off" }],
+        "acme/finance#111": [{ id: 1, body: "@sunday the naming here is off" }],
+      },
+    });
+    h.state.set("acme/finance#pr110", { status: "quarantined" });
+    h.state.set("acme/finance#pr111", { status: "quarantined" });
+    await h.reconciler.run();
+
+    ok("quarantine: a pull request still wearing the label is not re-derived, whatever its thread says", !h.queued().includes("acme/finance#pr110"), h.queued().join(","));
+    ok("quarantine: and one a human has taken it off is handed straight back, through the same pass", h.queued().includes("acme/finance#pr111"), h.queued().join(","));
+  }
+
   // ── reconcile is the ONE place Sunday reads somebody else's service in bulk, and that
   //    service 502s, rate-limits and expires tokens. A repo that cannot be read must cost
   //    that repo its pass and nothing more: GitHub is still the truth, so the next boot
@@ -301,6 +398,41 @@ try {
       h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance#57") && l.message.includes("502")),
       JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)),
     );
+  }
+
+  // ── and the two halves of a repo's pass are isolated from EACH OTHER. `gh pr list` and
+  //    `gh issue list` are two calls to somebody else's service, and a backlog of issues
+  //    abandoned because the pull request read 502'd is work nobody comes back for ──
+  {
+    const h = harness({
+      issues: { "acme/finance": [{ number: 57, labels: TRIGGERS }] },
+      prThrows: { "acme/finance": "gh pr list failed: HTTP 502" },
+      prs: { "acme/ops": [{ number: 110, head: "feat/10", labels: [] }] },
+      comments: { "acme/ops#110": [{ id: 1, body: "@sunday the naming here is off" }] },
+    });
+    await h.reconciler.run();
+
+    ok("isolation: a pull request list that fails costs that half of that repo's pass and nothing else", h.queued().sort().join(",") === "acme/finance#57,acme/ops#pr110", `${h.queued().join(",")}`);
+    ok("isolation: and it is named at error — a pull request half silently not re-derived looks exactly like a repo with no open ones", h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance") && l.message.includes("502")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
+  }
+
+  // ── the same, one level down: deciding ONE pull request reads two comment streams and
+  //    then admission reads the pull request itself, all of it over the network ──
+  {
+    const h = harness({
+      prs: {
+        "acme/finance": [
+          { number: 110, head: "feat/10", labels: [] },
+          { number: 111, head: "feat/11", labels: [] },
+        ],
+      },
+      comments: { "acme/finance#111": [{ id: 1, body: "@sunday the naming here is off" }] },
+      commentsThrow: "acme/finance#110",
+    });
+    await h.reconciler.run();
+
+    ok("isolation: a pull request whose thread cannot be read does not strand the ones behind it", h.queued().join(",") === "acme/finance#pr111", h.queued().join(","));
+    ok("isolation: and it is named, since a summon nobody can read is a human still waiting", h.lines.some((l) => l.level === "error" && l.message.includes("acme/finance#pr110")), JSON.stringify(h.lines.map((l) => `${l.level} ${l.message}`)));
   }
 
   // ── one repo, on demand. A forwarder that was down for a single repo missed events for

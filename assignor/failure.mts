@@ -560,15 +560,24 @@ export class FailurePolicy {
     );
   }
 
-  /** Mark the issue. BEST-EFFORT, always (constraint 9): durable state is what actually
-   *  stops the item being re-admitted, so a label write that fails must not take the
-   *  policy down with it — and the most likely failure is a repo onboarded before this
-   *  label existed, which is a one-line fix worth naming.
+  /** Mark the issue — or the PULL REQUEST, which is a different `gh` call and not a
+   *  detail (#44 constraint 11): `gh issue edit <n>` against a comment run's number marks
+   *  whatever issue happens to be numbered `n`, which is somebody else's work item wearing
+   *  a quarantine nobody can explain.
+   *
+   *  BEST-EFFORT, always (constraint 9): durable state is what actually stops the item
+   *  being re-admitted, so a label write that fails must not take the policy down with it
+   *  — and the most likely failure is a repo onboarded before this label existed, which is
+   *  a one-line fix worth naming.
    *
    *  Said with the repo and NO target, so it reaches whoever can fix that and never the
    *  issue thread: the acted-on failure has had its one comment already (constraint 6). */
   private label(item: WorkItemRef, name: string): void {
-    void this.github.addLabels(item.repo, item.issue, [name]).catch((err: unknown) => {
+    const write =
+      item.kind === "pr"
+        ? this.github.labelPr(item.repo, item.issue, [name])
+        : this.github.addLabels(item.repo, item.issue, [name]);
+    void write.catch((err: unknown) => {
       const why = err instanceof Error ? err.message : String(err);
       this.log.error(`✗ ${item.key} could not be labelled ${name} — ${why} (gh label create ${name} --repo ${item.repo})`, {
         repo: item.repo,

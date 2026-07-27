@@ -18,7 +18,7 @@ import { resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
 import { classify, FailurePolicy } from "../assignor/failure.mts";
-import { Assignor, type ChildExit, type Delivery, type ForkWorkItem, type Paths } from "../assignor/index.mts";
+import { Assignor, type ChildExit, type Delivery, type ForkWorkItem, type Paths, type WorkItemRef } from "../assignor/index.mts";
 import { PauseStore } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
@@ -275,6 +275,11 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     issueState: async () => "closed",
     readIssue: async () => ({ title: "", body: "" }),
     openPrForHead: async () => undefined,
+    // #44's read, and nothing here drives the PR lane: a stub that ANSWERED would let a
+    // case reach a decision this smoke never checked.
+    readPr: async () => {
+      throw new Error("readPr: no case in this smoke reads a pull request");
+    },
   };
 
   /** The policy's own seam, narrower than the Assignor's: one label write, which is a
@@ -287,6 +292,10 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
       if (over.labelFails) throw new Error(`gh: '${names.join(",")}' not found`);
       labelled.push(`${repo}#${issue} +${names.join(",")}`);
     },
+    // The PR lane's write (#44), recorded as its own spelling: a comment run's failures
+    // are driven where the lane is (`test/smoke-assignor.mts`), and marking one with
+    // `gh issue edit` would label an unrelated issue that shares the number.
+    labelPr: async (repo, pr, names) => void labelled.push(`${repo}#pr${pr} +${names.join(",")}`),
   };
 
   const paths: Paths = {
@@ -301,6 +310,9 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
   const forked: Job[] = [];
   const exits = new Map<string, (exit: ChildExit) => void>();
   const fork: ForkWorkItem = (job) => {
+    // Every case here is an issue run — a PR-comment run's failures are the same policy's
+    // and are driven where the lane is (`test/smoke-assignor.mts`).
+    if ("pr" in job) throw new Error("no case in this smoke forks a PR-comment run");
     forked.push(job);
     acquireLock(job.pidPath, process.pid);
     return new Promise((settle) => exits.set(job.key, settle));
@@ -397,7 +409,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
 
 /** The item every act case below is about, and a second one queued alongside it: whether
  *  the OTHER work item keeps running is the entire difference between a scope and a halt. */
-const ITEM = { key: "acme/finance#57", repo: "acme/finance", issue: 57 };
+const ITEM: WorkItemRef = { key: "acme/finance#57", repo: "acme/finance", issue: 57, kind: "issue" };
 
 /** The halt line — pipeline scope, so it is the one line that carries no repo at all. */
 const halted = (lines: LogLine[]) => lines.find((l) => l.message.includes("halt"));
@@ -868,8 +880,8 @@ try {
     const text = `Usage limit reached. Your limit resets at ${new Date(Date.now() + 10_000).toISOString()}`;
     h.policy.failed({ text, repo: ITEM.repo, item: ITEM });
     const armed = JSON.stringify(h.pause.read());
-    h.policy.failed({ text, repo: "acme/ops", item: { key: "acme/ops#1", repo: "acme/ops", issue: 1 } });
-    h.policy.failed({ text, repo: ITEM.repo, item: { key: "acme/finance#58", repo: ITEM.repo, issue: 58 } });
+    h.policy.failed({ text, repo: "acme/ops", item: { key: "acme/ops#1", repo: "acme/ops", issue: 1, kind: "issue" } });
+    h.policy.failed({ text, repo: ITEM.repo, item: { key: "acme/finance#58", repo: ITEM.repo, issue: 58, kind: "issue" } });
 
     const paged = h.lines.filter((l) => l.level === "alert" || l.level === "error");
     ok("one wall: three items on the same wall page a human once", paged.length === 1, JSON.stringify(paged.map((l) => l.message)));

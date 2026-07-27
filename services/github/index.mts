@@ -76,6 +76,13 @@ export interface GitHub {
    *  with no PR open has no branch worth forking from yet. Redeclared for the same
    *  reason `readIssue` is. */
   openPrForHead(repo: string, head: string): Promise<string | undefined>;
+  /** The pull request a summon landed on (#44) — read for its HEAD BRANCH, which is
+   *  what admission holds the scheduler's branch lock on. Nothing else can answer it:
+   *  a PR's conversation comment arrives as an `issue_comment` carrying no branch at
+   *  all, and a comment run that pushed to a branch an issue run is also on is two
+   *  processes in one checkout. Redeclared for the same reason `readIssue` is —
+   *  `GitHubPrRun` names it too, and `Gh` implements it exactly once. */
+  readPr(repo: string, pr: number): Promise<PrDetail>;
 }
 
 /** One open issue, as re-deriving work needs to see it — the number a work item is keyed
@@ -123,6 +130,14 @@ export interface GitHubReconcile extends GitHub {
   /** Apply labels to an issue — the missed summon, replayed as the label the human would
    *  have had to add. Admission then reaches it through its ordinary path. */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** Every open pull request in a routed repo, capped (`OPEN_PR_LIMIT`) — the other half
+   *  of a repo's pass (#44). Redeclared rather than inherited from `GitHubRestack`, the
+   *  way `addLabels` is: a restack asks what is open to find dependents and a re-derive
+   *  asks to find unanswered summons, and `Gh` still implements it exactly once. */
+  listOpenPrs(repo: string): Promise<OpenPullRequest[]>;
+  /** One pull request's INLINE comments, oldest first. Read alongside `issueComments`
+   *  because a summon lands on either stream, and neither can answer for the other. */
+  reviewComments(repo: string, pr: number): Promise<ReviewComment[]>;
   /** Give the claim back, OFF the event loop — the async twin of `release`, and the only
    *  one re-deriving may use. Both edit the same label; what differs is how many of them
    *  there can be. The Assignor's `release` is reached once per item it is applying an
@@ -134,12 +149,18 @@ export interface GitHubReconcile extends GitHub {
   releaseAsync(repo: string, issue: number): Promise<void>;
 }
 
-/** One open pull request, as the restack's dependent scan reads them. */
+/** One open pull request, as the restack's dependent scan and #44's re-derive read them. */
 export interface OpenPullRequest {
   number: number;
   /** The head branch. `feat/<n>` is one of ours; anything else is somebody's own work
    *  and the scan leaves it alone. */
   head: string;
+  /** The labels on it right now. REQUIRED, for the reason `WorkItemRef.kind` is (#44
+   *  constraint 2): a re-derived pull request is handed to the same admission the live
+   *  delivery reaches, and that admission refuses a QUARANTINED item on the strength of
+   *  this list. An empty default would re-admit an item set aside after failing twice —
+   *  on every boot, every blackout catch-up and every repo recheck. */
+  labels: string[];
 }
 
 /** A merged pull request's head — the fork-point recovery's last resort (ADR-0003).
@@ -185,6 +206,12 @@ export interface GitHubLabels {
    *  agent reported its own defeat. BEST-EFFORT at the call site — durable state is what
    *  actually stops the item being re-admitted (#39 constraint 9). */
   addLabels(repo: string, issue: number, labels: string[]): Promise<void>;
+  /** …and the same marks on a PULL REQUEST, for a comment run that failed (#44). A
+   *  separate call because `gh issue edit <n>` addresses the ISSUE numbered `n`, which
+   *  for a PR item is an unrelated issue that happens to share the number. Redeclared
+   *  from `GitHubRestack` rather than inherited, the way `addLabels` is — `Gh`
+   *  implements it exactly once. */
+  labelPr(repo: string, pr: number, labels: string[]): Promise<void>;
 }
 
 /** What the forwarder supervisor is allowed to do to GitHub: drop the dev webhook a
@@ -263,13 +290,68 @@ export interface GitHubRun {
   createPr(pr: NewPullRequest): Promise<string>;
 }
 
+/** One pull request as a PR-COMMENT RUN needs it: the branch it fixes and pushes, the
+ *  branch that PR targets, and whether it is still open. The state is what the run
+ *  re-asserts immediately before the push (#38) — a whole agent run elapses in between,
+ *  and pushing into a merged or closed PR is a write nobody asked for. */
+export interface PrDetail {
+  /** The head branch — what the agent works on and what the host pushes. */
+  head: string;
+  /** The base branch, as the PR targets it. The prompt tells the agent what its diff is
+   *  measured against. */
+  base: string;
+  /** Lowercased PR state ("open" | "closed" | "merged"), normalised HERE for the reason
+   *  `RunIssueDetail.state` is: `gh pr view --json state` shouts, and a caller comparing
+   *  against the wrong casing reads every open PR as closed. */
+  state: string;
+}
+
+/** One INLINE review comment — the Files-changed tab, as opposed to the conversation
+ *  timeline that `issueComments` reads. `id` is GitHub's own and monotonic within this
+ *  stream, which is what makes "answered" decidable against our newest reply. */
+export interface ReviewComment {
+  id: number;
+  body: string;
+  /** The file the comment sits on. */
+  path: string;
+  /** The line in the diff, or `null` when GitHub has none to give — a comment on a file
+   *  as a whole, or one whose lines the branch has since moved past. Reported as-is
+   *  rather than defaulted to a number: a wrong line in the prompt sends the agent to
+   *  the wrong place in the file. */
+  line: number | null;
+}
+
+/** What ONE PR-COMMENT RUN performs against GitHub — read the pull request, read both
+ *  comment streams, answer each of them. Its own seam for the same reason `GitHubRun` is
+ *  one: the run cannot reach a claim it has no business taking (constraint 3), and a test
+ *  substituting it stubs only what the lane actually calls.
+ *
+ *  `issueComments` is redeclared rather than reached through `GitHubReconcile`: a PR's
+ *  conversation IS its issue thread, and `Gh` still implements it exactly once — the
+ *  paginated read is what makes the newest reply visible on a long thread. */
+export interface GitHubPrRun {
+  /** The pull request the run is answering. Read at the start for the branches, and
+   *  again before the push for the state. */
+  readPr(repo: string, pr: number): Promise<PrDetail>;
+  /** The inline review comments, oldest first. */
+  reviewComments(repo: string, pr: number): Promise<ReviewComment[]>;
+  /** The conversation timeline, oldest first — every page. */
+  issueComments(repo: string, pr: number): Promise<IssueComment[]>;
+  /** Answer an inline comment INSIDE its own thread, so the reply sits against the line
+   *  it is about rather than at the bottom of the conversation. */
+  replyToReviewComment(repo: string, pr: number, comment: number, body: string): Promise<void>;
+  /** Answer a conversation comment. GitHub's PR conversation does not thread, so the
+   *  reply quotes what it answers and the composition is the caller's. */
+  commentOnPr(repo: string, pr: number, body: string): Promise<void>;
+}
+
 /** The real one, over the `gh` CLI. `--repo` addresses the issue directly — v1 passed a
  *  child checkout as cwd instead, a field every one of its 39 call sites had to carry.
  *
  *  Left out of the smokes on purpose, like `githubDestination()`: it needs the CLI, a
  *  token and the network. What CAN be wrong is WHEN Sunday claims, releases and
  *  re-derives, and the Assignor's and Reconciler's smokes drive that over a substitute. */
-export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLabels, GitHubRestack {
+export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLabels, GitHubRestack, GitHubPrRun {
   claim(repo: string, issue: number): void {
     sh("gh", ["issue", "edit", String(issue), "--repo", repo, "--add-label", CLAIM_LABEL]);
   }
@@ -413,12 +495,12 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
       "--state",
       "open",
       "--json",
-      "number,headRefName",
+      "number,headRefName,labels",
       "--limit",
       String(OPEN_PR_LIMIT),
     ]);
-    const prs = JSON.parse(out) as { number: number; headRefName: string }[];
-    return prs.map((pr) => ({ number: pr.number, head: pr.headRefName }));
+    const prs = JSON.parse(out) as { number: number; headRefName: string; labels: { name: string }[] }[];
+    return prs.map((pr) => ({ number: pr.number, head: pr.headRefName, labels: pr.labels.map((l) => l.name) }));
   }
 
   async mergedPrForHead(repo: string, head: string): Promise<MergedPullRequest | undefined> {
@@ -449,6 +531,45 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
   async labelPr(repo: string, pr: number, labels: string[]): Promise<void> {
     // One `--add-label` per label, for the reason `addLabels` spells out.
     await shA("gh", ["pr", "edit", String(pr), "--repo", repo, ...labels.flatMap((label) => ["--add-label", label])]);
+  }
+
+  async readPr(repo: string, pr: number): Promise<PrDetail> {
+    const out = await shA("gh", ["pr", "view", String(pr), "--repo", repo, "--json", "headRefName,baseRefName,state"]);
+    const detail = JSON.parse(out) as { headRefName: string; baseRefName: string; state: string };
+    return { head: detail.headRefName, base: detail.baseRefName, state: detail.state.toLowerCase() };
+  }
+
+  async reviewComments(repo: string, pr: number): Promise<ReviewComment[]> {
+    // Paginated and parsed line-by-line for the reason `issueComments` is: whether a
+    // summon is ANSWERED is decided against our newest reply, and on a long review the
+    // newest comments are on the LAST page.
+    //
+    // `line` falls back to `original_line`: GitHub nulls `line` once the branch has moved
+    // past the diff hunk a comment was left on, and that comment is still a human asking
+    // for something — dropping its location would send the agent to the file with no idea
+    // where in it to look.
+    const out = await shA("gh", [
+      "api",
+      "--paginate",
+      `repos/${repo}/pulls/${pr}/comments?per_page=100`,
+      "--jq",
+      ".[] | { id, body, path, line: (.line // .original_line) }",
+    ]);
+    return out
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as ReviewComment);
+  }
+
+  async replyToReviewComment(repo: string, pr: number, comment: number, body: string): Promise<void> {
+    // The `/replies` endpoint, not a fresh review comment: it is the one call that puts
+    // the answer in the SAME thread as the question. `-f` sends the body as a literal
+    // form value, so an agent-authored reply is never read as a flag or a file.
+    await shA("gh", ["api", `repos/${repo}/pulls/${pr}/comments/${comment}/replies`, "-f", `body=${body}`]);
+  }
+
+  async commentOnPr(repo: string, pr: number, body: string): Promise<void> {
+    await shA("gh", ["pr", "comment", String(pr), "--repo", repo, "--body", body]);
   }
 
   async dropForwarderHooks(repo: string): Promise<void> {
