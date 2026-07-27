@@ -205,6 +205,41 @@ try {
     );
   }
 
+  // ── the precondition reason (#38): WHICH assertion stopped the run, carried in the
+  //    FILE and never as an exit code (ADR-0001). Typed for the same reason `agentFailed`
+  //    is: the summary is prose Sunday composed, so the parent's reaction — which reasons
+  //    bypass the failure classifier entirely, and which one stops the whole repo — has to
+  //    route on this field or route on a regex over wording that will change ──
+  {
+    const path = resolve(dir, "results", "precondition.json");
+    const stopped: Outcome = {
+      key: "acme/finance#57",
+      status: "failed",
+      summary: "Stopped before starting: the issue was closed after it was admitted.",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      precondition: "issue-closed",
+    };
+    writeOutcome(path, stopped);
+    const read = readOutcome(path);
+    ok(
+      "precondition: the reason that stopped the run survives the file — it is what the parent reacts to",
+      read.state === "ok" && read.outcome.precondition === "issue-closed",
+      JSON.stringify(read),
+    );
+
+    // A reason the parent has no reaction for is not a reason. Reading it as an outcome
+    // would hand `record()` a field it cannot route on, and the item would take the
+    // ordinary failure path — the classifier over composed prose, one retry on real quota,
+    // then quarantine — which is precisely what the typed field exists to prevent.
+    writeFileSync(path, JSON.stringify({ ...stopped, precondition: "issue-locked" }));
+    const unknown = readOutcome(path);
+    ok(
+      "precondition: a reason the parent has no reaction for is unreadable, not an outcome with a hole in it",
+      unknown.state === "unreadable",
+      JSON.stringify(unknown),
+    );
+  }
+
   // ── atomic: the parent can read the results dir at any instant, including the one in
   //    which a child is mid-write. The file it reads is therefore either the whole old
   //    outcome or the whole new one — never half of either (constraint 3) ──

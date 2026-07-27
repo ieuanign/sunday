@@ -32,6 +32,14 @@ export interface DiffStat {
 
 /** What a run is allowed to do to a child checkout. */
 export interface Git {
+  /** Does the ORIGIN have `branch` right now? The run's base check, asked twice (#38):
+   *  before the run starts anything, and again immediately before the push. The origin
+   *  rather than a local `origin/<branch>` because that ref is only as fresh as the last
+   *  fetch, and a whole agent run elapses between this run's fetch and its push — a base
+   *  that merged and was deleted in that window still resolves locally and is gone
+   *  (ADR-0003). A transport failure THROWS: a flaky network must not read as "the base
+   *  is gone", which would end a run that could have shipped. */
+  remoteBranchExists(childDir: string, branch: string): Promise<boolean>;
   /** Keep the pipeline's own scratch out of this checkout's `git status`, idempotently.
    *  A dirty worktree makes the agent library preserve it host-side, which holds the
    *  branch checked out and blocks the run's cleanup — so this runs before every run,
@@ -127,6 +135,14 @@ export interface Rebase {
 
 /** The real one, over the `git` CLI. */
 export class GitCli implements Git, GitRestack {
+  async remoteBranchExists(childDir: string, branch: string): Promise<boolean> {
+    // Ported from v1 (`listener/run-issue.mts:53`). The pattern is the FULL ref name on
+    // top of `--heads`: a bare `feat/9` would also match a tag of that name, which is
+    // nothing a PR can target or a branch can be pushed to. No output means gone; a
+    // transport failure exits non-zero and `shA` throws it.
+    return (await shA("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], childDir)) !== "";
+  }
+
   async excludeScratch(childDir: string): Promise<void> {
     // The clone's LOCAL `.git/info/exclude`, never its tracked `.gitignore`: this is
     // Sunday's business, not the child's, so it must never leak into a PR.

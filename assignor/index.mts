@@ -716,18 +716,37 @@ export class Assignor {
     // The text handed over is the child's own summary (a provider's message, a tool's
     // error, the parent's dead-child line) and NEVER prose Sunday composed: "the agent ran
     // and reported this itself" travels as the typed flag beside it (constraint 3).
-    if (outcome.status === "failed") {
-      this.failure.failed({
-        text: outcome.summary,
-        repo: item.repo,
-        item,
-        agentFailed: outcome.agentFailed,
-        // The one way a work item is started again after a failure (constraint 10). Handed
-        // over rather than reached for: the policy decides WHETHER there is another run in
-        // this item, and every (re)start still goes through a claim.
-        retry: (retryError) => this.restart(item, retryError),
-      });
+    if (outcome.status !== "failed") return;
+    // A run that refused to START (#38) is not a failure to classify. It reports WHICH
+    // assertion stopped it as a typed field, exactly as `agentFailed` is typed, because the
+    // summary beside it is prose Sunday composed: `classify()` matches none of it, falls
+    // through to `unknown`, and an issue whose trigger label a human simply pulled is run
+    // again on real quota and then quarantined (#39 constraint 3). So a precondition
+    // bypasses the policy entirely — the condition is a fact about the ISSUE, and nothing
+    // about it changes by spending another agent on it.
+    if (outcome.precondition) {
+      // …with exactly ONE exception (constraint 6): a missing image is not this item's
+      // condition, it is the repo's ENVIRONMENT — every item in it would fork and die the
+      // same way, one at a time. Handed over as `setup` (the class, never a wording the
+      // regex happens to match), which is the repo stop plus timed rebuild plus per-repo
+      // reconcile the policy already has (ADR-0002). No retry: what would fix this run is
+      // the image coming back, and the policy's own recheck is what re-derives the repo
+      // once it does.
+      if (outcome.precondition === "image-missing") {
+        this.failure.failed({ text: outcome.summary, repo: item.repo, item, fallback: "setup" });
+      }
+      return;
     }
+    this.failure.failed({
+      text: outcome.summary,
+      repo: item.repo,
+      item,
+      agentFailed: outcome.agentFailed,
+      // The one way a work item is started again after a failure (constraint 10). Handed
+      // over rather than reached for: the policy decides WHETHER there is another run in
+      // this item, and every (re)start still goes through a claim.
+      retry: (retryError) => this.restart(item, retryError),
+    });
   }
 
   /** The tail of an apply: the result file, the lock, then the claim. Its own method

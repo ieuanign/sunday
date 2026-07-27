@@ -19,7 +19,7 @@ import {
   type ForkWorkItem,
   type Paths,
 } from "../assignor/index.mts";
-import { FailurePolicy } from "../assignor/failure.mts";
+import { classify, FailurePolicy } from "../assignor/failure.mts";
 import { PauseStore } from "../assignor/pause.mts";
 import { createScheduler } from "../assignor/scheduler.mts";
 import { StateStore } from "../assignor/state.mts";
@@ -144,6 +144,10 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
 
   const logger = new Logger(dests);
   const state = new StateStore(resolve(caseDir, "state.json"));
+  /** The durable halt, so a case can assert that a work item's own failure did NOT stop
+   *  the pipeline (#38): a precondition is one item's condition, and the file is what a
+   *  restart would read back as "everything is held". */
+  const pause = new PauseStore(resolve(caseDir, "pause.json"));
   const scheduler = createScheduler(2, logger.child("scheduler"));
   const assignor = new Assignor({
     repos: TABLE,
@@ -162,7 +166,7 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
     // scope is `test/smoke-failure.mts`'s subject, and what matters here is that no case in
     // this file reaches the real `var/pause.json` or writes a label to a real repo.
     failure: new FailurePolicy({
-      pause: new PauseStore(resolve(caseDir, "pause.json")),
+      pause,
       scheduler,
       state,
       github: { addLabels: async (repo, issue, names) => void labelled.push(`${repo}#${issue} +${names.join(",")}`) },
@@ -170,7 +174,7 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
     }),
   });
 
-  return { assignor, state, lines, comments, claimed, released, labelled, forked, restacked, finish, paths };
+  return { assignor, state, pause, lines, comments, claimed, released, labelled, forked, restacked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
@@ -762,6 +766,105 @@ try {
       h.forked[1]?.base === "main" && h.forked[1]?.config.imageName === "sunday-finance" && h.forked[1]?.resultPath === h.paths.resultPath(KEY),
       JSON.stringify(h.forked[1]),
     );
+  }
+
+  // ── the preconditions (#38): a run that refused to start. The reason is TYPED on the
+  //    outcome and the parent reacts to THAT, never to the summary beside it — that text
+  //    is prose Sunday composed, so the classifier reads it as nothing at all and an issue
+  //    whose trigger label a human simply pulled would be run again on real quota and then
+  //    set aside. The child says how the item ENDED (constraint 7); what the parent adds
+  //    is the reaction ──
+  {
+    /** The four the parent handles by NOT handling: their condition is a fact about the
+     *  issue, and nothing about it changes by running the item again. Worded as
+     *  `issue/preconditions.mts` words them, so the classifier is asked the real question. */
+    const stops = [
+      { reason: "issue-closed", status: "failed", says: "the run did not start: the issue is no longer open — state: closed." },
+      {
+        reason: "labels-missing",
+        status: "failed",
+        says: "the run did not start: the trigger label(s) it was admitted on are no longer on the issue — missing: ready-for-agent.",
+      },
+      {
+        reason: "pull-request-open",
+        status: "done",
+        says: "the run did not start: a pull request for this issue's branch is already open — https://github.com/acme/finance/pull/12.",
+      },
+      { reason: "base-missing", status: "failed", says: "the base branch is gone from the origin — main, and nothing was started." },
+    ] as const;
+
+    for (const { reason, status, says } of stops) {
+      const h = harness();
+      h.assignor.handle(delivery());
+      await tick();
+      const started = h.comments.length;
+      await h.finish(KEY, { key: KEY, status, summary: says, finishedAt: "2026-07-25T00:00:00.000Z", precondition: reason });
+      // The policy's retry is deferred by a turn (see the retry case above), so a run that
+      // reached the classifier would have been forked again by here.
+      await tick();
+      await tick();
+
+      ok(`precondition: ${reason} is recorded exactly as the CHILD reported it`, h.state.get(KEY)?.status === status, JSON.stringify(h.state.get(KEY)));
+      ok(
+        `precondition: ${reason} is prose the classifier recognises as nothing — which is WHY the parent routes on the typed reason`,
+        classify(says).class === "unknown",
+        JSON.stringify(classify(says)),
+      );
+      ok(
+        `precondition: ${reason} is not run again — the condition it refused on does not change by spending an agent on it`,
+        h.forked.length === 1,
+        JSON.stringify(h.forked.map((j) => j.key)),
+      );
+      ok(`precondition: ${reason} marks nothing on the issue — neither the agent nor the item is at fault`, h.labelled.length === 0, h.labelled.join(","));
+      ok(`precondition: ${reason} holds nothing — one item's condition is not the pipeline's`, h.pause.read() === undefined, JSON.stringify(h.pause.read()));
+      ok(
+        `precondition: ${reason} settles the item like any other finish — the claim back off, the result file and the lock gone`,
+        h.released.join(",") === KEY && !existsSync(h.paths.resultPath(KEY)) && readLock(h.paths.pidPath(KEY)) === undefined,
+        `released ${h.released.join(",")}`,
+      );
+      ok(`precondition: ${reason} costs the issue exactly one comment, like any other finish`, h.comments.length - started === 1, JSON.stringify(h.comments.map((l) => l.message)));
+    }
+  }
+
+  // ── …and the ONE reason that IS handed to the policy (constraint 6): a missing image is
+  //    not this item's condition, it is the repo's environment. It goes over as the `setup`
+  //    CLASS — never as a wording chosen so a regex matches it — which is the repo stop the
+  //    policy already has. Without the hand-over, every item in that repo forks and stops
+  //    on the same missing image, one at a time, until somebody notices ──
+  {
+    const h = harness();
+    h.assignor.handle(delivery());
+    await tick();
+    await h.finish(KEY, {
+      key: KEY,
+      status: "failed",
+      summary: "the run did not start: this repo's sandbox image is not on this host — sunday-finance.",
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      precondition: "image-missing",
+    });
+    await tick();
+    await tick();
+
+    ok(
+      "image-missing: the item is recorded failed and set aside for nothing — it is the repo that is broken, not the issue",
+      h.state.get(KEY)?.status === "failed" && h.labelled.length === 0,
+      `${JSON.stringify(h.state.get(KEY))} labelled ${h.labelled.join(",")}`,
+    );
+    ok("image-missing: and it is not started again into the image that is still missing", h.forked.length === 1, JSON.stringify(h.forked.map((j) => j.key)));
+
+    h.assignor.handle(delivery({ number: 58 })); // the next issue in the same repo
+    await tick();
+    ok(
+      "image-missing: the REPO is stopped, so the next item in it is not forked to find the same thing out",
+      h.forked.length === 1 && h.claimed.length === 1,
+      `forked ${JSON.stringify(h.forked.map((j) => j.key))} claimed ${h.claimed.join(",")}`,
+    );
+    ok(
+      "image-missing: and the skip says what is broken, rather than reading as an issue nobody would run",
+      said(h.lines, "is stopped until its sandbox image builds again"),
+      JSON.stringify(h.lines.map((l) => l.message)),
+    );
+    ok("image-missing: one repo's environment holds that repo and NOT the pipeline (ADR-0002)", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
   }
 
   // ── the gate (#36): the agent stopped to ask a human something. Nothing shipped and

@@ -18,6 +18,7 @@ import { selectAgent } from "#services/agent/index.mts";
 import { createLogger } from "#services/destinations.mts";
 import { GitCli } from "#services/git.mts";
 import { Gh } from "#services/github/index.mts";
+import { imagePresent } from "#services/sandbox.mts";
 import { IssueModule } from "./index.mts";
 
 /** The workspace root the routing table's `path` and `promptFile` are relative to — this
@@ -120,6 +121,9 @@ async function runIssue(): Promise<Outcome> {
       agent: selectAgent(process.env.AGENT, logger),
       github: new Gh(),
       git: new GitCli(),
+      // The plain probe, not the sandbox SERVICE: the module takes a function so it
+      // names no library type and a smoke answers it without docker (#38 constraint 11).
+      imagePresent,
       log,
     });
     return await issueRun.run({
@@ -130,6 +134,9 @@ async function runIssue(): Promise<Outcome> {
       // The Assignor's decision, carried through untouched (#42 constraint 8).
       base: job.base,
       imageName: job.config.imageName,
+      // From the SAME routing-table entry admission decided on, so the run asserts
+      // against exactly what admitted it (#38) — no new `Job` field for it.
+      triggerLabels: job.config.triggerLabels,
       // Read HERE, not in there: the module resolves no path and opens no file, which is
       // the only reason its decisions can be driven with nothing on disk.
       baselinePrompt: readFileSync(resolve(parentRoot, job.config.promptFile), "utf8"),

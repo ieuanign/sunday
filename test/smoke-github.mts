@@ -63,4 +63,24 @@ fx.stubGh({ "--json state": "OPEN" });
 const state = await gh.issueState(REPO, 9);
 ok("issueState lowercases what `gh issue view` returns", state === "open", state);
 
+// One issue read serves the prompt, the PR title AND both issue-level preconditions
+// (#38) — so it hands back state and labels in the vocabulary the rest of this seam
+// speaks, rather than `gh`'s own shouted state and nested label objects.
+fx.stubGh({
+  "--json title,body,state,labels": JSON.stringify({
+    title: "Stop losing the closing keyword",
+    body: "Merged fail-PRs leave their issue open forever.",
+    state: "OPEN",
+    labels: [{ name: "ready-for-agent" }, { name: "agent-working" }],
+  }),
+});
+const detail = await gh.readIssue(REPO, ISSUE);
+ok("readIssue carries the title and body the prompt and the PR title are made of", detail.title === "Stop losing the closing keyword" && detail.body.includes("open forever"), JSON.stringify(detail));
+ok("readIssue lowercases the state, so 'is this issue still open' is the same comparison everywhere", detail.state === "open", detail.state);
+ok(
+  "readIssue flattens labels to names, as listOpenIssues already does — a caller compares against trigger labels, not against gh's shape",
+  JSON.stringify(detail.labels) === JSON.stringify(["ready-for-agent", "agent-working"]),
+  JSON.stringify(detail.labels),
+);
+
 report();

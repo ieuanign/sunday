@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
+import { shA } from "#lib/sh.mts";
 import type { Logger, ModuleLogger } from "./logger.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
@@ -22,6 +23,19 @@ import type { RepoConfig } from "#config/repos.mts";
  *  Dockerfile, not retrying the build. */
 export function isScaffoldPlaceholder(dockerfile: string): boolean {
   return dockerfile.includes("your-child-dev-image");
+}
+
+/** Is this repo's image actually on the host? What a run asks before it starts (#38):
+ *  boot builds every routed repo's image, and hours of queue can pass before an item
+ *  runs — long enough for a `docker image prune` or a rebuild that failed to leave the
+ *  image gone, which the agent library then reports as an obscure container error.
+ *
+ *  `false` means MISSING and nothing else: `docker image ls -q <absent>` exits 0 with
+ *  empty stdout, while a docker that cannot answer at all exits non-zero and throws
+ *  here. Swallowing that into `false` would report a dead daemon — every repo's problem
+ *  — as this one repo's missing image. */
+export async function imagePresent(imageName: string): Promise<boolean> {
+  return (await shA("docker", ["image", "ls", "-q", imageName])) !== "";
 }
 
 /** One repo's image build, as the build step sees it. */

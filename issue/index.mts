@@ -13,6 +13,7 @@ import type { DiffStat, Git } from "#services/git.mts";
 import { AWAITING_HUMAN_LABEL, type GitHubRun } from "#services/github/index.mts";
 import type { LogContext, ModuleLogger } from "#services/logger.mts";
 import { composeBody } from "./body.mts";
+import { beforeShip, beforeWork, type ImagePresent } from "./preconditions.mts";
 import { freshPrompt, RESULT_TAG, resultSchema, resumePrompt, type IssueResult } from "./prompt.mts";
 
 function describe(err: unknown): string {
@@ -38,6 +39,11 @@ export interface IssueRunInput {
   base: string;
   /** The pre-built sandbox image for this repo. */
   imageName: string;
+  /** The labels this repo admits an issue on, from the routing table. The run asserts
+   *  they are all STILL on the issue before it starts (#38): a human who pulls one while
+   *  the item waits in the queue is taking it back, and an agent started anyway spends
+   *  real quota on work nobody asked for any more. */
+  triggerLabels: string[];
   /** The repo's baseline prompt, already read — its `{{REPO}}`/`{{ISSUE}}` placeholders
    *  are filled here. */
   baselinePrompt: string;
@@ -57,6 +63,10 @@ export interface IssueModuleDeps {
   agent: Agent;
   github: GitHubRun;
   git: Git;
+  /** Is this repo's image on the host? A plain injected function rather than the sandbox
+   *  service: nothing in `issue/` may import that library, and a check that constructed
+   *  its own probe could not be driven without docker (#34 constraint 7). */
+  imagePresent: ImagePresent;
   log: ModuleLogger;
 }
 
@@ -66,12 +76,14 @@ export class IssueModule {
   private readonly agent: Agent;
   private readonly github: GitHubRun;
   private readonly git: Git;
+  private readonly imagePresent: ImagePresent;
   private readonly log: ModuleLogger;
 
   constructor(deps: IssueModuleDeps) {
     this.agent = deps.agent;
     this.github = deps.github;
     this.git = deps.git;
+    this.imagePresent = deps.imagePresent;
     this.log = deps.log;
   }
 
@@ -90,11 +102,29 @@ export class IssueModule {
      *  base there would overwrite the real fork point with wherever the base has moved to
      *  (ADR-0003). */
     let forkPoint: string | undefined;
+    /** A before-work assertion stopped this run: it made no branch and no worktree, so
+     *  the cleanup below has nothing to drop — and an item that must not start must not
+     *  spend even two `git` calls on a checkout it never touched (constraint 1). */
+    let stopped = false;
 
     try {
       // Read on every run, fresh or resumed: the PR a resume finally opens is titled from
       // the issue, and the gate that came before it opened none.
       const detail = await this.github.readIssue(input.repo, input.issue);
+      // HERE — after the read the run already performs, and before its first write of any
+      // kind (#38 constraint 1). A resume is subject to the same set: one that stripped
+      // `awaiting-human` first would leave the item neither gated nor running.
+      const refused = await beforeWork(
+        { github: this.github, git: this.git, imagePresent: this.imagePresent },
+        input,
+        branch,
+        detail,
+      );
+      if (refused) {
+        stopped = true;
+        this.log.info(`stopped — ${refused.summary}`, about);
+        return this.outcome(refused);
+      }
       if (input.resume) {
         // Straight away, not at the end: from here on the item is working, not waiting on
         // anybody. The resuming child does this itself so the Assignor's GitHub seam stays
@@ -168,6 +198,14 @@ export class IssueModule {
           agentFailed: true,
         });
       }
+      // HERE, between the count and the push: this is the last instant before the run
+      // writes to somebody else's repository, and the base it was going to target may
+      // have merged while the agent worked (#38 AC2).
+      const vanished = await beforeShip(this.git, input);
+      if (vanished) {
+        this.log.info(`stopped — ${vanished.summary}`, about);
+        return this.outcome(vanished);
+      }
       await this.git.push(input.childDir, branch);
       const draft = signal !== "ready";
       const url = await this.openPr(input, branch, detail.title, result, ahead, draft);
@@ -192,7 +230,7 @@ export class IssueModule {
       this.log.info(`failed — ${failure}`, about);
       return this.outcome({ key: input.key, status: "failed", summary: failure, forkPoint });
     } finally {
-      if (!gated) await this.cleanup(input, branch, preserved, about);
+      if (!gated && !stopped) await this.cleanup(input, branch, preserved, about);
     }
   }
 

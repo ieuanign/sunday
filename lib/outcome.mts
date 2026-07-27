@@ -18,6 +18,21 @@ export const OUTCOME_STATUSES = ["done", "failed", "awaiting-human"] as const;
 
 export type OutcomeStatus = (typeof OUTCOME_STATUSES)[number];
 
+/** Every precondition a run refuses to start (or to ship) on, spelled ONCE here for the
+ *  same reason the statuses are: the shape guard below derives from this tuple, so a
+ *  reason added here is readable by itself rather than turning the outcome that carries
+ *  it into a hole. `base-missing` is the one reason both phases can report — the base
+ *  can vanish before the run starts and again during the agent run that follows. */
+export const PRECONDITION_REASONS = [
+  "issue-closed",
+  "labels-missing",
+  "pull-request-open",
+  "base-missing",
+  "image-missing",
+] as const;
+
+export type PreconditionReason = (typeof PRECONDITION_REASONS)[number];
+
 /** What a work item finished as. */
 export interface Outcome {
   /** The work-item key (`<owner>/<repo>#<issue>`) this outcome belongs to. */
@@ -47,6 +62,13 @@ export interface Outcome {
    *  whole pipeline. Absent on every other path, which is every failure the agent never
    *  got to describe. */
   agentFailed?: boolean;
+  /** WHICH assertion stopped the run (#38), when one did. Typed, and travelling in this
+   *  file rather than as an exit code (ADR-0001), because the parent reacts to each reason
+   *  on its own terms: four of them bypass the failure classifier entirely and
+   *  `image-missing` stops the whole repo. The summary beside it is prose Sunday composed,
+   *  so a parent routing on wording would quarantine an issue a human simply unlabelled.
+   *  Absent on every run that got past the checks — which is every ordinary run. */
+  precondition?: PreconditionReason;
 }
 
 /** The answers a read can give. Absence is the common one — no file means nothing to
@@ -114,6 +136,11 @@ function isOutcome(value: unknown): value is Outcome {
     // And likewise: this one decides whether a failure is the agent's own verdict or an
     // unrecognised one, so a truthy string here would classify a real quota wall as the
     // agent having failed — one item quarantined while the pipeline feeds into the wall.
-    (o.agentFailed === undefined || typeof o.agentFailed === "boolean")
+    (o.agentFailed === undefined || typeof o.agentFailed === "boolean") &&
+    // Off the tuple, like `status`, so a reason added to the vocabulary is readable here
+    // by itself. A reason the parent has no reaction for is not a reason: routing on it
+    // would take the ordinary failure path — classify over composed prose, one retry on
+    // real quota, then quarantine — which is the whole thing this field exists to avoid.
+    (o.precondition === undefined || (PRECONDITION_REASONS as readonly unknown[]).includes(o.precondition))
   );
 }

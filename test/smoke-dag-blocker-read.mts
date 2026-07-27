@@ -59,7 +59,9 @@ ok(
 // → main". A read that did not happen is not an answer.
 fx.stubGh({
   "dependencies/blocked_by": { stderr: "gh: Server Error (HTTP 502)", exitCode: 1 },
-  "--json title,body": JSON.stringify({ title: "Rework the widget", body: "Rework the widget." }),
+  // One issue read serves the prompt, the PR title and #38's preconditions, so the argv
+  // asks for state and labels too — admission's walk still reads nothing but the body.
+  "--json title,body,state,labels": JSON.stringify({ title: "Rework the widget", body: "Rework the widget.", state: "OPEN", labels: [] }),
 });
 const read502 = await resolveBase(gh, REPO, ISSUE);
 ok(
@@ -79,7 +81,7 @@ ok(
 // nothing there and admitted onto main.
 fx.stubGh({
   "dependencies/blocked_by": "",
-  "--json title,body": JSON.stringify({ title: "Rework the widget", body: URL_BODY }),
+  "--json title,body,state,labels": JSON.stringify({ title: "Rework the widget", body: URL_BODY, state: "OPEN", labels: [] }),
   // `gh issue view` shouts the state the dependencies endpoint whispers; the body
   // fallback resolves each ref's state through it, one read per ref.
   "--json state": "OPEN",
