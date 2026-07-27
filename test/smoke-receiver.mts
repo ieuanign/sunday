@@ -108,13 +108,16 @@ async function harness(onDelivery: (delivery: Delivery) => void = () => {}) {
 }
 
 // ── a pull_request payload carries its number and labels under `pull_request`, not
-//    `issue`. #42/#43 route these; the spine's job is that they arrive whole ──
+//    `issue`. #42/#43 route these; the spine's job is that they arrive whole — and a
+//    CLOSED one carries the two fields #43's restack is seeded from: whether it merged,
+//    and which branch it merged. The head ref is the only place the merged ISSUE number
+//    is written down (the delivery's own number is the PR's) ──
 {
   const h = await harness();
   await h.post("pull_request", {
     action: "closed",
     repository: { full_name: "acme/finance" },
-    pull_request: { number: 61, labels: [{ name: "stacked" }] },
+    pull_request: { number: 61, labels: [{ name: "stacked" }], merged: true, head: { ref: "feat/9" } },
   });
 
   ok(
@@ -122,6 +125,30 @@ async function harness(onDelivery: (delivery: Delivery) => void = () => {}) {
     h.delivered[0]?.number === 61 && JSON.stringify(h.delivered[0].labels) === JSON.stringify(["stacked"]),
     JSON.stringify(h.delivered[0]),
   );
+  ok(
+    "delivery: a merged close says it merged — GitHub sends no `merged` action, so this flag is the whole signal",
+    h.delivered[0]?.merged === true,
+    JSON.stringify(h.delivered[0]),
+  );
+  ok(
+    "delivery: and which branch merged, which is where the merged issue number is written down",
+    h.delivered[0]?.head === "feat/9",
+    JSON.stringify(h.delivered[0]),
+  );
+  await h.stop();
+}
+
+// ── a PR closed WITHOUT merging looks identical bar one field, and it must not seed a
+//    restack: nothing landed, so nothing stacked on it has moved ──
+{
+  const h = await harness();
+  await h.post("pull_request", {
+    action: "closed",
+    repository: { full_name: "acme/finance" },
+    pull_request: { number: 61, labels: [], merged: false, head: { ref: "feat/9" } },
+  });
+
+  ok("delivery: a PR closed unmerged says so", h.delivered[0]?.merged === false, JSON.stringify(h.delivered[0]));
   await h.stop();
 }
 
@@ -153,6 +180,11 @@ async function harness(onDelivery: (delivery: Delivery) => void = () => {}) {
   ok(
     "comment: a PR's conversation comment arrives under `issue`, and is still known for a PR's",
     h.delivered[1]?.onPullRequest === true,
+    JSON.stringify(h.delivered[1]),
+  );
+  ok(
+    "comment: and it did not merge anything — a comment on a merged PR's thread must not read as the merge (#43)",
+    h.delivered[1]?.merged === false && h.delivered[1].head === undefined,
     JSON.stringify(h.delivered[1]),
   );
   await h.stop();
