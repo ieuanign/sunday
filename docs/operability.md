@@ -54,21 +54,21 @@ When setup fails — at boot, or mid-run as a `Provider '…' create failed` —
 - It never spams: the halt is notified once (event log / issue comment / Telegram), and the
   watcher logs to the parent's stdout only when the failure message *changes*.
 
-The raw excerpt is in `.scratch/operability/events.jsonl`; the halt reason in
-`.scratch/operability/pause.json`.
+The raw excerpt is in `var/log/events.jsonl`; the halt reason in `var/pause.json`.
 
 ## Where things are recorded
 
-All operability artifacts are gitignored, under `.scratch/`:
+All operability artifacts are gitignored, under `var/`:
 
-- **Event log — `.scratch/operability/events.jsonl`.** One JSON line per P1/P2/P3 event, appended
+- **Event log — `var/log/events.jsonl`.** One JSON line per P1/P2/P3 event, appended
   **first and synchronously** — the source of truth. If every other sink fails, the event is still
   here. This is where a first real quota/403/refusal excerpt lands for tightening the classifier.
-- **Per-flow run logs — `.scratch/<repo>/<issue>/run.log`** (and `pr-<n>/run.log` for PR-comment
-  runs). Each run streams its full agent output to its own file instead of the shared, interleaved
-  parent stdout. To follow one live run: `tail -f .scratch/<repo>/<issue>/run.log`. The parent's
-  own stdout stays a terse one-line-per-event summary.
-- **Pause state — `.scratch/operability/pause.json`.** Why the pipeline is paused and until when.
+- **Per-flow run logs — `var/log/<owner>/<repo>/<issue>/run.log`** (and `pr-<n>/run.log` for
+  PR-comment runs). Each run streams its full agent output to its own file instead of the shared,
+  interleaved parent stdout. To follow one live run:
+  `tail -f var/log/<owner>/<repo>/<issue>/run.log`. The parent's own stdout stays a terse
+  one-line-per-event summary.
+- **Pause state — `var/pause.json`.** Why the pipeline is paused and until when.
   Written temp-then-rename (no torn file on a crash). On boot Sunday **re-arms** it: an
   elapsed quota reset resumes immediately, a future one is re-scheduled, a 403 halt / no-timestamp
   quota stays paused for a human, and a setup halt restarts its self-heal watcher.

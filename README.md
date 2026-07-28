@@ -12,7 +12,7 @@ otherwise defers to each repo.
 
 > **Status: pipeline built (M1–M5), live-hardening in progress.** Everything here is built and
 > smoke-verified; a few paths are still owed an end-to-end live run — a real quota pause, a
-> supervised kill → restart → reconcile, a forced ≥120K handoff.
+> supervised kill → restart → reconcile.
 
 ## How it works
 
