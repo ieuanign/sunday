@@ -127,6 +127,9 @@ function workItemKey(repo: string, number: number, kind: WorkItemKind): string {
 interface Deferred {
   candidate: IssueCandidate;
   reason: string;
+  /** The steer the human released it with (#66) — the run this item is waiting for is the
+   *  only one that note was ever meant for, and it may be days away. */
+  hint?: string;
 }
 
 /** Why a deferred item is waiting, as `assignor/dag.mts` answered it. */
@@ -273,7 +276,7 @@ export class Assignor {
    *  v1's live and recovery paths came apart. It takes an `IssueCandidate` and not a
    *  `Delivery` for the same reason: reconcile has no webhook event to name, and a
    *  synthetic one would put an event in the log that never happened. */
-  async considerIssue({ repo, number, labels }: IssueCandidate): Promise<void> {
+  async considerIssue({ repo, number, labels }: IssueCandidate, hint?: string): Promise<void> {
     const decision = admitIssue(repo, labels, this.repos);
     if (!decision.admit) {
       this.log.info(`· skip ${repo}#${number} — ${decision.reason}`);
@@ -324,7 +327,7 @@ export class Assignor {
     }
     const base = await resolveBase(this.github, item.repo, item.issue);
     if (!base.admit) {
-      this.defer(item, labels, base);
+      this.defer(item, labels, base, hint);
       return;
     }
     this.deferred.delete(item.key);
@@ -333,7 +336,7 @@ export class Assignor {
     this.github.claim(item.repo, item.issue);
     this.state.set(item.key, { status: "in-flight", base: base.base });
     const cfg = this.repos[item.repo]; // admission passed, so the repo is routed
-    this.scheduler.enqueue({ key: item.key, branch: `feat/${item.issue}`, run: () => this.run(item, cfg, base.base) });
+    this.scheduler.enqueue({ key: item.key, branch: `feat/${item.issue}`, run: () => this.run(item, cfg, base.base, undefined, undefined, hint) });
   }
 
   /** Re-run admission for everything this repo is holding back, because a blocker's PR
@@ -354,12 +357,16 @@ export class Assignor {
       if (held.candidate.repo !== repo) continue;
       // Somewhere in its life already — in-flight, done, or waiting on a human. Whatever
       // it is, it is no longer waiting on a blocker, so it stops being tracked as such.
+      // `quarantined` counts as still-waiting, exactly as admission has it: a RELEASED
+      // item can be held on a blocker (#66), and its status stays quarantined until the
+      // admission that starts it writes `in-flight`. Dropped here, it waits for a
+      // reconcile pass and loses the human's steer on the way.
       const prior = this.state.get(key);
-      if (prior && prior.status !== "failed") {
+      if (prior && prior.status !== "failed" && prior.status !== "quarantined") {
         this.deferred.delete(key);
         continue;
       }
-      await this.considerIssue(held.candidate);
+      await this.considerIssue(held.candidate, held.hint);
     }
   }
 
@@ -374,14 +381,51 @@ export class Assignor {
    *  exactly two comments and a deferred one has not started. The same reason repeating
    *  drops back to `info`, so a re-evaluation storm across one repo's PR events cannot
    *  page anybody once per event for a single outage. */
-  private defer(item: WorkItemRef, labels: string[], refusal: Refusal): void {
+  private defer(item: WorkItemRef, labels: string[], refusal: Refusal, hint?: string): void {
     const held = this.deferred.get(item.key);
     // Built from the VALIDATED item rather than kept from the payload (constraint 14):
     // this candidate is what a re-evaluation minutes later admits on.
-    this.deferred.set(item.key, { candidate: { repo: item.repo, number: item.issue, labels }, reason: refusal.reason });
+    this.deferred.set(item.key, { candidate: { repo: item.repo, number: item.issue, labels }, reason: refusal.reason, hint });
     const line = `⏸ defer ${item.key} — ${refusal.reason}`;
     if (refusal.unreadable && held?.reason !== refusal.reason) this.log.error(line, { repo: item.repo });
     else this.log.info(line);
+  }
+
+  /** Hand a PARKED work item back to the pipeline (#66) — the phone's `/fix`. The key
+   *  arrives AS TYPED and is resolved here (constraint 14), the whole decision is taken
+   *  here, and the line to reply with comes back: nothing else knows what this did, and a
+   *  caller composing its own answer would be a second reading of the same state. */
+  async release(key: string, hint?: string): Promise<string> {
+    // `info`, so a release posts no comment: a work item gets exactly two, and both are
+    // already spoken for (`run`'s and `record`'s milestones).
+    const say = (line: string): string => {
+      this.log.info(line);
+      return line;
+    };
+    const item = parseWorkItemKey(key, this.repos);
+    if (!item) return say(`✗ ${key} is not a work item this parent routes — expected <owner>/<repo>#<issue> naming a repo in config/repos.json`);
+    // `#pr<n>` parses as a work item too (#44) and is not this one's: a comment run has no
+    // hint seam, and its quarantine label sits on the PULL REQUEST (`gh pr edit`).
+    if (item.kind === "pr") return say(`✗ ${item.key} is a pull-request comment run — take the \`${QUARANTINE_LABEL}\` label off the pull request to hand it back`);
+    const labels = await this.github.issueLabels(item.repo, item.issue);
+    // Whichever label is actually on it: the two parked states differ in SHAPE — a
+    // quarantine is a durable status plus a best-effort label (`assignor/failure.mts:459-462`,
+    // `:487-498`), where an agent-failed item settles at plain `failed` and the label is
+    // the whole record (`:419-427`). Hence two clauses, never one check for both.
+    const parked = [QUARANTINE_LABEL, AGENT_FAILED_LABEL].filter((label) => labels.includes(label));
+    const prior = this.state.get(item.key);
+    if (parked.length === 0 && prior?.status !== "quarantined") {
+      const where = prior ? `state=${prior.status}` : "Sunday has no record of it";
+      return say(`✗ ${item.key} is not parked — ${where}. Only a quarantined or \`${AGENT_FAILED_LABEL}\` item is released this way; anything else is re-labelled on GitHub.`);
+    }
+    // BOTH halves (constraint 11): the label off GitHub, and the re-admission on the list
+    // the removal LEFT — admission decides on the candidate's labels, so re-admitting on
+    // GitHub's own would refuse the item this just released.
+    if (parked.length > 0) await this.github.removeLabels(item.repo, item.issue, parked);
+    await this.considerIssue({ repo: item.repo, number: item.issue, labels: labels.filter((label) => !parked.includes(label)) }, hint);
+    // What it DID, not what happens next: `considerIssue` can still defer on a blocker or
+    // a stopped repo, and only the issue thread can say how the run itself went.
+    return say(`▶ released ${item.key} — handed back to admission`);
   }
 
   /** A comment on an ISSUE, which is how a gated run gets its answer — `handle` routes on
@@ -626,6 +670,7 @@ export class Assignor {
     base: string,
     resume?: Job["resume"],
     retryError?: string,
+    hint?: string,
   ): Promise<void> {
     const job: Job = {
       key: item.key,
@@ -641,6 +686,7 @@ export class Assignor {
       eventLogPath: this.paths.eventLogPath,
       resume,
       retryError,
+      hint,
     };
     // Milestone 1 of exactly two (constraint 12) — every one posts a comment on the
     // issue, so a third is thread spam.

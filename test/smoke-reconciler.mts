@@ -124,6 +124,14 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
     labelPr: async () => {
       throw new Error("labelPr: no case in this smoke labels a pull request");
     },
+    // #66's release: a re-derive hands admission what GitHub already told it, so nothing
+    // here reads or edits labels for one.
+    issueLabels: async () => {
+      throw new Error("issueLabels: no case in this smoke releases a parked item");
+    },
+    removeLabels: async () => {
+      throw new Error("removeLabels: no case in this smoke releases a parked item");
+    },
   };
 
   const paths: Paths = {

@@ -19,6 +19,7 @@ import {
   handoffPrompt,
   handoffSeedPrompt,
   HANDOFF_TAG,
+  hintSection,
   RESULT_TAG,
   resultSchema,
   resumePrompt,
@@ -144,6 +145,9 @@ export class IssueModule {
         prompt = handoffSeedPrompt(handed.note, input.resume.reply);
         resumeSession = undefined;
       }
+      // AFTER the fork above, which REPLACES the whole prompt: a steer composed before that
+      // line is a steer thrown away (#66).
+      if (input.hint) prompt += hintSection(input.hint);
 
       const result = await this.agent.run<IssueResult>({
         key: input.key,

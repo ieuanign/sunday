@@ -55,6 +55,13 @@ function github(over: Partial<GitHub> = {}): GitHub {
     readPr: async () => {
       throw new Error("readPr: a hand run does not read pull requests");
     },
+    // #66's release is the parent's, not a hand run's: it plans ONE item and releases none.
+    issueLabels: async () => {
+      throw new Error("issueLabels: a hand run does not release parked items");
+    },
+    removeLabels: async () => {
+      throw new Error("removeLabels: a hand run does not release parked items");
+    },
     ...over,
   };
 }

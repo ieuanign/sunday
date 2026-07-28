@@ -280,6 +280,14 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     readPr: async () => {
       throw new Error("readPr: no case in this smoke reads a pull request");
     },
+    // #66's release, and nothing here releases: stubs that ANSWERED would let a case reach
+    // a decision this smoke never checked.
+    issueLabels: async () => {
+      throw new Error("issueLabels: no case in this smoke releases a parked item");
+    },
+    removeLabels: async () => {
+      throw new Error("removeLabels: no case in this smoke releases a parked item");
+    },
   };
 
   /** The policy's own seam, narrower than the Assignor's: one label write, which is a
@@ -944,6 +952,52 @@ try {
     ok("a quota window does not lift an auth halt", h.scheduler.isPaused() && h.pause.read()?.reason.includes("auth") === true, JSON.stringify(h.pause.read()));
   }
 
+  // ── the halt a human is left holding: no reset to lift it, so today the whole procedure
+  //    is deleting `var/pause.json` and restarting (`docs/operability.md`). `resume()` is
+  //    that from the phone (#66) — and it drains whatever the halt held back ──
+  {
+    const h = harness();
+    h.policy.failed({ text: "You have exceeded your usage limit for this period.", repo: ITEM.repo, item: ITEM });
+    await h.admit(58);
+    ok("resume: the work the halt caught is held", h.started().length === 0, h.started().join(","));
+
+    const line = h.policy.resume();
+    ok("resume: the pipeline runs again", !h.scheduler.isPaused());
+    ok("resume: and the pause is gone from disk, or the next boot re-arms the halt a human just lifted", h.pause.read() === undefined, JSON.stringify(h.pause.read()));
+    await tick();
+    ok("resume: so the work it held starts", h.started().join(",") === "acme/finance#58", h.started().join(","));
+    ok(
+      "resume: the reply quotes what was lifted — a human resuming into a 403 has to see what they are resuming into",
+      line.includes("quota exhausted"),
+      line,
+    );
+    ok(
+      "resume: said at info — a human lifting the halt already knows about it",
+      h.lines.find((l) => l.module === "failure" && l.message.includes("resumed"))?.level === "info",
+      JSON.stringify(h.lines.filter((l) => l.module === "failure").map((l) => `${l.level} ${l.message}`)),
+    );
+  }
+
+  // ── and only that halt. A pause that lifts ITSELF is refused: resuming a quota window
+  //    early feeds the backlog straight back into the wall it is waiting out ──
+  {
+    const h = harness({ resumeGraceMs: 30 });
+    const resetAt = Date.now() + 10_000;
+    h.policy.failed({ text: `Usage limit reached. Your limit resets at ${new Date(resetAt).toISOString()}`, repo: ITEM.repo, item: ITEM });
+
+    const line = h.policy.resume();
+    ok("resume: a pause that lifts itself is left alone", h.scheduler.isPaused() && h.pause.read() !== undefined, JSON.stringify(h.pause.read()));
+    ok("resume: and refused with the time it lifts at, so nobody types it again every minute", line.includes(new Date(resetAt + 30).toISOString()), line);
+  }
+
+  // ── typed at a pipeline that is already running, it says so: a reply that claimed to
+  //    resume a pipeline nobody paused is a human hunting for a halt that never existed ──
+  {
+    const h = harness();
+    const line = h.policy.resume();
+    ok("resume: nothing to lift is said plainly", !h.scheduler.isPaused() && line.includes("not paused"), line);
+  }
+
   // ── constraint 9: the policy NEVER throws. It sits on every failure path and is reached
   //    from timers with nobody above them, so a throw is either a work item that dies
   //    twice or an unhandled rejection that takes the parent down under `restart: always`.
@@ -966,6 +1020,20 @@ try {
     ok("never throws: a durable write that fails does not reach the caller", !threw);
     ok("never throws: and the pipeline is stopped anyway — the in-memory pause cannot fail", h.scheduler.isPaused());
     ok("never throws: with what broke said out loud", h.lines.some((l) => l.message.includes("ENOSPC")), JSON.stringify(h.lines.map((l) => l.message)));
+
+    /** The same file unreadable, on the way out: a torn pause is exactly what a kill
+     *  mid-write leaves, and `/resume` is where a human meets it. */
+    class Torn extends PauseStore {
+      override read(): never {
+        throw new SyntaxError("Unexpected end of JSON input");
+      }
+    }
+    const t = harness({ pause: new Torn(resolve(dir, "torn", "pause.json")) });
+    ok(
+      "never throws: an unreadable pause comes back as an answer, because a human is waiting on the other end of a resume",
+      t.policy.resume().includes("Unexpected end of JSON input"),
+      JSON.stringify(t.lines.map((l) => l.message)),
+    );
   }
 
   console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);

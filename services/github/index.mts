@@ -140,6 +140,11 @@ export class Gh implements GitHubReconcile, GitHubRun, GitHubForwarder, GitHubLa
     };
   }
 
+  async issueLabels(repo: string, issue: number): Promise<string[]> {
+    // Off the read that already answers it — no second `gh` call for a fact one view has.
+    return (await this.readIssue(repo, issue)).labels;
+  }
+
   async blockedBy(repo: string, issue: number): Promise<Blocker[]> {
     // No `try`, deliberately — the swallow is the defect (`listener/dag.mts:45`). The
     // endpoint answers on every routed repo, exits 0 with EMPTY stdout when an issue

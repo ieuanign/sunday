@@ -49,6 +49,9 @@ export interface IssueRunInput {
    *  Handed to the agent in the prompt: it is the only thing this run knows that the last
    *  one did not, and without it a retry is the same run again on fresh quota. */
   retryError?: string;
+  /** What the human who released this parked item asked for (#66). Unlike `retryError`
+   *  it is a REQUIREMENT — it is the reason this run exists at all. */
+  hint?: string;
 }
 
 /** Everything a run reaches the world through, and constructs none of. */

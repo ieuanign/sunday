@@ -103,6 +103,8 @@ interface Scenario {
   imageProbeError?: string;
   /** This run is #39's one retry, carrying what the previous attempt died on. */
   retryError?: string;
+  /** The steer a human typed when they released this parked item (#66). */
+  hint?: string;
 }
 
 /** A real IssueModule over the real Logger, with the three world-reaching services stood
@@ -265,6 +267,7 @@ function harness(s: Scenario = {}) {
     handoffThreshold: THRESHOLD,
     ...(s.resume ? { resume: s.resume } : {}),
     ...(s.retryError ? { retryError: s.retryError } : {}),
+    ...(s.hint ? { hint: s.hint } : {}),
   };
 
   const module = new IssueModule({
@@ -777,6 +780,66 @@ function harness(s: Scenario = {}) {
     "fresh: a run that is nobody's retry says nothing about a previous attempt",
     h.requests[0]?.prompt.includes("previous") === false,
     h.requests[0]?.prompt ?? "",
+  );
+}
+
+// ── the human's steer (#66): a parked item released with `/fix <key> <hint>` runs again
+//    with what the human typed. Nobody types it for it to be dropped ──
+{
+  const steer = "Take the row lock in the backfill, not in the migration.";
+  const h = harness({ hint: steer });
+  const outcome = await h.run();
+  const prompt = h.requests[0]?.prompt ?? "";
+
+  ok("hint: the steer reaches the agent", prompt.includes(steer), prompt);
+  ok(
+    "hint: under a heading of its own, after the issue — spliced into the body it reads as something the human wrote there",
+    prompt.indexOf(BODY) < prompt.indexOf(steer) &&
+      /^#+ .+$/m.test(prompt.slice(prompt.indexOf(BODY) + BODY.length, prompt.indexOf(steer))),
+    prompt,
+  );
+  ok("hint: and nothing else about the run changes — it ships its PR like any other", outcome.status === "done" && h.created.length === 1, JSON.stringify(outcome));
+}
+{
+  const h = harness();
+  await h.run();
+  ok(
+    "hint: a run nobody steered is handed no such section",
+    h.requests[0]?.prompt.includes("handed this back") === false,
+    h.requests[0]?.prompt ?? "",
+  );
+}
+{
+  // Both at once: the retried run of an item a human released with a note. The two sections
+  // say OPPOSITE things about how to read them, so one must not swallow the other.
+  const steer = "Take the row lock in the backfill, not in the migration.";
+  const died = "TypeError: Cannot read properties of undefined (reading 'invoice')";
+  const h = harness({ hint: steer, retryError: died });
+  await h.run();
+  const prompt = h.requests[0]?.prompt ?? "";
+
+  ok("hint + retry: both facts reach the agent", prompt.includes(steer) && prompt.includes(died), prompt);
+  ok(
+    "hint + retry: the steer sits OUTSIDE the previous-failure section — inside it, the agent is told not to treat it as a requirement",
+    prompt.indexOf("do not treat it as a requirement") < prompt.indexOf(steer),
+    prompt,
+  );
+}
+{
+  // #67's fork REPLACES the whole prompt with the seed. A steer composed before that line
+  // is a steer thrown away — which no `/fix` can be allowed to be.
+  const steer = "Ship the backfill behind a flag; the migration can wait.";
+  const h = harness({
+    hint: steer,
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD },
+  });
+  await h.run();
+  const [, work] = h.requests;
+
+  ok(
+    "hint: it survives the handoff fork — the seeded prompt carries the note, the reply AND the steer",
+    work?.prompt.includes(NOTE) === true && work?.prompt.includes("Keep the invoices.") === true && work?.prompt.includes(steer) === true,
+    work?.prompt ?? "",
   );
 }
 

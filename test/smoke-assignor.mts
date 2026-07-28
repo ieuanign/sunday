@@ -112,6 +112,11 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
   const released: string[] = [];
   /** What the failure policy would mark on the issue (#39) — its own seam, one write wide. */
   const labelled: string[] = [];
+  /** What each issue wears on GitHub right now, by `<repo>#<issue>` — what a release reads
+   *  and edits (#66). A case that parks an item sets it here. */
+  const onGithub: Record<string, string[]> = {};
+  /** …and every label a release took off, in order. */
+  const removed: string[] = [];
   const github: GitHub = {
     claim: (repo, issue) => void claimed.push(`${repo}#${issue}`),
     release: (repo, issue) => void released.push(`${repo}#${issue}`),
@@ -125,6 +130,13 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
     // The one read a PR summon costs (#44): the head branch admission holds the branch
     // lock on, so a comment run and an issue run cannot be on one branch at once.
     readPr: async () => ({ head: "feat/57", base: "main", state: "open" }),
+    // A release's two calls (#66), over labels this case declared: read what the issue
+    // wears, and take the parked one off it.
+    issueLabels: async (repo, issue) => onGithub[`${repo}#${issue}`] ?? [],
+    removeLabels: async (repo, issue, names) => {
+      removed.push(`${repo}#${issue} -${names.join(",")}`);
+      onGithub[`${repo}#${issue}`] = (onGithub[`${repo}#${issue}`] ?? []).filter((l) => !names.includes(l));
+    },
     // …and a case about dependencies says so, one read at a time.
     ...reads,
   };
@@ -204,7 +216,7 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
     }),
   });
 
-  return { assignor, state, pause, lines, comments, claimed, released, labelled, forked, forkedPr, restacked, finish, paths };
+  return { assignor, state, pause, lines, comments, claimed, released, labelled, onGithub, removed, forked, forkedPr, restacked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
@@ -836,6 +848,148 @@ try {
       h.claimed.includes(failed) && h.state.get(failed)?.status === "in-flight",
       `claimed=${h.claimed.join(",")}, state ${JSON.stringify(h.state.get(failed))}`,
     );
+  }
+
+  // ── the RELEASE (#66): a parked work item, handed back to the pipeline from the phone.
+  //    The whole decision is here — the key is resolved, the two parked states are told
+  //    apart, and the line to reply with comes back — so the telegram module branches on
+  //    nothing (constraint 9) and every refusal is assertable offline ──
+  {
+    const h = harness();
+    const unrouted = await h.assignor.release("acme/unknown#57");
+    ok(
+      "release: a key naming a repo Sunday does not route releases nothing — it would name a label write on somebody else's repo",
+      unrouted.startsWith("✗") && unrouted.includes("acme/unknown#57") && h.claimed.length === 0,
+      unrouted,
+    );
+
+    const pr = await h.assignor.release(PR_KEY);
+    ok(
+      "release: and a `#pr` key is refused as itself — the PR lane has no hint seam, and its quarantine comes off with `gh pr edit`",
+      pr.startsWith("✗") && pr.includes(PR_KEY) && h.forkedPr.length === 0,
+      pr,
+    );
+  }
+
+  // ── a QUARANTINED item: the durable status plus the label beside it (#39). Both halves
+  //    come off, and the re-admission runs on the label list the removal LEFT — handed
+  //    GitHub's own list, admission would refuse the item this just released ──
+  {
+    const h = harness();
+    h.state.set(KEY, { status: "quarantined", retried: true });
+    h.onGithub[KEY] = ["sunday", "ready-for-agent", "quarantined"];
+
+    const line = await h.assignor.release(KEY);
+    await tick();
+
+    ok("release: the label comes off the issue — left on, the next reconcile pass refuses the item all over again", h.removed.join(",") === `${KEY} -quarantined`, h.removed.join(","));
+    ok(
+      "release: and the item goes back through the ordinary admission — claimed, recorded, forked",
+      h.claimed.join(",") === KEY && h.state.get(KEY)?.status === "in-flight" && h.forked.length === 1,
+      `claimed=${h.claimed.join(",")}, state ${JSON.stringify(h.state.get(KEY))}, ${h.forked.length} forks`,
+    );
+    ok("release: with its retry budget back, exactly as a re-labelled item has it", h.state.get(KEY)?.retried === undefined, JSON.stringify(h.state.get(KEY)));
+    ok("release: and the reply says the release happened", line.startsWith("▶") && line.includes(KEY), line);
+  }
+
+  // ── …and the OTHER parked state (#68), which is a different SHAPE: the run-failed rung
+  //    returns before the quarantine ladder, so the item settles at plain `failed` and the
+  //    LABEL is the whole record. One check for both states would release neither ──
+  {
+    const h = harness();
+    h.state.set(KEY, { status: "failed", retried: true });
+    h.onGithub[KEY] = ["sunday", "ready-for-agent", "agent-failed"];
+
+    await h.assignor.release(KEY);
+    await tick();
+
+    ok("release: an agent-failed item is parked on its LABEL alone, and that is what comes off", h.removed.join(",") === `${KEY} -agent-failed`, h.removed.join(","));
+    ok(
+      "release: and the same admission runs — handed GitHub's own list, `admitIssue` refuses it on the label alone",
+      h.claimed.join(",") === KEY && h.state.get(KEY)?.status === "in-flight" && h.forked.length === 1,
+      `claimed=${h.claimed.join(",")}, state ${JSON.stringify(h.state.get(KEY))}, ${h.forked.length} forks`,
+    );
+  }
+
+  // ── an item in NEITHER parked state is refused, naming the state it is in (constraint
+  //    12). Releasing on a guess is a second agent on an item somebody is already on ──
+  {
+    const h = harness();
+    h.onGithub[KEY] = ["sunday", "ready-for-agent"];
+    h.state.set(KEY, { status: "in-flight" });
+    const inFlight = await h.assignor.release(KEY);
+    ok(
+      "release: an item somebody is already on is refused, and nothing is unlabelled on the way",
+      inFlight.startsWith("✗") && inFlight.includes("in-flight") && h.removed.length === 0 && h.forked.length === 0,
+      inFlight,
+    );
+
+    h.state.set(KEY, { status: "done" });
+    const done = await h.assignor.release(KEY);
+    ok("release: a finished item names its own state too — there is nothing to hand back", done.includes("done") && h.forked.length === 0, done);
+
+    const never = await h.assignor.release("acme/finance#58");
+    ok(
+      "release: and an item Sunday has never recorded is refused rather than started — a release hands work back, it does not admit new work",
+      never.startsWith("✗") && never.includes("acme/finance#58") && h.forked.length === 0,
+      never,
+    );
+  }
+
+  // ── the quarantine label is BEST-EFFORT (`assignor/failure.mts:487-498`), so a
+  //    quarantined item can be wearing no label at all. The durable status is what parked
+  //    it, and it is released without an empty label edit ──
+  {
+    const h = harness();
+    h.state.set(KEY, { status: "quarantined" });
+    h.onGithub[KEY] = ["sunday", "ready-for-agent"];
+
+    await h.assignor.release(KEY);
+    await tick();
+
+    ok(
+      "release: a quarantine whose label never landed is still parked, and nothing is asked of GitHub that has nothing to remove",
+      h.forked.length === 1 && h.removed.length === 0,
+      `${h.forked.length} forks, removed=${h.removed.join(",")}`,
+    );
+  }
+
+  // ── the STEER the human typed releasing it (#66). It is the reason the run exists at
+  //    all, so it rides the job to the child rather than being composed anywhere else ──
+  {
+    const h = harness();
+    const steer = "Take the row lock in the backfill, not in the migration.";
+    h.state.set(KEY, { status: "quarantined" });
+    h.onGithub[KEY] = ["sunday", "ready-for-agent", "quarantined"];
+
+    await h.assignor.release(KEY, steer);
+    await tick();
+
+    ok("release: the steer reaches the child that runs the item", h.forked[0]?.hint === steer, JSON.stringify(h.forked[0]?.hint));
+  }
+
+  // ── …and a released item can be HELD on a blocker, which is the whole reason the steer
+  //    rides the deferral: the run it eventually gets is minutes or days later, and it is
+  //    the only run the human's note was ever meant for ──
+  {
+    let prOpen = false;
+    const h = harness({
+      blockedBy: async () => [{ number: 9, state: "open" }],
+      openPrForHead: async () => (prOpen ? "https://github.com/acme/finance/pull/12" : undefined),
+    });
+    const steer = "Ship the backfill behind a flag; the migration can wait.";
+    h.state.set(KEY, { status: "quarantined" });
+    h.onGithub[KEY] = ["sunday", "ready-for-agent", "quarantined"];
+
+    const line = await h.assignor.release(KEY, steer);
+    await tick();
+    ok("release: an item whose blocker has nothing to stack on yet starts nothing — and the release still happened", h.forked.length === 0 && line.startsWith("▶"), `${h.forked.length} forks, ${line}`);
+
+    prOpen = true;
+    h.assignor.handle(delivery({ event: "pull_request", action: "opened", number: 12, labels: [] }));
+    await tick();
+
+    ok("release: and the run the blocker's PR finally releases still carries the steer", h.forked[0]?.hint === steer, JSON.stringify(h.forked.map((j) => j.hint)));
   }
 
   // ── the retry (#39): a failed item the policy decides is worth one more run is started

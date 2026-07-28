@@ -66,6 +66,10 @@ export interface Job {
    *  It goes into the prompt: it is the only thing this run knows that the last one did
    *  not, and without it the retry is the same run again on fresh quota. */
   retryError?: string;
+  /** What the human typed releasing this parked item (#66). Per-run, not durable state:
+   *  #39's retry loses it, and that run's failure re-parks the item to be released again.
+   *  ponytail: a `WorkItemState.hint` is a seventh field through four write sites. */
+  hint?: string;
 }
 
 /** What the child sends over IPC once its outcome is durable. A NOTIFICATION only:
@@ -168,6 +172,8 @@ async function runIssue(): Promise<Outcome> {
       // Likewise the parent's decision: present only on the ONE retry a failed item gets
       // (#39), carrying what the attempt before this died on.
       retryError: job.retryError,
+      // And likewise: present only when a human released this item with a steer (#66).
+      hint: job.hint,
     });
   } catch (err) {
     return {
