@@ -25,6 +25,7 @@ const watched = [
   resolve(varRoot, "running"),
   resolve(varRoot, "log"),
   resolve(varRoot, "log", "acme", "finance", "57"),
+  resolve(varRoot, "handoff"),
 ];
 const before = watched.map(existsSync);
 
