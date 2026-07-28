@@ -9,6 +9,10 @@ import { z } from "zod";
 /** The XML tag the agent wraps its one result in (`docs/sandbox-prompt.md` §4). */
 export const RESULT_TAG = "sunday-result";
 
+/** The tag the bounded handoff turn wraps its note in (#67). Its own, not `RESULT_TAG`:
+ *  a note arriving under that one would be read as a signal the run then acts on. */
+export const HANDOFF_TAG = "sunday-handoff";
+
 /** The change kinds a PR body ticks. A fixed vocabulary, not free prose: the body ticks
  *  the subset the agent chose out of exactly these, and a reviewer triages on them. */
 export const TYPES_OF_CHANGE = ["new feature", "breaking change", "bug fix", "docs"] as const;
@@ -96,4 +100,33 @@ export function freshPrompt(
  *  Deliberately NOT the baseline again — the session being resumed already has it. */
 export function resumePrompt(reply: string): string {
   return `${reply}${RESUME_REMINDER}`;
+}
+
+/** The one bounded turn a session too big to resume gets (#67). Written here, not lifted
+ *  from `.claude/skills/handoff/SKILL.md` as v1 did — that text tells the agent to SAVE a
+ *  file, and the line v1's regex swapped for "emit it in a tag" no longer exists. */
+export const handoffPrompt =
+  `You are compacting THIS session into a handoff note for a fresh agent that will ` +
+  `continue and finish the work. Do ONLY that: write no code, change no file, make no ` +
+  `commit, run nothing.\n\n` +
+  `Summarise the session so the fresh agent can carry on without you: what the work is, ` +
+  `what has been done and committed so far, what is left, and the decisions and dead ends ` +
+  `it would otherwise repeat. Name the skills it should invoke. Reference plans, ADRs, ` +
+  `issues and commits by path or number rather than duplicating them. Redact anything ` +
+  `sensitive — tokens, keys, personal data.\n\n` +
+  `Emit the note as your ONLY output, inside one \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` ` +
+  `tag. Do not write it to a file: you are in a sandbox with no credentials, and a file ` +
+  `you leave behind dirties the worktree the work is judged on.`;
+
+/** Frames the note for the fresh session — its own predecessor's words, not somebody's brief. */
+const CONTINUE_LEADIN =
+  `---\n\nThe note above is the handoff from the session that was doing this work: it grew ` +
+  `too large to continue, so you are its fresh continuation. Its branch, its commits and ` +
+  `its checkout are all already here — carry on from where the note leaves off. Below is ` +
+  `the human's answer to the question that session stopped to ask.`;
+
+/** What a handed-off run starts with. The tail is `resumePrompt`'s own so the two cannot
+ *  drift: a fresh session never told how to finish spends its run and is not understood. */
+export function handoffSeedPrompt(note: string, reply: string): string {
+  return `${note}\n\n${CONTINUE_LEADIN}\n\n${resumePrompt(reply)}`;
 }

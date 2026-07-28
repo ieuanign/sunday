@@ -436,16 +436,23 @@ export class Assignor {
     // was stacked (#42 constraint 8). Absent for an item admitted before this existed.
     const base = prior.base ?? "main";
     this.github.claim(repo, number);
-    // The whole record is replaced, so the handle, the base and the fork point are all
-    // written back deliberately (constraint 12): dropped here, a run that dies mid-resume
-    // leaves a gated item with nothing left to resume from, no base to resume onto, and
-    // no commit for #43 to restack its branch off.
-    this.state.set(key, { status: "in-flight", sessionId: session, base, forkPoint: prior.forkPoint });
+    // The whole record is replaced, so the handle, the base, the fork point and the
+    // session's size are all written back deliberately (constraint 12): dropped here, a
+    // run that dies mid-resume leaves a gated item with nothing to resume from, no base
+    // to resume onto, no commit for #43 to restack, and a session nobody can size (#67).
+    this.state.set(key, {
+      status: "in-flight",
+      sessionId: session,
+      contextTokens: prior.contextTokens,
+      base,
+      forkPoint: prior.forkPoint,
+    });
     const item: WorkItemRef = { key, repo, issue: number, kind: "issue" };
     this.scheduler.enqueue({
       key,
       branch: `feat/${number}`,
-      run: () => this.run(item, cfg, base, { sessionId: session, reply: comment }),
+      // …and on to the child, the only thing that can act on it (#67).
+      run: () => this.run(item, cfg, base, { sessionId: session, reply: comment, contextTokens: prior.contextTokens }),
     });
   }
 
@@ -776,6 +783,9 @@ export class Assignor {
     this.state.set(item.key, {
       status: outcome.status,
       sessionId: outcome.sessionId,
+      // From THIS outcome with no fallback to the prior one (#67): it describes the session
+      // `sessionId` names, and a number kept from a retired one would hand off a fresh session.
+      contextTokens: outcome.contextTokens,
       base: prior?.base,
       forkPoint: outcome.forkPoint ?? prior?.forkPoint,
       // Carried for the same reason the base is: the whole record is replaced, and a PR

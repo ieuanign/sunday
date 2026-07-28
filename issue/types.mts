@@ -38,8 +38,13 @@ export interface IssueRunInput {
   /** This run's own log. The agent library appends its raw output to the same file, so
    *  the run reads back in one place. */
   logPath: string;
-  /** Continue the session a previous run gated on, with the human's answer. */
-  resume?: { sessionId: string; reply: string };
+  /** Continue the session a previous run gated on, with the human's answer — and how big
+   *  it had grown (#67), which only the parent's durable state knows. Absent resumes. */
+  resume?: { sessionId: string; reply: string; contextTokens?: number };
+  /** The context a session may reach before a reply is handed off to a fresh one (#67).
+   *  A resolved NUMBER: `.env` is parsed and validated by the entry point, because
+   *  `ctx >= NaN` is `false` — a typo would disable the feature in silence (v1's bug). */
+  handoffThreshold: number;
   /** What the PREVIOUS attempt at this item died on, when this run is #39's one retry.
    *  Handed to the agent in the prompt: it is the only thing this run knows that the last
    *  one did not, and without it a retry is the same run again on fresh quota. */
@@ -55,5 +60,10 @@ export interface IssueModuleDeps {
    *  service: nothing in `issue/` may import that library, and a check that constructed
    *  its own probe could not be driven without docker (#34 constraint 7). */
   imagePresent: ImagePresent;
+  /** Keep this run's handoff note (#67). Text-only, for the same reason `imagePresent` is
+   *  injected: the module resolves no path. May throw — the run catches it. */
+  writeHandoffNote: (note: string) => void;
+  /** Drop the spent note. May throw, and the run catches that too: this fires AFTER the push. */
+  clearHandoffNote: () => void;
   log: ModuleLogger;
 }

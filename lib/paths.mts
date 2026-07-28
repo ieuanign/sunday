@@ -68,6 +68,13 @@ export function restackWorktreePath(repo: string, branch: string): string {
   return resolve(varDir, "restack", slug(`${repo}#${branch}`));
 }
 
+/** The handoff note a retiring session leaves the fresh one (#67). ONE per work item — a
+ *  second handoff overwrites the first, and both texts are in the run log. Under `var/`,
+ *  never `.scratch/`, which CLAUDE.md §6 documents as `rm -rf`-able (v1 kept notes there). */
+export function handoffNotePath(key: string): string {
+  return resolve(varDir, "handoff", `${slug(key)}.md`);
+}
+
 /** Where one repo's token reports accumulate: `var/log/<owner>/<repo>/token-report/`,
  *  beside that repo's run logs. Durable, not throwaway — v1 kept them in `.scratch/`,
  *  which CLAUDE.md documents as `rm -rf`-able, so the spend history of every run so far

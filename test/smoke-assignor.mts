@@ -215,6 +215,8 @@ const QUESTION = "Which of the two auth flows should this use?";
 const SESSION = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
 /** The commit a child says it created its branch at (#42). */
 const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
+/** How big the gated session had grown by the time it asked (#67). */
+const CONTEXT_TOKENS = 143_500;
 
 /** Take the item all the way to a gate — forked, gated, its claim back off. That is the
  *  state a human's reply arrives into, and it is reached through the real path so no case
@@ -227,6 +229,7 @@ async function gate(h: ReturnType<typeof harness>, sessionId?: string): Promise<
     status: "awaiting-human",
     summary: QUESTION,
     finishedAt: "2026-07-25T00:00:00.000Z",
+    contextTokens: CONTEXT_TOKENS,
     ...(sessionId ? { sessionId } : {}),
   });
 }
@@ -973,12 +976,24 @@ try {
     h.assignor.handle(delivery());
     await tick();
     const started = h.comments.length;
-    await h.finish(key, { key, status: "awaiting-human", summary: question, finishedAt: "2026-07-25T00:00:00.000Z", sessionId: session });
+    await h.finish(key, {
+      key,
+      status: "awaiting-human",
+      summary: question,
+      finishedAt: "2026-07-25T00:00:00.000Z",
+      sessionId: session,
+      contextTokens: CONTEXT_TOKENS,
+    });
 
     ok("gate: recorded awaiting-human — neither finished nor failed, and not left in-flight", h.state.get(key)?.status === "awaiting-human", JSON.stringify(h.state.get(key)));
     ok(
       "gate: the session handle is kept, so a reply weeks later resumes the run rather than restarting it",
       h.state.get(key)?.sessionId === session,
+      JSON.stringify(h.state.get(key)),
+    );
+    ok(
+      "gate: and how big that session had grown (#67) — the handle alone cannot say whether resuming it is affordable",
+      h.state.get(key)?.contextTokens === CONTEXT_TOKENS,
       JSON.stringify(h.state.get(key)),
     );
     ok("gate: exactly one comment for the outcome, like any other finish", h.comments.length - started === 1, JSON.stringify(h.comments.map((l) => l.message)));
@@ -1018,10 +1033,20 @@ try {
       JSON.stringify(job),
     );
     ok("resume: and what the human actually said, which is the whole content of a resume", job?.resume?.reply === answer, JSON.stringify(job));
+    ok(
+      "resume: and how big the session it is continuing had grown (#67) — the child cannot measure a session it has not run yet",
+      job?.resume?.contextTokens === CONTEXT_TOKENS,
+      JSON.stringify(job),
+    );
     ok("resume: the issue is claimed again — from here it is Sunday's work, not the human's", h.claimed.join(",") === `${KEY},${KEY}`, h.claimed.join(","));
     ok(
       "resume: recorded in-flight with the session PRESERVED — the whole record is replaced, and a run that dies mid-resume must still be resumable",
       h.state.get(KEY)?.status === "in-flight" && h.state.get(KEY)?.sessionId === SESSION,
+      JSON.stringify(h.state.get(KEY)),
+    );
+    ok(
+      "resume: and the context PRESERVED with it — dropped here, a child that dies mid-resume leaves a session nobody can size again",
+      h.state.get(KEY)?.contextTokens === CONTEXT_TOKENS,
       JSON.stringify(h.state.get(KEY)),
     );
   }

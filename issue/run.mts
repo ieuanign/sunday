@@ -8,12 +8,13 @@
 // services — which is what lets the whole set of them be driven with no docker, no git,
 // no network and no quota (`test/smoke-issue-run.mts`).
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import type { RepoConfig } from "#config/repos.mts";
 import { acquireLock, releaseLock } from "#lib/lock.mts";
 import { writeOutcome, type Outcome } from "#lib/outcome.mts";
+import { handoffNotePath } from "#lib/paths.mts";
 import { selectAgent } from "#services/agent/index.mts";
 import { createLogger } from "#services/destinations.mts";
 import { GitCli } from "#services/git.mts";
@@ -24,6 +25,11 @@ import { IssueModule } from "./index.mts";
 /** The workspace root the routing table's `path` and `promptFile` are relative to — this
  *  file sits one level under it, exactly as `main.mts` sits on it. */
 const parentRoot = resolve(import.meta.dirname, "..");
+
+/** The handoff threshold when `.env` says nothing (#67). Spelled here rather than imported
+ *  from `services/agent/token-report.mts`'s `NEAR_ZONE`: the same number today, but that
+ *  one flags a REPORT, and tying a spend decision to it makes moving either move the other. */
+const DEFAULT_HANDOFF_THRESHOLD = 120_000;
 
 /** The fully-resolved description of one issue run, handed over at fork time. The
  *  child derives nothing: every path it writes is in here, so the parent decides once
@@ -53,8 +59,9 @@ export interface Job {
    *  `lib/paths.mts` for the same reason as the other three: the child derives no path. */
   eventLogPath: string;
   /** Present when this run CONTINUES the session an earlier one gated on: the handle the
-   *  parent kept in durable state, and what the human replied. Absent is a fresh run. */
-  resume?: { sessionId: string; reply: string };
+   *  parent kept in durable state, what the human replied, and how big that session had
+   *  grown (#67) — the child cannot measure a session it has not run yet. */
+  resume?: { sessionId: string; reply: string; contextTokens?: number };
   /** The error the PREVIOUS run of this item died on, when this run is #39's one retry.
    *  It goes into the prompt: it is the only thing this run knows that the last one did
    *  not, and without it the retry is the same run again on fresh quota. */
@@ -124,6 +131,15 @@ async function runIssue(): Promise<Outcome> {
       // The plain probe, not the sandbox SERVICE: the module takes a function so it
       // names no library type and a smoke answers it without docker (#38 constraint 11).
       imagePresent,
+      // Resolved here for the same reason every other path is: the module derives none of
+      // its own (#67). Unguarded — the module catches, since a note is best-effort.
+      writeHandoffNote: (note) => {
+        const path = handoffNotePath(job.key);
+        // `lib/paths.mts` only NAMES paths — the same division `writeOutcome` keeps.
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, note, "utf8");
+      },
+      clearHandoffNote: () => rmSync(handoffNotePath(job.key), { force: true }),
       log,
     });
     return await issueRun.run({
@@ -143,6 +159,9 @@ async function runIssue(): Promise<Outcome> {
       // The run log is the agent's log too — the library appends its raw output to the
       // path it is handed, so one work item reads back in one file.
       logPath: job.runLogPath,
+      // Read and VALIDATED before anything is spent, so a typo in `.env` fails this run
+      // through the catch below rather than disabling the handoff in silence.
+      handoffThreshold: handoffThreshold(process.env.HANDOFF_CTX_THRESHOLD),
       // Undefined on a fresh run, which is what the module reads as "start from the
       // baseline prompt" — the parent decides which of the two this is.
       resume: job.resume,
@@ -158,6 +177,21 @@ async function runIssue(): Promise<Outcome> {
       finishedAt: new Date().toISOString(),
     };
   }
+}
+
+/** `.env`'s `HANDOFF_CTX_THRESHOLD` as tokens (#67). VALIDATED like `AGENT`/`MODEL_EFFORT`:
+ *  the value is used as `context >= threshold`, and `NaN` answers that `false` for every
+ *  context there is — v1's bug. Zero is legal ("hand off every resume"); negative is not. */
+function handoffThreshold(raw: string | undefined): number {
+  if (!raw?.trim()) return DEFAULT_HANDOFF_THRESHOLD;
+  const tokens = Number(raw);
+  if (!Number.isFinite(tokens) || tokens < 0) {
+    throw new Error(
+      `HANDOFF_CTX_THRESHOLD="${raw}" is not a token count — a number of tokens (0 or more), ` +
+        `or unset for ${DEFAULT_HANDOFF_THRESHOLD}.`,
+    );
+  }
+  return tokens;
 }
 
 /** Hand the notification over, and wait until it is actually on the wire — a child
