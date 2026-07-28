@@ -806,13 +806,10 @@ try {
       `${h.forked.length} forks, state ${JSON.stringify(h.state.get(other))}`,
     );
 
-    // …and the OTHER park-until-a-human state (#68): the agent ran and gave up itself. It
-    // settles at plain `failed` — the same status a transient's first failure leaves — so
-    // the label is the only record there is, and the guard reads nothing else. The
-    // delivery is the sharp one: `labeled` is in `ADMIT_ACTIONS`, so Sunday's own
-    // `agent-failed` write fires the very delivery that used to re-run the item on the spot.
-    // The claim is what says "admitted" here rather than the fork count: it is taken before
-    // the queue, so it holds whether or not the lane has room for a third child.
+    // …and the OTHER park-until-a-human state (#68): it settles at plain `failed`, so the
+    // label is the only record. The delivery is the sharp one — `labeled` is in
+    // `ADMIT_ACTIONS`, so Sunday's own `agent-failed` write fires it. The claim says
+    // "admitted" here rather than the fork count: it is taken before the queue.
     const failed = "acme/finance#59";
     h.state.set(failed, { status: "failed" });
     h.assignor.handle(delivery({ number: 59, labels: ["sunday", "ready-for-agent", "agent-failed"] }));

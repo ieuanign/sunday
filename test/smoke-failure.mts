@@ -744,10 +744,8 @@ try {
     );
     ok("run-failed: and the retry budget is left unspent, because nothing spent it", h.state.get(ITEM.key)?.retried === undefined, JSON.stringify(h.state.get(ITEM.key)));
 
-    // …and because nothing moves it again, the human is PAGED. The level is the whole of
-    // it: `error` is the one that reaches the phone, and the phone is the only place a
-    // human standing away from a desk finds out (`test/smoke-logger.mts` owns the routing;
-    // the level is the complete pin here).
+    // …and because nothing moves it again, the human is PAGED. `error` is the level that
+    // reaches the phone; `test/smoke-logger.mts` owns the routing, so the level is the pin.
     const parked = h.lines.find((l) => l.module === "failure" && l.message.includes(ITEM.key));
     ok(
       "run-failed: the human is told at error — an item that will not move again until they act is not routine progress",
@@ -769,9 +767,8 @@ try {
       parked?.message.includes("agent-failed") === true && parked.message.includes("trigger label"),
       JSON.stringify(parked?.message),
     );
-    // Rewritten (#68): this used to pin that the agent's words cost the issue no second
-    // comment. Paging the diagnosis is what buys the repeat, so the bound is now the intent —
-    // exactly two, the outcome milestone and this parked notice, and never a third.
+    // Rewritten (#68): paging the diagnosis buys a second copy on the thread, so the bound is
+    // now exactly two — the outcome milestone and this parked notice — and never a third.
     ok(
       "run-failed: the agent's words reach the thread exactly twice — the outcome milestone, then the notice that says what to do about them",
       h.comments

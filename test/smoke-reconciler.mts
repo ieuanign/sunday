@@ -348,11 +348,8 @@ try {
     ok("quarantine: and one a human has taken it off is handed straight back, through the same pass", h.queued().includes("acme/finance#pr111"), h.queued().join(","));
   }
 
-  // ── the issue lane's other parked label (#68). An item the agent RAN and gave up on
-  //    settles at plain `failed` — the status a transient's first failure leaves — so the
-  //    label is the whole record, and it has to hold with NO state entry behind it: a fresh
-  //    boot off a lost `var/` re-derives every open issue, and one handed back there is a
-  //    real agent run re-deciding what the agent already decided. This one case covers all
+  // ── the issue lane's other parked label (#68). It has to hold with NO state entry behind
+  //    it: a fresh boot off a lost `var/` re-derives every open issue. One case covers all
   //    three callers — boot, blackout catch-up and the per-repo recheck are the same pass ──
   {
     const h = harness({

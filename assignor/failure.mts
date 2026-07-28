@@ -411,18 +411,11 @@ export class FailurePolicy {
     // all. Retrying it would spend a whole agent run re-deciding what it already decided,
     // and setting it aside would be Sunday quarantining an ISSUE that is simply hard.
     //
-    // `error`, which is the rule quarantine already follows (#68): an item the mechanism
-    // will move again is `info`; an item that will not move until a human acts is `error` —
-    // the level that reaches the phone AND the issue. Since admission now refuses the label,
-    // this is a parked item, and a park nobody is told about is a lost work item.
-    //
-    // It carries the EXCERPT, not the summary: `run-failed`'s summary is the fixed headline
-    // `classify` writes (`:140`), and a phone paged with "the agent ran and reported a
-    // failure" has learned nothing and still has to find a desktop. That does repeat the
-    // diagnosis the outcome milestone posted, which quarantine deliberately does not do —
-    // the asymmetry is the text itself: quarantine's excerpt is a raw error dump a machine
-    // wrote for a log, and repeating it is noise; this one is prose the agent wrote FOR a
-    // human, in a few sentences, under the contract `docs/sandbox-prompt.md` gives it.
+    // `error`, not `info` (#68): quarantine's rule — what the mechanism moves again is `info`,
+    // what waits on a human is `error`, the level that reaches the phone. And the EXCERPT, not
+    // the fixed headline `classify` writes for the summary (`:140`): repeating the outcome
+    // milestone's diagnosis is deliberate where quarantine avoids it, because this is prose
+    // the agent wrote for a human (`docs/sandbox-prompt.md`), not a machine's log dump.
     if (failure.class === "run-failed") {
       this.label(item, AGENT_FAILED_LABEL);
       this.log.error(

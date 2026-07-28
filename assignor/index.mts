@@ -133,8 +133,8 @@ interface Deferred {
 type Refusal = Extract<BaseDecision, { admit: false }>;
 
 /** Is this issue Sunday's to work? Its repo must be routed, it must not already be
- *  claimed, the agent must not have failed it already, it must not be a spec, and ALL of
- *  its repo's trigger labels must be present.
+ *  claimed, the agent must not have failed it, it must not be a spec, and ALL of its
+ *  repo's trigger labels must be present.
  *
  *  PURE, and the ORDER is load-bearing: the spec check precedes the trigger check, so a
  *  spec mis-labelled for the agent is rejected whatever else is on it — admitted, it
@@ -148,13 +148,10 @@ export function admitIssue(
   if (!cfg) return { admit: false, reason: `${repo} not in config/repos.json` };
   const present = new Set(labels);
   if (present.has(CLAIM_LABEL)) return { admit: false, reason: `already claimed (${CLAIM_LABEL})` };
-  // The agent RAN and gave up on this itself (#68), which is a verdict and not a blip: a
-  // second run would spend a whole agent re-deciding what it already decided. The LABEL
-  // decides and no state does — a run-failed item settles at `failed`, exactly as a
-  // transient's first failure does, so a parent with no state file (a fresh boot, a lost
-  // `var/`) would otherwise hand it straight back. Here rather than in a caller so the
-  // live `labeled` delivery, the re-derive and the missed-summon replay share the one
-  // rule — a recovery path carrying its own copy is how v1's two admissions drifted.
+  // The LABEL decides and no state does (#68): a run-failed item settles at `failed`, exactly
+  // as a transient's first failure does, so a parent with no state file (a fresh boot, a lost
+  // `var/`) would otherwise hand it straight back. Here rather than in a caller so the live
+  // `labeled` delivery, the re-derive and the missed-summon replay share the one rule.
   if (present.has(AGENT_FAILED_LABEL)) {
     return { admit: false, reason: `the agent ran and failed it (${AGENT_FAILED_LABEL}) — remove the label to hand it back` };
   }
