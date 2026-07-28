@@ -178,6 +178,9 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
    *  Substituted for the same reason the fork is: the real one force-pushes branches. */
   const restacked: string[] = [];
 
+  /** Which pull requests were handed back to the sweep's per-PR pass, in order. */
+  const rechecked: string[] = [];
+
   const logger = new Logger(dests);
   const state = new StateStore(resolve(caseDir, "state.json"));
   /** The durable halt, so a case can assert that a work item's own failure did NOT stop
@@ -214,9 +217,13 @@ function harness(reads: Partial<GitHub> = {}, restackError?: string) {
       },
       log: logger.child("failure"),
     }),
+    // The reconcile sweep's per-PR pass, recorded rather than run: what it DECIDES is
+    // `test/smoke-reconciler.mts`'s subject, and what matters here is WHEN the Assignor
+    // asks it — an edited comment, and a comment run that just finished.
+    recheckPr: async (repo, number) => void rechecked.push(`${repo}#pr${number}`),
   });
 
-  return { assignor, state, pause, lines, comments, claimed, released, labelled, onGithub, removed, forked, forkedPr, restacked, finish, paths };
+  return { assignor, state, pause, lines, comments, claimed, released, labelled, onGithub, removed, forked, forkedPr, restacked, rechecked, finish, paths };
 }
 
 /** The work item every case below is about, and the run that gated on it. */
@@ -1311,6 +1318,42 @@ try {
     ok("inline summon: and the skip says what is holding it", said(h.lines, "state=in-flight"), JSON.stringify(h.lines.map((l) => l.message)));
   }
 
+  // ── a summon EDITED into a comment. `created`-only, the human who forgot the `@sunday`
+  //    and adds it by editing gets silence, and their only way through is to delete the
+  //    comment and write it again — which is what the log of ieuanign/finance#97 shows a
+  //    human actually doing. It goes the long way round, via the sweep's own per-PR pass:
+  //    an edit says a body changed, never that work is wanted ──
+  {
+    const h = harness();
+    h.assignor.handle(inlineComment("@sunday this loop is O(n²)", { action: "edited" }));
+    await tick();
+
+    ok("edited: it is not dropped as an action of no interest", !said(h.lines, "no action of this pipeline's"), JSON.stringify(h.lines.map((l) => l.message)));
+    ok("edited: it goes to the sweep's pass, which admits only what is still outstanding", h.rechecked.join(",") === "acme/finance#pr57", h.rechecked.join(","));
+    ok("edited: and never straight to admission, which would re-run an answered summon on real quota", h.forkedPr.length === 0, JSON.stringify(h.forkedPr.map((j) => j.key)));
+
+    const edited = h.lines.filter((l) => l.message.includes("not a summon")).length;
+    h.assignor.handle(inlineComment("no @ here, just a typo fix", { action: "edited" }));
+    await tick();
+    ok("edited: an edit with no summon in it is still just a comment", h.lines.filter((l) => l.message.includes("not a summon")).length === edited + 1, JSON.stringify(h.lines.map((l) => l.message)));
+  }
+
+  // ── the summon that landed WHILE the run worked. It was skipped as in-flight and is not
+  //    in the set that run gathered, so on `created`-only it waited for the next BOOT —
+  //    and the reply the run did post carried a higher id, which is what used to bury it
+  //    for good (`lib/markers.mts`). The claim is back by now, so the recheck can admit ──
+  {
+    const h = harness();
+    h.assignor.handle(inlineComment("@sunday this loop is O(n²)"));
+    await tick();
+    h.assignor.handle(prComment("@sunday and the null check above it"));
+    await tick();
+    ok("post-run: the second summon started nothing beside the run", h.forkedPr.length === 1, JSON.stringify(h.forkedPr.map((j) => j.key)));
+
+    await h.finish(PR_KEY, { key: PR_KEY, status: "done", summary: "answered 1 comment(s)", finishedAt: "2026-07-25T00:00:00.000Z" });
+    ok("post-run: the settled item is handed back to the sweep's pass rather than left for the next boot", h.rechecked.join(",") === "acme/finance#pr57", h.rechecked.join(","));
+  }
+
   // ── …and two summons landing in the SAME tick, before either can record anything. Both
   //    cross the read admission makes (an `await` where the issue lane has one too), so
   //    nothing new guards this: the scheduler's key dedup is what makes it one run ──
@@ -1330,9 +1373,9 @@ try {
   //    them apart, and the two milestones a work item posts carry it too ──
   {
     const h = harness();
-    h.assignor.handle(prComment(sundayReply("> @sunday the rebase dropped a commit\n\nRestored it in 9c1f0b2.")));
+    h.assignor.handle(prComment(sundayReply("> @sunday the rebase dropped a commit\n\nRestored it in 9c1f0b2.", 1)));
     h.assignor.handle(prComment(sundayComment("✓ done — answered 1 comment(s)")));
-    h.assignor.handle(inlineComment(sundayReply("Fixed — @sunday")));
+    h.assignor.handle(inlineComment(sundayReply("Fixed — @sunday", 1)));
     await tick();
 
     ok("own comment: Sunday's own reply is not a summon to answer it", h.forkedPr.length === 0, JSON.stringify(h.forkedPr.map((j) => j.key)));

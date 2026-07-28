@@ -122,6 +122,12 @@ export interface AssignorDeps {
    *  reaches back into this object for the retry, so one of the two has to be built
    *  first. */
   failure: FailurePolicy;
+  /** Re-derive ONE pull request: admit a comment run if a summon on it is still
+   *  outstanding, and do nothing at all if none is. The reconcile sweep's own per-PR pass,
+   *  injected as a closure exactly as the repo-scope one is — an EDITED comment and a
+   *  comment run that just settled both have to ask what is outstanding, and a second
+   *  reading of "answered" living here would drift from the sweep's. */
+  recheckPr: (repo: string, number: number, labels: string[]) => Promise<void>;
 }
 
 /** Which lane a work item runs in: an issue run (`issue/run.mts`) or a comment run on a

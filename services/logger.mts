@@ -50,7 +50,8 @@ type DestinationName = keyof Destinations;
  *  then the best-effort external sinks. */
 const ORDER: readonly DestinationName[] = ["eventLog", "runLog", "console", "github", "phone"];
 
-/** THE routing table. The only place a level becomes a set of destinations. */
+/** THE routing table. The only place a level becomes a set of destinations — the `phone`
+ *  opt-in on `info`/`milestone` is the one thing that adds to what a row says. */
 const ROUTES: Record<Level, readonly DestinationName[]> = {
   info: ["runLog", "console"],
   milestone: ["eventLog", "runLog", "console", "github"],
@@ -82,12 +83,15 @@ export class ModuleLogger {
     this.dests = dests;
   }
 
-  info(message: string, context: LogContext = {}): void {
-    this.emit("info", message, context);
+  /** `phone` pushes THIS line to Telegram on top of its level's usual sinks — the opt-in
+   *  for the handful worth a push (work started, a PR opened, a summon answered) without
+   *  promoting every other line at the level along with them. */
+  info(message: string, context: LogContext = {}, phone = false): void {
+    this.emit("info", message, context, phone);
   }
 
-  milestone(message: string, context: LogContext = {}): void {
-    this.emit("milestone", message, context);
+  milestone(message: string, context: LogContext = {}, phone = false): void {
+    this.emit("milestone", message, context, phone);
   }
 
   alert(message: string, context: LogContext = {}): void {
@@ -98,10 +102,12 @@ export class ModuleLogger {
     this.emit("error", message, context);
   }
 
-  private emit(level: Level, message: string, context: LogContext): void {
+  private emit(level: Level, message: string, context: LogContext, phone = false): void {
     const line: LogLine = { ts: new Date().toISOString(), level, module: this.module, message, context };
     for (const name of ORDER) {
-      if (!ROUTES[level].includes(name)) continue;
+      // The opt-in ADDS a sink, never removes one, and `ORDER` visits each sink once, so
+      // it cannot double-send on a level that already routes there.
+      if (!ROUTES[level].includes(name) && !(phone && name === "phone")) continue;
       // The table's one condition: GitHub needs something to address. A pipeline-scope
       // line carries no target and therefore lands on no issue.
       if (name === "github" && !addressable(context)) continue;

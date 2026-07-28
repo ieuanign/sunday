@@ -8,7 +8,7 @@
 // Sunday reads and writes, and the Assignor/Reconciler smokes drive that over a
 // substitute.)
 
-import { isSummon, sundayComment, sundayReply, unansweredSummons } from "#lib/markers.mts";
+import { isSummon, sundayComment, sundayReply, SUNDAY_REPLY_MARKER, unansweredSummons } from "#lib/markers.mts";
 import { shA } from "#lib/sh.mts";
 
 let fails = 0;
@@ -67,7 +67,7 @@ const ok = (label: string, cond: boolean, detail = "") => {
 //    that says it answered something. It quotes the request it is answering, so if it
 //    read back as a summon Sunday would answer itself forever on real quota ──
 {
-  const reply = sundayReply("You asked @sunday to add the retry — done in 3a1c9de.");
+  const reply = sundayReply("You asked @sunday to add the retry — done in 3a1c9de.", 1);
   ok("reply: our own reply is never a summon, even quoting the request", !isSummon(reply), reply);
 }
 
@@ -88,10 +88,30 @@ const ok = (label: string, cond: boolean, detail = "") => {
 
   // A reply does — which is what makes a crashed or retried run idempotent: the replies
   // it already posted are visible to the next attempt, so it does not spend a second
-  // agent run re-answering them. And a summon that landed WHILE the run was working is
-  // newer than that reply, so it survives to the next pass rather than being swallowed.
-  const answered = [...milestoned, { id: 3, body: sundayReply("Fixed in 3a1c9de.") }, { id: 4, body: "@sunday also the timeout" }];
-  ok("unanswered: a reply answers every summon older than it, and none newer", ids(answered) === "4", ids(answered));
+  // agent run re-answering them. It answers the comment it NAMES, and no other.
+  const answered = [...milestoned, { id: 3, body: sundayReply("Fixed in 3a1c9de.", 1) }, { id: 4, body: "@sunday also the timeout" }];
+  ok("unanswered: a reply answers the summon it names", ids(answered) === "4", ids(answered));
+
+  // The defect the id exists for. A summon written WHILE a run is working is skipped as
+  // in-flight, is not in the set that run gathered, and then carries a LOWER id than the
+  // replies that run posts on its way out. Under one watermark it was answered by a reply
+  // that never addressed it — permanently, and with nothing in any log to say so.
+  const midRun = [
+    { id: 1, body: "@sunday the retry never backs off" },
+    { id: 2, body: "@sunday and the timeout is wrong" },
+    { id: 3, body: sundayReply("Fixed in 3a1c9de.", 1) },
+  ];
+  ok("unanswered: a reply to one summon does not bury another it never addressed", ids(midRun) === "2", ids(midRun));
+
+  // …and the legacy floor, the only thing a reply written before the id can still mean.
+  // Drop it and every summon a previous Sunday served re-fires on the next boot, in every
+  // repo at once, on real quota.
+  const legacy = [
+    { id: 1, body: "@sunday the retry never backs off" },
+    { id: 2, body: `${SUNDAY_REPLY_MARKER}\n${sundayComment("Fixed in 3a1c9de.")}` },
+    { id: 3, body: "@sunday also the timeout" },
+  ];
+  ok("unanswered: a bare legacy reply still answers everything under it", ids(legacy) === "3", ids(legacy));
 }
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);

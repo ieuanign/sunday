@@ -42,6 +42,14 @@ export * from "./types.mts";
  *  Ported from v1's `listener/listen.mts`. */
 const ADMIT_ACTIONS = new Set(["opened", "reopened", "labeled"]);
 
+/** The comment actions that carry a body worth reading. `edited` is here because a human
+ *  who forgot the `@sunday` and adds it by editing has summoned Sunday exactly as much as
+ *  one who typed it the first time — and on `created`-only they get silence, then delete
+ *  and repost to get anything at all. Re-admitting an ALREADY-answered comment costs
+ *  nothing: `unansweredSummons` filters on the reply watermark, so the run gathers zero
+ *  and ends on "nothing to answer" without an agent or a sandbox. */
+const COMMENT_ACTIONS = new Set(["created", "edited"]);
+
 /** The event a gate resume arrives on, spelled once for both readings of it below: a
  *  `created` one is routed, and every other action on it is recognised-and-unbuilt. Two
  *  spellings drift into a comment that routes nowhere while the log calls it recognised. */
@@ -176,6 +184,7 @@ export class Assignor {
   private readonly paths: Paths;
   private readonly restack: RestackOnMerge;
   private readonly failure: FailurePolicy;
+  private readonly recheckPr: AssignorDeps["recheckPr"];
   /** Items waiting on a blocker, by work-item key. IN MEMORY ONLY (constraint 6):
    *  GitHub is the truth and #35's reconcile hands every open issue back to admission,
    *  so a restart rebuilds this map from the world rather than from a file that could
@@ -192,6 +201,7 @@ export class Assignor {
     this.paths = deps.paths;
     this.restack = deps.restack;
     this.failure = deps.failure;
+    this.recheckPr = deps.recheckPr;
   }
 
   /** Route one delivery. EVERY one leaves a line behind, including the event types this
@@ -215,7 +225,7 @@ export class Assignor {
     // conversation arrives as an `issue_comment` whose subject carries a `pull_request`,
     // and an inline one on a file line arrives as its own event. An `issue_comment` on an
     // actual issue is the other thing entirely — a human answering a gate.
-    if ((event === COMMENT_EVENT || event === REVIEW_COMMENT_EVENT) && action === "created") {
+    if ((event === COMMENT_EVENT || event === REVIEW_COMMENT_EVENT) && COMMENT_ACTIONS.has(action)) {
       if (delivery.onPullRequest) this.considerSummon(delivery);
       else this.considerReply(delivery);
       return;
@@ -510,15 +520,25 @@ export class Assignor {
    *  the same candidate: this method's whole job is to turn a delivery into one and to
    *  decide that a comment IS a summon, which is a question a re-derive has already
    *  answered against the reply watermark. */
-  private considerSummon({ repo, number, labels, comment = "" }: Delivery): void {
+  private considerSummon({ action, repo, number, labels, comment = "" }: Delivery): void {
     if (!isSummon(comment)) {
       this.log.info(`· ${repo}#${number} — a comment on a pull request, and not a summon`);
       return;
     }
+    // An EDIT is not news that work is wanted, only that a body changed — and Sunday may
+    // already have served that very comment, or be running on it right now. So it goes
+    // the long way round and admits only what is genuinely outstanding, where a `created`
+    // summon needs no such read: a comment that has just been written cannot have been
+    // answered. What this buys is the human who forgot the `@sunday` and adds it by
+    // editing; what it must not buy is a re-run every time somebody fixes a typo.
+    const consider =
+      action === "edited"
+        ? this.recheckPr(repo, number, labels)
+        : this.considerPrComment({ repo, number, labels });
     // Fired, not awaited, and with its OWN catch, exactly as `considerIssue` is: `handle`
     // is called synchronously inside the receiver's try/catch, which cannot see a
     // rejection — and this reads the pull request, so it really can reject (ADR-0001).
-    void this.considerPrComment({ repo, number, labels }).catch((err: unknown) =>
+    void consider.catch((err: unknown) =>
       this.log.error(`✗ ${repo}#pr${number} not considered — ${describe(err)}`, { repo }),
     );
   }
@@ -689,8 +709,9 @@ export class Assignor {
       hint,
     };
     // Milestone 1 of exactly two (constraint 12) — every one posts a comment on the
-    // issue, so a third is thread spam.
-    this.log.milestone("▶ work started", { repo: item.repo, target: item.issue });
+    // issue, so a third is thread spam. Pushed to the phone: this is the moment quota
+    // starts being spent on somebody's issue, which is worth knowing away from the box.
+    this.log.milestone("▶ work started", { repo: item.repo, target: item.issue }, true);
     // The IPC report the child sends on the way out is deliberately not waited for: it
     // says an outcome is READY, and the file it points at is what gets applied.
     this.applyOutcome(item, await this.fork(job));
@@ -718,9 +739,25 @@ export class Assignor {
     // The same two milestones every work item posts, on the pull request's own thread —
     // `gh issue comment` addresses a PR as well as an issue. They carry the ordinary
     // Sunday marker and NOT the reply marker, so neither is ever mistaken for an answer to
-    // a summon (#44 constraint 7).
-    this.log.milestone("▶ work started", { repo: item.repo, target: item.issue });
+    // a summon (#44 constraint 7). Pushed to the phone for the same reason the issue
+    // lane's is.
+    this.log.milestone("▶ work started", { repo: item.repo, target: item.issue }, true);
     this.applyOutcome(item, await this.fork(job));
+    // A summon written WHILE that child worked was skipped as in-flight and is not in the
+    // set the child gathered, so without this it waits for the next boot's reconcile. The
+    // claim is handed back by now, so the recheck can admit straight away.
+    //
+    // Only after a run that finished: a FAILED one leaves its summons outstanding by
+    // definition, and rechecking there would re-admit the same item on the same failure
+    // for as long as it keeps failing. #39's ladder owns a failure, and the next reconcile
+    // owns what it left behind.
+    if (this.state.get(item.key)?.status !== "done") return;
+    // No labels, and only safe BECAUSE of the line above: the one thing admission reads
+    // them for is the quarantine release, which is gated on a `quarantined` status this
+    // item cannot have. The sweep passes the pull request's own, having listed them free.
+    await this.recheckPr(item.repo, item.issue, []).catch((err: unknown) =>
+      this.log.error(`✗ ${item.repo}#pr${item.issue} not rechecked — ${describe(err)}`, { repo: item.repo }),
+    );
   }
 
   /** The pid of the process still working this item, or `undefined` when nobody is. The

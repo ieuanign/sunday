@@ -122,7 +122,9 @@ const restacker = new Restacker({
   worktreePath: restackWorktreePath,
 });
 
-const assignor = new Assignor({
+// Annotated, because `recheckPr` closes over the Reconciler that is constructed FROM this
+// object: the cycle main.mts has always had, and inference cannot walk it unaided.
+const assignor: Assignor = new Assignor({
   repos,
   github,
   log: logger.child("assignor"),
@@ -132,6 +134,9 @@ const assignor = new Assignor({
   paths: { resultPath, pidPath, runLogPath, eventLogPath },
   restack: (repo, issue) => restacker.onMerge(repo, issue),
   failure,
+  // The sweep's own per-PR pass, so "is a summon still outstanding" has one reading —
+  // reached here by an edited comment and by a comment run that just settled.
+  recheckPr: (repo, number, labels) => reconciler.pullRequest(repo, { number, labels }),
 });
 
 const reconciler = new Reconciler({ repos, github, assignor, log: logger.child("reconcile") });

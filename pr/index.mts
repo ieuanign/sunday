@@ -173,7 +173,8 @@ export class PrModule {
 
       const shipped = ahead > 0 && held === "";
       const push = shipped ? `pushed ${ahead}` : "nothing pushed";
-      this.log.info(`answered ${comments.length} comment(s) — ${push}`, about);
+      // Pushed to the phone: somebody summoned Sunday and is waiting on the answer.
+      this.log.info(`answered ${comments.length} comment(s) — ${push}`, about, true);
       return this.outcome({ key: input.key, status: "done", summary: `${result.output.summary}${held}` });
     } catch (err) {
       // NOTHING escapes this method. The child's whole job is to leave exactly one durable
@@ -242,18 +243,25 @@ export class PrModule {
    *  answer — and the ordinary Sunday marker under it, so a reply quoting the request it
    *  answers never reads back as a summon and Sunday never answers itself. */
   private async reply(input: PrRunInput, comments: GatheredComment[], result: PrResult): Promise<void> {
-    const answers = new Map(result.replies.map((r) => [r.comment, r.body]));
+    const answers = new Map(result.replies.map((r) => [r.comment, r]));
     for (const comment of comments) {
-      const body =
-        answers.get(comment.id) ??
-        `No answer came back for this comment. What the run did overall: ${result.summary}`;
+      const answer = answers.get(comment.id);
+      // The verdict is rendered HERE off the agent's typed `fixed` and never left to its
+      // prose: a human scanning a thread wants to know which requests moved code before
+      // reading a word of why, and an agent asked to say so in `body` says it a different
+      // way every time — or forgets.
+      const body = answer
+        ? `${answer.fixed ? "✅ fixed" : "🚫 won't fix"} — ${answer.body}`
+        : `No answer came back for this comment. What the run did overall: ${result.summary}`;
+      // The reply NAMES the comment it answers, which is what stops it burying a summon
+      // that arrived mid-run and has a lower id (`lib/markers.mts`).
       if (comment.kind === "inline") {
-        await this.github.replyToReviewComment(input.repo, input.pr, comment.id, sundayReply(body));
+        await this.github.replyToReviewComment(input.repo, input.pr, comment.id, sundayReply(body, comment.id));
       } else {
         // GitHub's PR conversation does not thread, so the reply carries its question
         // with it — the first line only: a quoted wall of text buries the answer under it.
         const quoted = `> ${comment.body.split("\n")[0]}\n\n${body}`;
-        await this.github.commentOnPr(input.repo, input.pr, sundayReply(quoted));
+        await this.github.commentOnPr(input.repo, input.pr, sundayReply(quoted, comment.id));
       }
     }
   }

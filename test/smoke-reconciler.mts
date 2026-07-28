@@ -155,7 +155,9 @@ function harness(over: { issues?: Record<string, OpenIssue[]>; throws?: Record<s
   // what a failed one MEANS is `test/smoke-failure.mts`'s subject — what matters here is
   // that no case in this file can reach the real `var/pause.json`.
   const failure = new FailurePolicy({ pause: new PauseStore(resolve(caseDir, "pause.json")), scheduler, state, github, log: logger.child("failure") });
-  const assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, restack: async () => {}, failure });
+  // Annotated for the reason main.mts is: `recheckPr` closes over the Reconciler built
+  // FROM this object, and inference cannot walk that cycle unaided.
+  const assignor: Assignor = new Assignor({ repos: TABLE, github, log: logger.child("assignor"), scheduler, state, fork, paths, restack: async () => {}, failure, recheckPr: (repo, number, labels) => reconciler.pullRequest(repo, { number, labels }) });
   const reconciler = new Reconciler({ repos: TABLE, github, assignor, log: logger.child("reconcile") });
 
   /** Everything the queue knows about, running or waiting — a work item that reached the
@@ -304,7 +306,7 @@ try {
       },
       comments: {
         "acme/finance#110": [human(1, "@sunday the naming here is off")],
-        "acme/finance#111": [human(1, "@sunday fix the naming"), { id: 2, body: sundayReply("renamed it") }],
+        "acme/finance#111": [human(1, "@sunday fix the naming"), { id: 2, body: sundayReply("renamed it", 1) }],
         "acme/finance#113": [
           { id: 1, body: sundayComment("▶ work started") },
           human(2, "@sunday while you are in there, the log line too"),
@@ -314,7 +316,7 @@ try {
       },
       review: {
         "acme/finance#pr112": [inline(9, "@sunday this branch is unreachable")],
-        "acme/finance#pr111": [inline(9, "@sunday fix the naming"), inline(10, sundayReply("renamed it"))],
+        "acme/finance#pr111": [inline(9, "@sunday fix the naming"), inline(10, sundayReply("renamed it", 9))],
       },
     });
     await h.reconciler.run();

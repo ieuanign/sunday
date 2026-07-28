@@ -80,6 +80,32 @@ const hit = (rec: Rec): string =>
   );
 }
 
+// ── the phone opt-in: the one thing that ADDS to what a level's row says. The three
+//    lines worth a push (work started, a PR opened, a summon answered) are info and
+//    milestone, and promoting either LEVEL would drag every other line along with it ──
+{
+  const h = harness();
+  h.log.child("assignor").milestone("▶ work started", { repo: "acme/finance", target: 57 }, true);
+  ok(
+    "milestone + phone → the milestone row plus the phone, sent once",
+    hit(h.rec) === "console,eventLog,github,phone,runLog" && h.rec.phone.lines.length === 1,
+    `${hit(h.rec)} / phone×${h.rec.phone.lines.length}`,
+  );
+
+  const quiet = harness();
+  quiet.log.child("issue").info("ready — PR https://github.com/acme/finance/pull/12", { repo: "acme/finance", target: 57 }, true);
+  ok("info + phone → console + run log + the phone, and still no GitHub comment", hit(quiet.rec) === "console,phone,runLog", hit(quiet.rec));
+  ok(
+    "the opt-in adds a destination, never the severity on the record",
+    quiet.rec.phone.lines[0]?.level === "info",
+    quiet.rec.phone.lines[0]?.level,
+  );
+
+  const off = harness();
+  off.log.child("assignor").milestone("▶ work started", { repo: "acme/finance", target: 57 });
+  ok("omitted, the opt-in is off — the row is unchanged", hit(off.rec) === "console,eventLog,github,runLog", hit(off.rec));
+}
+
 // ── alert + error: the phone levels — same destinations, different severity on the record ──
 {
   const alert = harness();
@@ -241,8 +267,12 @@ const hit = (rec: Rec): string =>
   await phoneDestination(send)(line);
   ok("phone: configured → sent to the configured chat", sent.length === 1 && sent[0]?.chatId === "424242", JSON.stringify(sent));
   ok(
-    "phone: the notice carries the module tag, the message and where it happened",
-    sent[0]!.text.includes("[issue]") && sent[0]!.text.includes("agent run failed") && sent[0]!.text.includes("acme/finance#57"),
+    "phone: the notice carries the module tag, the message and a tappable link",
+    sent[0]!.text.includes("[issue]") &&
+      sent[0]!.text.includes("agent run failed") &&
+      // `/issues/<n>` on purpose — GitHub redirects it to `/pull/<n>`, so the one form
+      // addresses an issue and a pull request alike.
+      sent[0]!.text.includes("https://github.com/acme/finance/issues/57"),
     sent[0]?.text,
   );
   ok("phone: the token never reaches the text", !sent[0]!.text.includes("smoke-token"), sent[0]?.text);
@@ -253,6 +283,9 @@ const hit = (rec: Rec): string =>
     sent[1]!.text.length <= 4096,
     String(sent[1]?.text.length),
   );
+
+  await phoneDestination(send)({ ...line, context: { repo: "acme/finance" } });
+  ok("phone: no issue or PR number → the repo, and no link to nowhere", sent[2]!.text.endsWith("(acme/finance)"), sent[2]?.text);
 
   delete process.env.TELEGRAM_BOT_TOKEN;
   delete process.env.TELEGRAM_CHAT_ID;

@@ -366,6 +366,7 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     // smoke's subject, and the real one force-pushes branches.
     restack: async () => {},
     failure: policy,
+    recheckPr: async () => {},
   });
 
   const delivery = (number: number, repo = "acme/finance"): Delivery => ({

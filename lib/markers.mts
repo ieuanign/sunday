@@ -25,11 +25,23 @@ export function sundayComment(body: string): string {
  *  it, forever. */
 export const SUNDAY_REPLY_MARKER = "<!-- sunday:reply -->";
 
-/** Compose a REPLY to a summon: the reply marker on top of an ordinary Sunday comment,
- *  so it still reads as ours (`isSummon`) while being the only thing that counts as an
- *  answer. */
-export function sundayReply(body: string): string {
-  return `${SUNDAY_REPLY_MARKER}\n${sundayComment(body)}`;
+/** The reply marker for a reply that NAMES the summon it answers. The bare marker above
+ *  could only say "something at or below here was served", which is a single watermark
+ *  over the whole stream — so a reply to one summon buried every LOWER-id summon that had
+ *  never been addressed, permanently and invisibly. The id is what makes "answered" a fact
+ *  about one comment instead of a position in the stream. */
+export function replyMarkerFor(comment: number): string {
+  return `<!-- sunday:reply:${comment} -->`;
+}
+
+/** Every comment id a body claims to have answered. */
+const ANSWERED_ID = /<!-- sunday:reply:(\d+) -->/g;
+
+/** Compose a REPLY to a summon: the reply marker naming the comment it answers, on top of
+ *  an ordinary Sunday comment — so it still reads as ours (`isSummon`) while being the
+ *  only thing that counts as an answer, and only for the one summon it names. */
+export function sundayReply(body: string, comment: number): string {
+  return `${replyMarkerFor(comment)}\n${sundayComment(body)}`;
 }
 
 /** The summon keyword. Case-insensitive because a human writes it by hand, and bounded
@@ -55,8 +67,21 @@ export function isSummon(body: string): boolean {
  *
  *  Judged on the REPLY marker alone (constraint 7): the milestone comments a work item
  *  posts land on the same thread, and counting one as an answer would bury a summon that
- *  arrived mid-run under a comment that never addressed it. */
+ *  arrived mid-run under a comment that never addressed it.
+ *
+ *  A reply NAMES what it answers, so a run that served one summon cannot bury another
+ *  that merely has a lower id — the case a single watermark got wrong, and got wrong
+ *  silently and forever: a comment written while a run was in flight is skipped as
+ *  in-flight, is not in the set that run gathered, and then sinks under the replies that
+ *  run did post. */
 export function unansweredSummons<T extends { id: number; body: string }>(comments: T[]): T[] {
-  const answered = comments.reduce((max, c) => (c.body.includes(SUNDAY_REPLY_MARKER) && c.id > max ? c.id : max), 0);
-  return comments.filter((c) => isSummon(c.body) && c.id > answered);
+  // The LEGACY floor, and the only thing the bare marker can still mean. Replies written
+  // before the id existed recorded no comment, so everything below the newest of them
+  // stays answered — drop this and every summon a previous Sunday already served re-fires
+  // on the next boot, in every repo at once, on real quota. A marker that names its
+  // comment raises no floor, which is the whole point.
+  const floor = comments.reduce((max, c) => (c.body.includes(SUNDAY_REPLY_MARKER) && c.id > max ? c.id : max), 0);
+  const answered = new Set<number>();
+  for (const c of comments) for (const [, id] of c.body.matchAll(ANSWERED_ID)) answered.add(Number(id));
+  return comments.filter((c) => isSummon(c.body) && c.id > floor && !answered.has(c.id));
 }

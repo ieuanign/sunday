@@ -144,6 +144,11 @@ export class Reconciler {
    *  question a delivery answered by existing at all, and every question after it belongs
    *  to the same `considerPrComment` the live route reaches.
    *
+   *  PUBLIC because the sweep is not the only thing that has to ask it. An EDITED comment
+   *  and a comment run that just settled both need "is anything on this pull request still
+   *  outstanding?" and neither may answer it for itself — a second reading of what
+   *  "answered" means is how one of them drifts into re-running served work on real quota.
+   *
    *  Both streams, filtered SEPARATELY: GitHub's ids are monotonic only inside one id
    *  space, so an inline comment's id says nothing about a conversation reply's. The
    *  conversation goes first and short-circuits — most summons are written there, and the
@@ -154,7 +159,7 @@ export class Reconciler {
    *  answer buries a summon that arrived mid-run under a comment that never addressed it —
    *  where the issue half's `hasUnansweredSummon` has no reply of its own to compare
    *  against and reads any comment of ours as the answer. */
-  private async pullRequest(repo: string, open: OpenPullRequest): Promise<void> {
+  async pullRequest(repo: string, open: Pick<OpenPullRequest, "number" | "labels">): Promise<void> {
     const conversation = await this.github.issueComments(repo, open.number);
     const outstanding =
       unansweredSummons(conversation).length > 0 ||

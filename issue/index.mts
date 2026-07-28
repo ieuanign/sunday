@@ -219,7 +219,9 @@ export class IssueModule {
       // Spent the moment the work is on the table — the adopted PR and the draft a `fail`
       // ships both come back through `openPr`.
       this.noteFile(() => this.clearHandoffNote(), about);
-      this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about);
+      // Pushed to the phone: the one line in the run that carries the PR's own url, and
+      // the point where a human has something to go and look at.
+      this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about, true);
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
       // human to read, not because the run succeeded — and it is the agent's OWN verdict,
       // flagged as one so #39 neither retries it nor quarantines it. Only on the failing

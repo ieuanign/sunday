@@ -15,6 +15,7 @@
   },
   "description": "Orchestration workspace — labelled GitHub issues to sandboxed coding agents to PRs.",
   "scripts": {
+    "start": "node --watch --env-file=.env main.mts",
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint-console.mts",
     "test": "node test/run.mts",

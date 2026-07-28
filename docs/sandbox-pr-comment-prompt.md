@@ -55,7 +55,10 @@ Emit **exactly one** `<sunday-result>` tag, as the very last thing you output:
 - **`summary`** — one line for the host log / a PR note: what you changed overall.
 - **`replies`** — **one entry per @sunday comment, none omitted.** `comment` = its id (given
   below); `fixed` = whether you changed code for it; `body` = your reply to that comment — how you
-  fixed it, or precisely why not. Write for a human reviewer: specific, short, honest.
+  fixed it, or precisely why not. Specific, honest, meaningful, **extremely concise**; bullet points
+  where they carry more than prose would. No preamble, no restating the question, no summarising
+  what you are about to say. The host prefixes every reply with the fix / won't-fix verdict from
+  `fixed`, so **do not open by saying which it was** — go straight to what changed, or to why not.
 
 Valid JSON, a single tag, written literally — the host scans stdout for it and posts every reply
 from it. A comment you leave out still gets an answer, written by the host and saying only that

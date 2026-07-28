@@ -7,7 +7,7 @@
 // The module touches no filesystem of its own, so this case needs no temp dir at all.
 // $0, offline, no docker, no network, no tokens.
 
-import { sundayComment, sundayReply, SUNDAY_REPLY_MARKER } from "#lib/markers.mts";
+import { replyMarkerFor, sundayComment, sundayReply, SUNDAY_REPLY_MARKER } from "#lib/markers.mts";
 import { PrModule, type PrRunInput } from "#pr/index.mts";
 import { RESULT_TAG, type PrResult } from "#pr/prompt.mts";
 import type { Agent, AgentRunRequest, AgentRunResult } from "#services/agent/index.mts";
@@ -196,7 +196,7 @@ function harness(s: Scenario = {}) {
 //    next pass over it must cost nothing at all — not an agent run, not a checkout ──
 {
   const h = harness({
-    conversation: [SUMMON, { id: 12, body: sundayReply("Added exponential backoff.") }],
+    conversation: [SUMMON, { id: 12, body: sundayReply("Added exponential backoff.", SUMMON.id) }],
   });
   const outcome = await h.run();
 
@@ -212,7 +212,7 @@ function harness(s: Scenario = {}) {
   const h = harness({
     conversation: [
       { id: 5, body: "@sunday the retry never backs off" },
-      { id: 6, body: sundayReply("Added exponential backoff.") },
+      { id: 6, body: sundayReply("Added exponential backoff.", 5) },
       { id: 7, body: sundayComment("▶ started — PR-comment run") },
       { id: 8, body: "@sunday and the timeout is still 30s" },
     ],
@@ -251,11 +251,30 @@ function harness(s: Scenario = {}) {
   const conversation = h.posted.find((p) => p.to === "pr");
   ok("reply: every gathered comment is answered, none omitted", h.posted.length === 2, JSON.stringify(h.posted));
   ok("reply: the inline one threads under the comment it answers", inline?.body.includes("Narrowed it with a type guard.") === true, inline?.body ?? "");
-  ok("reply: it carries the marker that makes it an ANSWER", inline?.body.includes(SUNDAY_REPLY_MARKER) === true, inline?.body ?? "");
+  // The marker NAMES its comment: this reply is newer than comment 8, and under one
+  // watermark it answered that one too — which is how a summon written mid-run ended up
+  // buried by a reply that never addressed it.
+  ok("reply: it carries the marker that makes it an ANSWER, naming the comment it answers", inline?.body.includes(replyMarkerFor(3)) === true, inline?.body ?? "");
+  ok("reply: and never the bare marker, which answered everything under it", inline?.body.includes(`${SUNDAY_REPLY_MARKER}\n`) === false, inline?.body ?? "");
   ok("reply: the conversation one quotes the comment's first line", conversation?.body.includes("> @sunday the timeout is still 30s") === true, conversation?.body ?? "");
   ok("reply: it quotes the FIRST line only, not the whole comment", conversation?.body.includes("> and it retries forever") === false, conversation?.body ?? "");
-  ok("reply: the comment the agent skipped is answered anyway", conversation?.body.includes(SUNDAY_REPLY_MARKER) === true, conversation?.body ?? "");
+  ok("reply: the comment the agent skipped is answered anyway, under its OWN id", conversation?.body.includes(replyMarkerFor(8)) === true, conversation?.body ?? "");
   ok("reply: and says so rather than inventing an answer", conversation?.body.includes("checked the cast") === true, conversation?.body ?? "");
+  ok("reply: the verdict is rendered from the typed `fixed`, not from the agent's prose", inline?.body.includes("✅ fixed —") === true, inline?.body ?? "");
+}
+
+// ── a won't-fix is an ordinary ending, and the human has to be able to see which it was
+//    without reading a word of the prose ──
+{
+  const h = harness({
+    inline: [{ id: 3, body: "@sunday rewrite this in Rust", path: "lib/parse.mts", line: 42 }],
+    result: { summary: "judged one comment out of scope", replies: [{ comment: 3, fixed: false, body: "Out of scope for this PR." }] },
+  });
+  await h.run();
+
+  const posted = h.posted.find((p) => p.to === 3);
+  ok("won't-fix: the reply says so up front", posted?.body.includes("🚫 won't fix — Out of scope for this PR.") === true, posted?.body ?? "");
+  ok("won't-fix: it is still a marked answer, so the summon is not re-run", posted?.body.includes(replyMarkerFor(3)) === true, posted?.body ?? "");
 }
 
 // ── a PR that merged (or was closed) while the item queued: whatever the comments ask

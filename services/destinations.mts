@@ -23,11 +23,23 @@ const COMMENT_MAX = 2000;
 
 const API = "https://api.telegram.org";
 
+const GITHUB = "https://github.com";
+
 /** Where the line happened, for a human reading one line out of context. */
 function where(line: LogLine): string {
   const { repo, target } = line.context;
   if (!repo) return "";
   return target === undefined ? ` (${repo})` : ` (${repo}#${target})`;
+}
+
+/** The same, for a phone: a tappable link rather than `owner/repo#n`, because a push
+ *  notification is read away from the machine the run is on. `/issues/<n>` redirects to
+ *  `/pull/<n>`, so one form addresses an issue and a pull request alike and nothing here
+ *  has to know which it got. */
+function link(line: LogLine): string {
+  const { repo, target } = line.context;
+  if (!repo) return "";
+  return target === undefined ? ` (${repo})` : `\n${GITHUB}/${repo}/issues/${target}`;
 }
 
 export function truncate(text: string, max: number): string {
@@ -103,7 +115,7 @@ export function phoneDestination(send: PhoneSender = telegramSend): Destination 
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chatId) return; // not configured — stay silent
-    return send(`${ICON[line.level]} [${line.module}] ${truncate(line.message, PHONE_MAX)}${where(line)}`, token, chatId);
+    return send(`${ICON[line.level]} [${line.module}] ${truncate(line.message, PHONE_MAX)}${link(line)}`, token, chatId);
   };
 }
 
