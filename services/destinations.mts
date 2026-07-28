@@ -12,8 +12,10 @@ import { Logger, type Destination, type Level, type LogLine } from "./logger.mts
 
 const ICON: Record<Level, string> = { info: "·", milestone: "🔵", alert: "🟠", error: "🔴" };
 
-/** Telegram caps a message at 4096 chars; leave room for the tag and the icon. */
-const PHONE_MAX = 3800;
+/** Telegram caps a message at 4096 chars; leave room for the tag and the icon. Exported
+ *  because the inbound half bounds its replies against the same one (#66) — a second cap
+ *  is how one of them goes stale. */
+export const PHONE_MAX = 3800;
 
 /** A log line can carry a raw agent-output excerpt; v1 capped those at 2000 chars and
  *  a comment is for humans, not for archiving output — the run log has the whole thing. */
@@ -28,7 +30,7 @@ function where(line: LogLine): string {
   return target === undefined ? ` (${repo})` : ` (${repo}#${target})`;
 }
 
-function truncate(text: string, max: number): string {
+export function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}… [truncated]`;
 }
 
@@ -122,21 +124,28 @@ export function createLogger(paths: { runLog: string; eventLog: string }): Logge
   });
 }
 
-/** One Bot API sendMessage. Rejects on a transport error or an `ok:false` reply — the
- *  Logger turns that into a degraded event. */
-async function telegramSend(text: string, token: string, chatId: string): Promise<void> {
+/** THE one Bot API call, outbound and inbound alike (#66): `sendMessage` from here,
+ *  `getUpdates` from `services/telegram.mts`. Rejects on a transport error or an
+ *  `ok:false` reply — the Logger turns that into a degraded event. */
+export async function botApi(method: string, token: string, body: Record<string, unknown>): Promise<unknown> {
   try {
-    const res = await fetch(`${API}/bot${token}/sendMessage`, {
+    const res = await fetch(`${API}/bot${token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+      body: JSON.stringify(body),
     });
-    const json = (await res.json()) as { ok: boolean; description?: string };
+    const json = (await res.json()) as { ok: boolean; result?: unknown; description?: string };
     if (!json.ok) throw new Error(json.description ?? `HTTP ${res.status}`);
+    return json.result;
   } catch (err) {
     // The token sits in the request URL, so a transport error can quote it. It must
-    // never reach a log line — every failure leaves here scrubbed.
+    // never reach a log line — every failure leaves here scrubbed, and there is exactly
+    // one copy of this scrub because two is how one of them loses it.
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`telegram send failed: ${detail.replaceAll(token, "***")}`);
+    throw new Error(`telegram ${method} failed: ${detail.replaceAll(token, "***")}`);
   }
+}
+
+async function telegramSend(text: string, token: string, chatId: string): Promise<void> {
+  await botApi("sendMessage", token, { chat_id: chatId, text, disable_web_page_preview: true });
 }

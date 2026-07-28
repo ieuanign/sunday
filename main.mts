@@ -44,6 +44,7 @@ import { Forwarders } from "#services/github/forwarder.mts";
 import { Gh } from "#services/github/index.mts";
 import { createReceiver } from "#services/github/receiver.mts";
 import { SandboxService } from "#services/sandbox.mts";
+import { createTelegramControl } from "#services/telegram.mts";
 // Relative, unlike everything above: `boot.mts` is a root file and the root has no
 // subpath alias of its own (package.json `imports`).
 import { Boot, readRoutingTable } from "./boot.mts";
@@ -197,6 +198,21 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 // which GitHub fires events, nothing forwards them, and the reconcile that would have
 // re-derived them has already run — which is the 2026-07-24 blackout in miniature.
 await forwarders.start();
+
+// The phone's inbound half (#66), in THIS process: one supervised parent, so no port, no
+// tunnel and no entry in `process-compose.yaml`. Started BEFORE the boot, so `/status`
+// answers during the multi-minute image build below. It fires a long-poll loop and is
+// never awaited — awaiting it would hold `boot.run()` forever.
+createTelegramControl({
+  token: process.env.TELEGRAM_BOT_TOKEN,
+  chatId: process.env.TELEGRAM_CHAT_ID,
+  log: logger.child("telegram"),
+  snapshot: () => scheduler.snapshot(),
+  pause: () => pause.read(),
+  state: () => state.all(),
+  fix: (key, hint) => assignor.release(key, hint),
+  resume: () => failure.resume(),
+}).start();
 
 // AFTER the bind, deliberately: images take minutes to build and the sweep reads disk,
 // and a readiness probe that goes unanswered for that long is a SIGKILL/restart loop
