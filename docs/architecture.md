@@ -173,8 +173,10 @@ what an operator then sees, is [ADR-0002](adr/0002-failure-scope-not-global-halt
   that repo's outstanding work through the same per-repo pass a blackout uses.
 - **`item`** — only this work item is stuck. It gets **one** retry (an `unknown` carries its own
   error back into the next run's prompt; a `transient` carries nothing — somebody else's 502 in the
-  prompt is noise) and, failing the same way again, is **quarantined**: labelled, notified, and left
-  untouched until a human removes the label. Everything else keeps running.
+  prompt is noise). An `unknown` that then fails the same way is **quarantined**: labelled,
+  notified, and left untouched until a human removes the label. A `transient` is not — a blip is
+  nothing to set aside, so it stops at `failed`, unlabelled, and the next reconcile re-admits it.
+  Everything else keeps running.
 - **`run-failed`** is the agent's own verdict and the one item-scope class with no retry — it ran,
   and a second run would spend real quota re-deciding what it already decided. It gets
   `agent-failed` and a human.
