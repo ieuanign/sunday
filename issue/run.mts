@@ -53,8 +53,10 @@ export interface Job {
    *  `lib/paths.mts` for the same reason as the other three: the child derives no path. */
   eventLogPath: string;
   /** Present when this run CONTINUES the session an earlier one gated on: the handle the
-   *  parent kept in durable state, and what the human replied. Absent is a fresh run. */
-  resume?: { sessionId: string; reply: string };
+   *  parent kept in durable state, what the human replied, and how big that session had
+   *  grown when it gated (#67) — the child cannot measure a session it has not run yet,
+   *  and absent means the parent has no number, which reads as the ordinary resume. */
+  resume?: { sessionId: string; reply: string; contextTokens?: number };
   /** The error the PREVIOUS run of this item died on, when this run is #39's one retry.
    *  It goes into the prompt: it is the only thing this run knows that the last one did
    *  not, and without it the retry is the same run again on fresh quota. */

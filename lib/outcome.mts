@@ -54,6 +54,14 @@ export interface Outcome {
    *  re-derived later from a branch that has moved since (ADR-0003). Absent on a resumed
    *  run: the branch was already there, so that run forked from nothing. */
   forkPoint?: string;
+  /** How big the agent session named above had grown when this run gated (#67):
+   *  `input + cacheRead + cacheCreation`, as the agent seam reports it. Set on the GATE
+   *  outcome and nowhere else — it is the one outcome a resume ever reads back — so the
+   *  run that answers the human can decide whether continuing that session is still
+   *  affordable or whether it has to be handed off to a fresh one. Absent means unknown,
+   *  which reads as the cheap resume: a run that cannot say costs one turn, where a
+   *  number carried over from some earlier session would cost a whole handoff. */
+  contextTokens?: number;
   /** The agent RAN and reported the failure ITSELF (#39) — a `fail` signal, or a run that
    *  committed nothing — as opposed to something blowing up around it. Carried as a typed
    *  fact because the summary on those paths is prose SUNDAY composed around the agent's
@@ -133,6 +141,11 @@ function isOutcome(value: unknown): value is Outcome {
     // and this file's own warning is that a field the guard skips is how a finished run
     // becomes an unreadable outcome — or here, a fork point that is not a commit.
     (o.forkPoint === undefined || typeof o.forkPoint === "string") &&
+    // And likewise, with the comparison it is FOR as the reason: this number is read as
+    // `>= threshold`, and everything that is not a number — a string, a null — answers
+    // that `false`. The handoff would disable itself in silence, which is the one way
+    // this feature fails without saying so.
+    (o.contextTokens === undefined || typeof o.contextTokens === "number") &&
     // And likewise: this one decides whether a failure is the agent's own verdict or an
     // unrecognised one, so a truthy string here would classify a real quota wall as the
     // agent having failed — one item quarantined while the pipeline feeds into the wall.

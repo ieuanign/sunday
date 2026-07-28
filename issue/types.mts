@@ -38,8 +38,10 @@ export interface IssueRunInput {
   /** This run's own log. The agent library appends its raw output to the same file, so
    *  the run reads back in one place. */
   logPath: string;
-  /** Continue the session a previous run gated on, with the human's answer. */
-  resume?: { sessionId: string; reply: string };
+  /** Continue the session a previous run gated on, with the human's answer — and with how
+   *  big that session had grown when it gated (#67), which only the parent's durable state
+   *  still knows. Absent is unknown, and unknown resumes. */
+  resume?: { sessionId: string; reply: string; contextTokens?: number };
   /** What the PREVIOUS attempt at this item died on, when this run is #39's one retry.
    *  Handed to the agent in the prompt: it is the only thing this run knows that the last
    *  one did not, and without it a retry is the same run again on fresh quota. */

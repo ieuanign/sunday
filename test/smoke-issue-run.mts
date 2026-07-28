@@ -11,7 +11,7 @@
 import { IssueModule, type IssueRunInput } from "#issue/index.mts";
 import type { ImagePresent } from "#issue/preconditions.mts";
 import { RESULT_TAG, type IssueResult } from "#issue/prompt.mts";
-import type { Agent, AgentRunRequest, AgentRunResult } from "#services/agent/index.mts";
+import type { Agent, AgentRunRequest, AgentRunResult, AgentUsage } from "#services/agent/index.mts";
 import type { Git } from "#services/git.mts";
 import type { GitHubRun, NewPullRequest } from "#services/github/index.mts";
 import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
@@ -64,6 +64,9 @@ interface Scenario {
    *  which is what the ship-time adoption is for. */
   openPrAtShip?: string;
   sessionId?: string;
+  /** What the session had consumed when the agent stopped — the gate outcome carries the
+   *  context out so a resume can decide whether continuing it is affordable (#67). */
+  usage?: AgentUsage;
   preservedWorktreePath?: string;
   resume?: { sessionId: string; reply: string };
   /** Cleanup blows up (a `git` that threw with its own stderr). */
@@ -120,6 +123,7 @@ function harness(s: Scenario = {}) {
       return {
         output: (s.result ?? { signal: "ready", description: "shipped it" }) as unknown as T,
         sessionId: s.sessionId,
+        usage: s.usage,
         commits: s.agentCommits ?? [],
         preservedWorktreePath: s.preservedWorktreePath,
         model: s.model,
@@ -467,6 +471,7 @@ function harness(s: Scenario = {}) {
   const h = harness({
     result: { signal: "gate", description: "Blocked on a product call.", question: "Should deleted accounts keep their invoices?" },
     sessionId: "sess-abc123",
+    usage: { input: 90_000, cacheCreation: 12_000, cacheRead: 41_500, output: 3_000, contextTokens: 143_500 },
     preservedWorktreePath: "/repos/finance/.worktrees/feat-57",
   });
   const outcome = await h.run();
@@ -486,6 +491,11 @@ function harness(s: Scenario = {}) {
     outcome.summary,
   );
   ok("gate: the session handle rides along so the reply resumes rather than restarts", outcome.sessionId === "sess-abc123", String(outcome.sessionId));
+  ok(
+    "gate: and how big that session is, so the run that answers can weigh resuming it (#67) — this child is gone before anyone reads the question",
+    outcome.contextTokens === 143_500,
+    String(outcome.contextTokens),
+  );
   ok("gate: the child posts no comment of its own", h.comments.length === 0, h.comments.map((c) => c.message).join(" | "));
 }
 {

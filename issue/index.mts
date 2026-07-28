@@ -130,6 +130,10 @@ export class IssueModule {
           status: "awaiting-human",
           summary: question ?? description,
           sessionId: result.sessionId,
+          // …and how big that session is now (#67). Only the run that just used it can
+          // say, and it says so HERE alone: this is the one outcome anybody resumes from.
+          // An agent that reports no usage leaves it absent, which reads as unknown.
+          contextTokens: result.usage?.contextTokens,
           forkPoint,
         });
       }
