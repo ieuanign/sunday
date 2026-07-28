@@ -96,6 +96,17 @@ export function freshPrompt(
   );
 }
 
+/** The steer a human typed releasing this parked item (#66). Its OWN section, framed as a
+ *  requirement — `retryError`'s says "do not treat it as a requirement", which is the exact
+ *  opposite of what somebody who stopped to type this meant. */
+export function hintSection(hint: string): string {
+  return (
+    `\n\n---\n\n# What the human who handed this back asked for\n\n` +
+    `Sunday parked this issue and a human released it with the note below. Treat it as part ` +
+    `of what is being asked for, alongside the issue itself.\n\n${hint}\n`
+  );
+}
+
 /** A gate resume's prompt: the human's answer, and the reminder that carries the tag.
  *  Deliberately NOT the baseline again — the session being resumed already has it. */
 export function resumePrompt(reply: string): string {
