@@ -139,7 +139,10 @@ same one both pipelines set, and everything either pipeline keeps locally is dis
 
 ```bash
 devbox services stop                 # 1. stop CLEANLY — see the warning below
-git checkout v1-final                # 2. the tagged commit before the cutover merged
+
+git log --oneline --grep '#45' main  # 2. find the commit the cutover PR landed as
+git checkout <cutover-sha>^1         #    its first parent is main as it stood before
+
 cp <your-backup>/repos.json config/  # 3. put the pre-cutover routing table back
 
 # 4. v1 is hand-run: a terminal for the listener, plus one per routed repo
@@ -153,8 +156,11 @@ gh webhook forward --repo <owner/repo> \
    exit; a hard-killed one strands it and every later start dies on `HTTP 422 … Hook already exists
    on this repository`. Two relays into the same port also means every event is delivered twice, so
    the running pipeline must be down before the other one comes up.
-2. **The checkout brings v1 back whole** — `listener/`, its smokes, `npm run status` and the
-   Telegram command poller all live at the tag.
+2. **The anchor needs no prior arrangement.** PRs land squashed, so the cutover is one commit on
+   `main` and its first parent is the branch exactly as it stood before — nothing had to be tagged
+   ahead of time, and nothing was. Both are findable after the fact: `git log` above, or the commit
+   the merged PR links to. The checkout brings v1 back whole — `listener/`, its smokes,
+   `npm run status` and the Telegram command poller are all there.
 3. **`config/repos.json` is gitignored runtime state**, so the checkout does not restore it. The
    cutover trimmed it to finance; the backup taken before that trim is what widens routing again.
 4. **State does not need reversing.** v1 reads `.scratch/`, the current pipeline reads `var/`, so

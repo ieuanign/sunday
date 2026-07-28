@@ -78,7 +78,7 @@ export interface AgentRunRequest<T = string> {
 }
 
 /** What one run consumed. Plain numbers — `#37`'s PR footer reports the totals and
- *  `#36`'s handoff threshold reads the context. */
+ *  `#67`'s handoff threshold reads the context. */
 export interface AgentUsage {
   input: number;
   cacheCreation: number;
