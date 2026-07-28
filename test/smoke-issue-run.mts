@@ -35,9 +35,8 @@ const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
  *  the before-work set asserts the second still contains the first (#38). */
 const TRIGGER_LABELS = ["sunday", "ready-for-agent"];
 
-/** The context this case's runs are handed as their handoff threshold (#67). A resume
- *  says how big its session was against THIS, so both sides of the boundary are sayable
- *  without depending on whatever `.env` defaults to. */
+/** The handoff threshold every run here is handed (#67), so the cases say which side of
+ *  the boundary they are on without depending on whatever `.env` defaults to. */
 const THRESHOLD = 120_000;
 
 /** What the handoff turn answers with, when a case does not say otherwise. */
@@ -72,16 +71,14 @@ interface Scenario {
    *  which is what the ship-time adoption is for. */
   openPrAtShip?: string;
   sessionId?: string;
-  /** What the session had consumed when the agent stopped — the gate outcome carries the
-   *  context out so a resume can decide whether continuing it is affordable (#67). */
+  /** What the session had consumed when the agent stopped — the gate outcome carries it
+   *  out for the resume to weigh (#67). */
   usage?: AgentUsage;
   preservedWorktreePath?: string;
   resume?: { sessionId: string; reply: string; contextTokens?: number };
-  /** What the bounded handoff turn emits inside its tag — a session too big to resume is
-   *  compacted into this and a FRESH one is seeded with it (#67). */
+  /** What the bounded handoff turn emits inside its tag (#67). */
   handoffNote?: string;
-  /** The COMPACTION turn left the worktree dirty and the library kept it host-side —
-   *  the work turn that follows leaves none of its own. */
+  /** The COMPACTION turn left the worktree dirty and the work turn after it left none. */
   handoffPreservedWorktreePath?: string;
   /** Keeping the note on disk blows up (a full disk, a read-only `var/`). */
   noteWriteError?: string;
@@ -139,9 +136,8 @@ function harness(s: Scenario = {}) {
       requests.push(request as unknown as AgentRunRequest<IssueResult>);
       if (s.agentError) throw new Error(s.agentError);
       return {
-        // BY THE TAG the request asked for, because a handed-off run makes two calls and
-        // they want different answers: the bounded compaction turn gets prose (no schema
-        // — the seam hands back the tag's raw text), the work run gets a result object.
+        // BY THE TAG: a handed-off run makes two calls, and the compaction turn wants prose
+        // where the work run wants a result object.
         output: (request.output.tag === HANDOFF_TAG
           ? (s.handoffNote ?? NOTE)
           : (s.result ?? { signal: "ready", description: "shipped it" })) as unknown as T,
@@ -241,8 +237,8 @@ function harness(s: Scenario = {}) {
     return !s.imageMissing;
   };
 
-  /** The note text this run persisted, in order — the module resolves no path, so the
-   *  write it is handed is the whole of what reaches the disk. */
+  /** The note text this run persisted — the module resolves no path, so the write it is
+   *  handed is the whole of what reaches the disk. */
   const notesWritten: string[] = [];
   const writeHandoffNote = (note: string) => {
     trace.push("writeNote");
@@ -588,10 +584,8 @@ function harness(s: Scenario = {}) {
   ok("fresh: a fresh run touches no label at all", h.labelsRemoved.length === 0 && h.labelsAdded.length === 0, h.trace.join(" → "));
 }
 
-// ── the handoff (#67): a gated session only grows, so at or past the threshold the reply
-//    does NOT go to it. One bounded turn compacts it into a note, and a FRESH session is
-//    seeded with the note and the human's answer. Asserted AT the threshold exactly —
-//    `>` instead of `>=` is a run that hands off one turn later than it said it would ──
+// ── the handoff (#67): at or past the threshold the reply seeds a FRESH session instead of
+//    the bloated one. Asserted AT the threshold — `>` would hand off one turn later ──
 {
   const h = harness({
     resume: { sessionId: "sess-abc123", reply: "Keep the invoices, anonymise the account.", contextTokens: THRESHOLD },
@@ -650,8 +644,7 @@ function harness(s: Scenario = {}) {
 }
 
 {
-  // One token under. A session that still fits is CHEAPER to continue than to compact —
-  // the handoff costs a whole extra turn of real quota.
+  // One token under: a session that still fits is cheaper to continue than to compact.
   const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD - 1 } });
   const outcome = await h.run();
 
@@ -661,9 +654,8 @@ function harness(s: Scenario = {}) {
   ok("below: the resume ships as it always did", outcome.status === "done", JSON.stringify(outcome));
 }
 {
-  // A parent with no number for this item — an outcome recorded before #67, or an agent
-  // that reported no usage. Unknown resumes: it costs one turn, where guessing "big"
-  // costs a whole handoff on a session that may be tiny.
+  // No number: an outcome recorded before #67, or an agent that reported no usage. Unknown
+  // resumes — guessing "big" costs a whole handoff on a session that may be tiny.
   const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices." } });
   await h.run();
 
@@ -710,10 +702,8 @@ function harness(s: Scenario = {}) {
 }
 
 {
-  // The compaction turn left the worktree dirty and the work turn that followed did not.
-  // The worktree still holds the branch checked out, so a run that forgot it leaves a
-  // branch nothing can delete — and a stale local `feat/57` is what the next fresh run
-  // would silently build on (#33).
+  // The COMPACTION turn left the worktree dirty and the work turn after it did not — and a
+  // worktree holding the branch checked out is a branch nothing can delete (#33).
   const h = harness({
     resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD },
     handoffPreservedWorktreePath: "/repos/finance/.worktrees/feat-57",

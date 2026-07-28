@@ -77,8 +77,7 @@ const paths = await import("#lib/paths.mts");
   );
 }
 
-// ── handoff note: one durable file per work item, under var/ — never .scratch/, which
-//    the pipeline rm -rf's out from under the note the fresh session was seeded with ──
+// ── handoff note: one durable file per work item, under var/ — .scratch/ is rm -rf'd ──
 {
   const note = paths.handoffNotePath("acme/finance#57");
   ok(

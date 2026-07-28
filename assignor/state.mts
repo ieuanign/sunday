@@ -21,11 +21,8 @@ export interface WorkItemState {
    *  the outcome file, because the outcome is cleared as it is applied and the human may
    *  reply weeks later — this file is the only thing left that knows what to resume. */
   sessionId?: string;
-  /** How big that session had grown when the gate happened (#67). Kept beside the handle
-   *  because it is only useful WITH it: the run that takes the human's reply decides from
-   *  this number whether to continue the session or to hand it off to a fresh one, and
-   *  the child that could have measured it is long gone. Absent means unknown, which
-   *  resumes as it always did. */
+  /** How big that session had grown when the gate happened (#67). Beside the handle because
+   *  it is only useful WITH it, and the child that measured it is long gone. Absent resumes. */
   contextTokens?: number;
   /** The branch this item was ADMITTED on: `main`, or `feat/<blocker>` when the Assignor
    *  stacked it (#42). Here for the same reason `sessionId` is — a gate resume opens the

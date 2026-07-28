@@ -438,10 +438,8 @@ export class Assignor {
     this.github.claim(repo, number);
     // The whole record is replaced, so the handle, the base, the fork point and the
     // session's size are all written back deliberately (constraint 12): dropped here, a
-    // run that dies mid-resume leaves a gated item with nothing left to resume from, no
-    // base to resume onto, no commit for #43 to restack its branch off — and, for the
-    // last of them, a session nobody can size again, so the next reply resumes a bloated
-    // one instead of handing it off (#67).
+    // run that dies mid-resume leaves a gated item with nothing to resume from, no base
+    // to resume onto, no commit for #43 to restack, and a session nobody can size (#67).
     this.state.set(key, {
       status: "in-flight",
       sessionId: session,
@@ -453,8 +451,7 @@ export class Assignor {
     this.scheduler.enqueue({
       key,
       branch: `feat/${number}`,
-      // …and the same number goes to the child, which is the only thing that can act on
-      // it: it decides whether to continue this session or to hand it off (#67).
+      // …and on to the child, the only thing that can act on it (#67).
       run: () => this.run(item, cfg, base, { sessionId: session, reply: comment, contextTokens: prior.contextTokens }),
     });
   }
@@ -786,10 +783,8 @@ export class Assignor {
     this.state.set(item.key, {
       status: outcome.status,
       sessionId: outcome.sessionId,
-      // Beside the handle, and taken from THIS outcome with no fallback to the prior one
-      // (#67): it describes the session `sessionId` names, so a number kept from a session
-      // that has since been retired would tell the next resume to hand off a session that
-      // is nearly empty. Absent reads as unknown, which resumes as it always did.
+      // From THIS outcome with no fallback to the prior one (#67): it describes the session
+      // `sessionId` names, and a number kept from a retired one would hand off a fresh session.
       contextTokens: outcome.contextTokens,
       base: prior?.base,
       forkPoint: outcome.forkPoint ?? prior?.forkPoint,

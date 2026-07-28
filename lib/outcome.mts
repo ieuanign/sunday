@@ -54,24 +54,18 @@ export interface Outcome {
    *  re-derived later from a branch that has moved since (ADR-0003). Absent on a resumed
    *  run: the branch was already there, so that run forked from nothing. */
   forkPoint?: string;
-  /** How big the agent session named above had grown when this run gated (#67):
-   *  `input + cacheRead + cacheCreation`, as the agent seam reports it. Set on the GATE
-   *  outcome and nowhere else — it is the one outcome a resume ever reads back — so the
-   *  run that answers the human can decide whether continuing that session is still
-   *  affordable or whether it has to be handed off to a fresh one. Absent means unknown,
-   *  which reads as the cheap resume: a run that cannot say costs one turn, where a
-   *  number carried over from some earlier session would cost a whole handoff. */
+  /** How big the session above had grown when this run gated (#67). Set on the GATE outcome
+   *  and nowhere else — it is the one outcome a resume reads back. Absent means unknown,
+   *  which resumes: a stale number carried over would cost a whole handoff. */
   contextTokens?: number;
   /** The agent RAN and reported the failure ITSELF (#39) — a `fail` signal, or a run that
-   *  committed nothing — as opposed to something blowing up around it. Set for a THIRD
-   *  reason since #67: a handoff turn that ran and came back with no usable note, which
-   *  the agent never gets to describe but which is a turn spent inside it all the same,
-   *  and is the human's to hand back rather than anyone's to retry. Carried as a typed
+   *  committed nothing — as opposed to something blowing up around it. Carried as a typed
    *  fact because the summary on those paths is prose SUNDAY composed around the agent's
    *  own description: classifying that by pattern would break the day the wording changes,
    *  and would let anything the agent happened to write ("hit the usage limit") stop the
-   *  whole pipeline. Absent on every other path, which is every failure that happened
-   *  AROUND the agent rather than in its turn. */
+   *  whole pipeline. Since #67, a handoff turn that came back with no usable note is a
+   *  third such case. Absent on every other path — every failure that happened AROUND the
+   *  agent rather than in its turn. */
   agentFailed?: boolean;
   /** WHICH assertion stopped the run (#38), when one did. Typed, and travelling in this
    *  file rather than as an exit code (ADR-0001), because the parent reacts to each reason
@@ -144,10 +138,8 @@ function isOutcome(value: unknown): value is Outcome {
     // and this file's own warning is that a field the guard skips is how a finished run
     // becomes an unreadable outcome — or here, a fork point that is not a commit.
     (o.forkPoint === undefined || typeof o.forkPoint === "string") &&
-    // And likewise, with the comparison it is FOR as the reason: this number is read as
-    // `>= threshold`, and everything that is not a number — a string, a null — answers
-    // that `false`. The handoff would disable itself in silence, which is the one way
-    // this feature fails without saying so.
+    // And likewise: this one is read as `>= threshold`, which anything that is not a
+    // number answers `false` — the handoff would disable itself in silence.
     (o.contextTokens === undefined || typeof o.contextTokens === "number") &&
     // And likewise: this one decides whether a failure is the agent's own verdict or an
     // unrecognised one, so a truthy string here would classify a real quota wall as the

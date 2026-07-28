@@ -215,8 +215,7 @@ const QUESTION = "Which of the two auth flows should this use?";
 const SESSION = "9f3c1a7e-2b40-4d61-8c55-0e1d2f3a4b5c";
 /** The commit a child says it created its branch at (#42). */
 const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
-/** How big the gated session had grown by the time it asked (#67) — what the resume
- *  decides whether to continue or to hand off with. */
+/** How big the gated session had grown by the time it asked (#67). */
 const CONTEXT_TOKENS = 143_500;
 
 /** Take the item all the way to a gate — forked, gated, its claim back off. That is the

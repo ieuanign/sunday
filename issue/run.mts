@@ -26,12 +26,9 @@ import { IssueModule } from "./index.mts";
  *  file sits one level under it, exactly as `main.mts` sits on it. */
 const parentRoot = resolve(import.meta.dirname, "..");
 
-/** How big an orchestrator session may get before a gate reply is handed off to a fresh
- *  one instead of resuming it (#67), when `.env` says nothing. Spelled here, where the
- *  environment is read, rather than imported from `services/agent/token-report.mts`'s
- *  `NEAR_ZONE` — the same number today, but that one decides whether a REPORT flags a run
- *  as near the limit, and tying a spend decision to a display threshold makes moving
- *  either of them move the other. */
+/** The handoff threshold when `.env` says nothing (#67). Spelled here rather than imported
+ *  from `services/agent/token-report.mts`'s `NEAR_ZONE`: the same number today, but that
+ *  one flags a REPORT, and tying a spend decision to it makes moving either move the other. */
 const DEFAULT_HANDOFF_THRESHOLD = 120_000;
 
 /** The fully-resolved description of one issue run, handed over at fork time. The
@@ -63,8 +60,7 @@ export interface Job {
   eventLogPath: string;
   /** Present when this run CONTINUES the session an earlier one gated on: the handle the
    *  parent kept in durable state, what the human replied, and how big that session had
-   *  grown when it gated (#67) — the child cannot measure a session it has not run yet,
-   *  and absent means the parent has no number, which reads as the ordinary resume. */
+   *  grown (#67) — the child cannot measure a session it has not run yet. */
   resume?: { sessionId: string; reply: string; contextTokens?: number };
   /** The error the PREVIOUS run of this item died on, when this run is #39's one retry.
    *  It goes into the prompt: it is the only thing this run knows that the last one did
@@ -135,14 +131,11 @@ async function runIssue(): Promise<Outcome> {
       // The plain probe, not the sandbox SERVICE: the module takes a function so it
       // names no library type and a smoke answers it without docker (#38 constraint 11).
       imagePresent,
-      // Both closed over the ONE path this run's note lives at (#67), resolved here for
-      // the same reason every other path is: the module derives none of its own. Neither
-      // is guarded — the module catches them, because a note is best-effort and the run
-      // around it is not.
+      // Resolved here for the same reason every other path is: the module derives none of
+      // its own (#67). Unguarded — the module catches, since a note is best-effort.
       writeHandoffNote: (note) => {
         const path = handoffNotePath(job.key);
-        // `lib/paths.mts` only NAMES paths, so the writer makes its own directory —
-        // the same division `writeOutcome` keeps.
+        // `lib/paths.mts` only NAMES paths — the same division `writeOutcome` keeps.
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, note, "utf8");
       },
@@ -166,9 +159,8 @@ async function runIssue(): Promise<Outcome> {
       // The run log is the agent's log too — the library appends its raw output to the
       // path it is handed, so one work item reads back in one file.
       logPath: job.runLogPath,
-      // Read and VALIDATED here, before anything is spent: the module takes a number, so
-      // a typo in `.env` fails this run with a readable message through the catch below
-      // rather than disabling the handoff in silence (`ctx >= NaN` is `false`).
+      // Read and VALIDATED before anything is spent, so a typo in `.env` fails this run
+      // through the catch below rather than disabling the handoff in silence.
       handoffThreshold: handoffThreshold(process.env.HANDOFF_CTX_THRESHOLD),
       // Undefined on a fresh run, which is what the module reads as "start from the
       // baseline prompt" — the parent decides which of the two this is.
@@ -187,13 +179,9 @@ async function runIssue(): Promise<Outcome> {
   }
 }
 
-/** `.env`'s `HANDOFF_CTX_THRESHOLD` as a number of tokens (#67) — unset, or empty, is the
- *  default. VALIDATED, like every other piece of `.env` text a run acts on (`AGENT`,
- *  `MODEL_EFFORT`): the value is used as `context >= threshold`, and `NaN` answers that
- *  `false` for every context there is. A typo would leave the handoff silently switched
- *  off and every gate reply resuming a session too big to work in — which is v1's bug, and
- *  the whole reason this reads rather than trusts. Zero is legal and means "hand off on
- *  every resume"; negative is not a size. */
+/** `.env`'s `HANDOFF_CTX_THRESHOLD` as tokens (#67). VALIDATED like `AGENT`/`MODEL_EFFORT`:
+ *  the value is used as `context >= threshold`, and `NaN` answers that `false` for every
+ *  context there is — v1's bug. Zero is legal ("hand off every resume"); negative is not. */
 function handoffThreshold(raw: string | undefined): number {
   if (!raw?.trim()) return DEFAULT_HANDOFF_THRESHOLD;
   const tokens = Number(raw);

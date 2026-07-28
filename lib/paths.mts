@@ -68,11 +68,9 @@ export function restackWorktreePath(repo: string, branch: string): string {
   return resolve(varDir, "restack", slug(`${repo}#${branch}`));
 }
 
-/** The handoff note a retiring session left for the fresh one that continues it (#67),
- *  named by work-item key. ONE per work item: a second handoff overwrites the first, and
- *  both texts are in the run log anyway. Under `var/` and never `.scratch/` — the note is
- *  the only readable record of what the fresh session was seeded with, and CLAUDE.md §6
- *  documents `.scratch/` as `rm -rf`-able (v1 kept its notes there). */
+/** The handoff note a retiring session leaves the fresh one (#67). ONE per work item — a
+ *  second handoff overwrites the first, and both texts are in the run log. Under `var/`,
+ *  never `.scratch/`, which CLAUDE.md §6 documents as `rm -rf`-able (v1 kept notes there). */
 export function handoffNotePath(key: string): string {
   return resolve(varDir, "handoff", `${slug(key)}.md`);
 }
