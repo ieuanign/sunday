@@ -1,11 +1,11 @@
 # Architecture — the Sunday pipeline
 
-> **Design phase.** Nothing here is built yet. This document ports a design reached through
-> a grilling session into the template. The load-bearing [Sandcastle](https://github.com/mattpocock/sandcastle)
-> assumptions (git isolation via `run({cwd})`, branch strategy with a non-`main` base,
-> session capture/resume) are **unverified** and should be spiked before anyone bets the
-> pipeline on them. Concrete choices below (a Go/mysql/redis child, an Ubuntu mini-PC host)
-> are **examples/defaults** for one instance, not requirements of the template.
+> **Status: pipeline built (M1–M5), live-hardening in progress.** This is the design of record —
+> *why* the pipeline has the shape it has — written from the code and the ADRs. Running it,
+> watching it and tuning its cost belong to [`supervision.md`](supervision.md),
+> [`operability.md`](operability.md) and [`resource-management.md`](resource-management.md); the
+> ordered build record is [`implementation-plan.md`](implementation-plan.md). The one thing
+> described here that is **designed and not built** is the context-threshold handoff.
 
 ## What this is
 
@@ -15,61 +15,82 @@ code implementations that open PRs. It runs on **your** hardware, not GitHub Act
 ## Chosen shape
 
 ```
-GitHub issue (labelled)
-   → gh webhook forward   GitHub → your machine (relay; no public server, no cron)
-   → listener             Node process: routes repo → config, enforces concurrency
-   → sandcastle.run({ cwd: repos/<child> })
-   → Docker sandbox       headless coding agent implements the issue
-   → push + open PR        to the child repo's own origin
+GitHub event
+   → gh webhook forward   one per routed repo, started in-process by the parent
+   → receiver :8787       local only — no public endpoint, no replay
+   → Assignor             route · admit · resolve base · claim · enqueue
+   → scheduler            regular lane, cap 3, per-branch lock
+   → fork issue/run.mts | pr/run.mts        one child process per work item (ADR-0001)
+   → Docker sandbox       credential-free; the agent implements and commits locally
+   → the host pushes, opens the PR, comments and labels
+   → var/results/<key>.json  →  the parent applies it
 ```
 
-- **`gh webhook forward`** relays GitHub events to the local listener over an authenticated
-  channel — no inbound port, no public server. It has **no replay**; reconcile-on-restart
-  (below) compensates for anything missed while down.
-- **The listener** is a single long-running Node process. One async loop serializes all
-  admission checks (avoids double-launch races), routes `repository.full_name` → child
-  config, enforces the global concurrency cap, and invokes Sandcastle.
-- **Sandcastle** runs the coding agent in a Docker sandbox and merges its git work back.
-  `run({ cwd: repos/<child> })` is expected to make every git op — including **push** —
-  resolve to the child's `.git`/`origin`.
-- **The sandbox** is per-child (`repos/<child>/.sandcastle/Dockerfile`), running a non-root
-  `agent` user. Its `onSandboxReady` hook boots whatever services the child's tests need
-  (*example:* a Go + mysql + redis child seeds a test DB and starts redis before the agent
-  runs).
+- **The forwarders** are `gh webhook forward`, one per routed repo, started **in-process by the
+  parent** and relaying to the local receiver on `SUNDAY_PORT` (default 8787). No inbound port, no
+  public server. There is **no replay** — a *blackout* is re-derived afterwards (*State &
+  recovery*).
+- **The parent** (`main.mts`) is a singleton. It owns the services, the Assignor, the queue and both
+  ends of the event pipe, and it **owns no work**: every work item runs in a forked child
+  ([ADR-0001](adr/0001-fork-per-work-item.md)), so a synchronous `gh` or `git` call blocks only that
+  child and never the socket the parent answers on.
+- **Two work-item lanes, one scheduler.** An **issue run** (`issue/`) takes one issue from admission
+  to a pull request; a **PR-comment run** (`pr/`) addresses the outstanding `@sunday` summons on one
+  pull request. Distinct work-item keys, distinct workers, the same queue, cap and branch lock.
+- **The sandbox is credential-free.** It is per-child (`repos/<child>/.sandcastle/Dockerfile`,
+  running a non-root `agent` user) and what it contains is that child's own `.sandcastle/`'s to
+  decide — onboarding is in [`README.md`](../README.md#onboarding-a-repo). The agent decides and
+  **commits locally**; the **host** performs every push, pull request, comment and label.
 
 ## Trigger
 
-Two labels required (**AND**), fired on the second label:
+**Trigger labels are per-repo**, from `config/repos.json`'s `triggerLabels`, and **all** of a repo's
+must be present (AND). The shipped example is `ready-for-agent` + `auto-dev`.
 
-- **`ready-for-agent`** — the issue is spec-ready.
-- **`auto-dev`** — automate it.
-
-Parents/trackers are never auto-dev'd — see *Dependency DAG*.
+Admission refuses in order: an unrouted repo, an issue already carrying the claim label, a **`spec`**
+(the shape of a feature — its child issues are the work), then any missing trigger label. The spec
+check precedes the trigger check deliberately: a mislabelled spec is refused whatever else is on it.
 
 ### Event sources
 
 | Event | Purpose |
 |---|---|
-| `issues` (labeled) | admission trigger |
-| `issue_comment` | human gate · `@sunday` summon (issue) or PR-comment fix |
-| `pull_request_review_comment` | `@sunday` on an inline review comment → PR-comment fix |
-| `pull_request` (opened / closed) | stack dependents on open · restack on merge |
+| `issues` | admission on `opened` / `reopened` / `labeled`; a `closed` one re-evaluates what was deferred on it |
+| `issue_comment` | on a **pull request** → a PR-comment run; on an **issue** → a gate reply |
+| `pull_request_review_comment` | an inline `@sunday` on the Files-changed tab → a PR-comment run |
+| `pull_request` | `opened` / `reopened` / `closed` re-evaluates deferred items; a `closed` **merged** one also drives the restack |
 
 ## Label state machine
 
 GitHub labels are the **human-visible source of truth**.
 
 ```
-ready-for-agent + auto-dev   (admitted)
+trigger labels (all), no claim, not a spec   (admitted)
         → agent-working
-            ├── awaiting-human   gate: agent asked a question, resumes on reply
-            ├── agent-failed     could not reach green: draft PR + diagnosis, manual retry
-            └── PR opened        clean pass
+            ├── awaiting-human   gate: the agent asked a question, resumes on the reply
+            ├── quarantined      failed twice: set aside for a human, everything else runs on
+            ├── agent-failed     the agent's own verdict: draft PR + diagnosis, relabel to retry
+            └── PR opened        ready on a clean sign-off, draft on anything else
 ```
 
-- `auto-dev` stays until the PR merges.
-- Reconcile skips issues in `agent-working` / `awaiting-human` / `agent-failed` / with an
-  open agent PR.
+- Trigger labels stay until the PR merges.
+- **What stops a second start is not a label list.** It is three things together: the claim label
+  `agent-working`, the durable record in `var/state.json`, and a live PID lock in `var/running/`.
+  Reconcile releases a stale claim only when no process is on the item.
+
+## Preconditions
+
+A whole queue wait separates admission from the child's first line, and a whole agent run separates
+that first line from the push — so a run **re-asserts its invariants** rather than trusting the
+state it was handed (`CONTEXT.md`).
+
+- **Before it writes anything**, five assertions in cost order: the issue is still open, every
+  trigger label is still present, no pull request is already open for its branch, the base still
+  exists **on the origin**, and the sandbox image is still on the host.
+- **Before it ships**, one more — is the base still there? Minutes of agent run have passed since
+  the fetch, and the origin is what a pull request has to target.
+- Every assertion **fails closed**: the run ends with a durable outcome naming which invariant went,
+  and nothing is pushed.
 
 ## In-sandbox discipline
 
@@ -77,26 +98,31 @@ Every run injects a fixed baseline: **plan → test-first implementation → rev
 debug-on-red → sign-off → PR**, bounded at **2 fix attempts per finding**, always deferring
 to the child repo's own rules. The full prompt is [`sandbox-prompt.md`](sandbox-prompt.md).
 
+Those phases dispatch to Sunday's **floor** — the sub-agents and skills assembled per run and
+mounted into the sandbox, which a child's own `.claude/` overrides
+([`resource-management.md`](resource-management.md)).
+
 ## Dependency DAG & stacking
 
-- **Dependencies** = the union of native GitHub sub-issues/dependencies + a `Depends on #X`
-  body convention. **Hierarchy groups but does not block**; leaves are the unit of work;
-  parents are trackers, never auto-dev'd.
-- **Stacking:** issue *A* starts once blocker *B*'s **draft PR is open**; *A* branches from
-  *B*'s head and its PR targets *B*'s branch.
-- **On *B* merge:** the **listener (TS) drives** the restack — for each stacked dependent it
-  runs `git rebase --onto main <B-ref> A` (pure host git), retargets *A*'s PR base to `main`,
-  force-pushes, and cascades up the chain (parent before child). Clean rebases never involve an
-  agent.
+- **Blockers** are GitHub's **native dependency links**, falling back — only where a repo populates
+  none — to a **`## Blocked by` heading** in the issue body. Heading-scoped deliberately: prose that
+  happens to say "blocked by" is not a dependency.
+- **A read that failed is not an answer.** Unreadable blockers — a failed request, or a heading
+  naming something this repo cannot resolve — **defer**, never admit. Every unknown here resolves
+  toward waiting, because the alternative starts a real agent run on a wrongly-chosen base.
+- **More than one open blocker → defer.** A branch has one base, and picking either would ship the
+  other's work unreviewed.
+- **Stacking:** one open blocker whose **PR is open** → the dependent branches off `feat/<blocker>`
+  and its PR targets that branch. No open PR yet → defer; there is nothing worth forking from.
+- **On the blocker's merge**, the **parent** drives the restack, off the dependent's **stored fork
+  point** and never the blocker's tip ([ADR-0003](adr/0003-keep-pr-stacking.md)). Each step replays
+  `forkPoint..HEAD` onto the new base in a detached worktree under `var/restack/`, pushes
+  `--force-with-lease`, retargets the PR, and cascades parent-before-child.
 - **Global invariant: rebase only, never merge.** History stays linear; PR merges are
   squash/rebase.
-- **Rebase conflicts:** a genuine source conflict summons the agent **in the child sandbox** —
-  a direct headless `claude -p` on a worktree, credential-free of GitHub, driven by `/implement`
-  so it resolves → tests → verifies. The rewrite returns via the shared worktree and **the host
-  force-pushes** it (Sandcastle's add-only sync-out is bypassed — it can't represent a rewrite).
-  Green → force-push; can't reach green → **gate on the PR** (`awaiting-human`), one attempt, no
-  auto-retry, a human rebases by hand. Regenerable artifacts (lockfiles) are regenerated, never
-  agent-merged.
+- **A conflict gates the PR.** The step stops there — nothing is pushed, the branch has not moved —
+  and the PR gets `awaiting-human` plus a comment saying what conflicted. A human rebases by hand.
+  There is no in-sandbox conflict-fix agent.
 
 ## Concurrency
 
@@ -112,26 +138,46 @@ parent-before-child. Uncapped because a restack unblocks a stuck merge and confl
 other is on it. A restack step waits on a busy branch; a regular run whose branch has a restack in
 flight is skipped and retried when it frees. Draining is event-driven — the moment any run finishes.
 
+A slot and its branch lock are held for the **forked child's whole life**, not just for the fork
+call: the work item settles when the child exits.
+
 ## Human gate
 
 The **issue comment thread is the gate.** When a run needs a human, the agent:
 
-1. posts its question with a **dual sign** — a hidden marker `<!-- sunday:gate -->` (so the
-   listener skips its own comment on resume) plus a visible header (`🤖 Sunday · autonomous
-   agent`) so a human can tell the agent authored it (Sunday and you post under the same
-   account). The visible attribution also marks the PR body; a PR-comment feedback loop would
-   reuse the same helper.
+1. posts its question with a **dual sign** — a hidden marker `<!-- sunday:gate -->` (so Sunday
+   skips its own comment rather than answering itself) plus a visible header
+   (`🤖 **Sunday** · autonomous agent`) so a human can tell the agent authored it (Sunday and you
+   post under the same account). The visible attribution also marks the PR body.
 2. applies the `awaiting-human` label,
 3. exits.
 
-Your plain-English reply is picked up by the listener, which **resumes the captured session**
-(Sandcastle session capture/resume) and clears the label.
+Your plain-English reply is picked up by the **Assignor**, which re-forks the run with the
+`sessionId` held in `var/state.json` and clears the label.
+
+A **second marker**, `<!-- sunday:reply -->`, rides only on comments that *answer* a summon — how a
+PR-comment run tells an answered summon from an outstanding one. Sunday's milestone comments land on
+the same thread, and judged by the first marker alone one of those would bury a summon forever.
 
 ## Failure handling
 
-If a run cannot reach green within its fix bounds, it pushes WIP, opens a **draft PR** with a
-diagnosis comment, and applies **`agent-failed`**. No auto-resume — this is a deliberate
-handoff to a human, retried by relabelling.
+Every failure carries a **scope**, not a severity that means halt — what recognises each class, and
+what an operator then sees, is [ADR-0002](adr/0002-failure-scope-not-global-halt.md) and
+[`operability.md`](operability.md).
+
+- **`pipeline`** — a spent **quota**, a refused **credential**, and a dead container daemon. Only
+  these three stop everything, because every run would fail identically. A quota that named its
+  reset lifts itself shortly after it; one that did not waits for a human.
+- **`repo`** — a sandbox image that cannot be built or created. That **one repo** stops and every
+  other keeps running. It rechecks itself on a timer and, when the image builds clean, re-derives
+  that repo's outstanding work through the same per-repo pass a blackout uses.
+- **`item`** — only this work item is stuck. It gets **one** retry (an `unknown` carries its own
+  error back into the next run's prompt; a `transient` carries nothing — somebody else's 502 in the
+  prompt is noise) and, failing the same way again, is **quarantined**: labelled, notified, and left
+  untouched until a human removes the label. Everything else keeps running.
+- **`run-failed`** is the agent's own verdict and the one item-scope class with no retry — it ran,
+  and a second run would spend real quota re-deciding what it already decided. It gets
+  `agent-failed` and a human.
 
 ## PR output
 
@@ -141,61 +187,76 @@ handoff to a human, retried by relabelling.
 
 ## State & recovery
 
-- **GitHub labels + hidden comment markers** = the durable, human-visible truth.
-- **`.scratch/` at the workspace root** = the listener's operational tracking (in-flight
-  set, `session_id`, branch, last-seen comment id), keyed by `(repo, issue#)`, written
-  temp-then-rename. Form: **JSON** (recommended over SQLite for this size).
-- **Double-launch guard:** a claim label (`agent-working`) + the in-flight set, both checked
-  on the single serializing loop.
-- **Reconcile-on-restart:** re-derive *all* pending work from GitHub — new issues, missed
-  gate replies, missed PR-merge restacks, orphaned `agent-working`. Because GitHub is the
-  truth, an outage is a *delay, not a loss*; total host loss is recoverable.
+- **GitHub is the truth.** Labels and hidden comment markers are the durable, human-visible record;
+  everything below is re-derivable from them.
+- **`var/` is the durable state root** (layout under *Process & state model*). **`.scratch/` is
+  throwaway** — the only thing in it is the floor assembled for a run, and it is `rm -rf`-able at
+  any time.
+- **Double-launch guard:** the claim label, the durable record in `var/state.json`, and a live PID
+  lock in `var/running/`.
+- **A child outlives its parent by design.** It writes its outcome to `var/results/` *before* it
+  reports, so the next boot's sweep applies whatever finished and **adopts** the survivors still
+  holding a lock — a parent that dies mid-run loses nothing.
+- **Reconcile** re-derives both halves — every open issue, and every open pull request carrying an
+  unanswered summon — and hands each to the **same admission seam** a live delivery goes through, so
+  the recovery path cannot drift from the live one.
+- **A blackout** is what a dropped forwarder means: GitHub replays nothing. A respawned forwarder
+  catches its own repo up, and boot's reconcile covers whatever was missed while the parent was
+  down. An outage is a *delay, not a loss*.
 
 ## Resource management
 
-*(The M5 layer — design; build order in [`implementation-plan.md`](implementation-plan.md) §M5.)*
+Cost per run is tuned in three places, all of them
+[`resource-management.md`](resource-management.md)'s:
 
-- **Per-phase model/effort matrix.** Each run injects `.claude/agents/<phase>.md` sub-agent
-  definitions (model + effort frontmatter) from `config/roster.*`, mounted **read-only at the
-  sandbox user level** (`~/.claude/agents/`). A child's own **project-level** `.claude/agents/`
-  overrides them (project > user precedence) — so Sunday's roster is a **floor**, not an override.
-  `.env` `MODEL`/`MODEL_EFFORT` is the global fallback (and the orchestrator's own effort).
-- **Handoff-at-threshold.** The orchestrator session only grows across **repeated gate cycles** on
-  one issue (the sole session-resuming path; a quota pause restarts fresh). At a gate reply, if the
-  prior run's context (`input + cacheRead + cacheCreation`) is `≥ 120K`, TS does one bounded turn
-  that **emits** a handoff note as tagged output (never a file — the box is credential-free), writes
-  it host-side, and starts a **fresh** session seeded with the note + the human's reply. A handoff
-  turn that throws a transient/quota error is retried like any run; one that produces no usable note
-  fails the issue as `agent-failed` (a relabel retries fresh — it never re-resumes the bloated
-  session). Handoff notes live under `.scratch/<repo>/handoff/` and are cleared when the PR opens.
-- **Cost-weighted token report.** On run completion, a host-side (free, no-USD) report records
-  per-phase token classes, peak context/zone, and a weighted sort key that surfaces the real
-  offender (output is the priciest class). Stored under `.scratch/<repo>/token-report/`.
+- The **floor** — Sunday's sub-agents and skills, each carrying the per-phase model/effort row
+  `config/roster.json` gives it — is assembled per run and mounted into the sandbox. A child repo's
+  own `.claude/` overrides it by presence, so it is a floor and not an override.
+- The **token report** is host-side and free (no dollar figures anywhere), and lands under
+  `var/log/<owner>/<repo>/token-report/`.
+- The context-threshold **handoff** is
+  [**designed, not built**](resource-management.md#handoff-at-threshold).
 
-## Multi-repo layout
+## Process & state model
 
 ```
-sunday/                       parent workspace (this repo)
-├── listener/                 one listener process for the whole workspace
-├── config/                   repository.full_name → { path, imageName, promptFile, labels }
-├── .scratch/                 operational tracking (gitignored)
-└── repos/                    child clones (gitignored)
-    ├── <child-a>/            own origin, own .sandcastle/, own image, own rules
-    └── <child-b>/
+sunday                       the parent — singleton: services, Assignor, queue, receiver
+├── gh webhook forward       one in-process child per routed repo → the receiver
+└── work-item child × ≤ cap  forked per work item: issue/run.mts | pr/run.mts
+    └── Docker sandbox       one per run, against repos/<child>, credential-free
 ```
 
-The parent holds **one** Sandcastle install, the listener, config, and `.scratch`. Children
-are independent clones with their own `origin` and `.sandcastle/`. The concurrency cap is
-global across the workspace.
+```
+var/                          durable runtime state (gitignored)
+├── state.json                per-work-item state — status, session, base, fork point
+├── pause.json                why the pipeline is paused, and until when
+├── results/<key>.json        a finished child's outcome, for the parent to apply
+├── running/<key>.pid         the PID lock a live work item holds
+├── restack/<repo>#<branch>/  the detached worktree one restack step rebases in
+└── log/
+    ├── events.jsonl          append-only: milestones, alerts, errors
+    ├── sunday.log            lines with no work item to attribute them to
+    ├── <owner>/<repo>/<issue|pr-n>/run.log
+    └── <owner>/<repo>/token-report/
+```
+
+The parent holds **one** Sandcastle install, the routing table, the floor and `var/`. Children are
+independent clones with their own `origin` and their own `.sandcastle/`, and Sunday never tracks
+them. The concurrency cap is global across the workspace. The source tree itself is
+[`README.md`](../README.md#repository-structure)'s.
 
 ## Host & supervision
 
-- **Toolchain:** provisioned by `devbox.json` (node, gh, git, …), identical on macOS and
-  Linux. Docker's daemon is a separate host-level install.
-- **Process supervision:** a supervisor keeps the listener and the per-repo `gh webhook
-  forward` running — **systemd** on Linux (the reference host), **launchd** or a foreground
-  process on macOS for development.
-- **Reference host:** an always-on Linux box (*example:* an Ubuntu mini-PC).
+- **Toolchain:** provisioned by `devbox.json` (node, gh, git, …), identical on macOS and Linux.
+  Docker's daemon is a separate host-level install.
+- **One supervised host process** under process-compose (`devbox services up`): `restart: always`,
+  readiness-probed on the receiver's port. It runs on the host, not in a container, so it spawns
+  sandboxes on the host daemon directly.
+- **Singleton.** The queue, the claim label and the parent's own children all assume one process —
+  the supervisor restarts it on death but never replicates it.
+- **It starts its own forwarders**, so there is no second supervised process and no launcher script
+  between them. Startup ordering, restart recovery and rollback are
+  [`supervision.md`](supervision.md).
 
 ## Auth
 
@@ -204,16 +265,19 @@ Agent-agnostic. **Claude is the default** (auth via a Max subscription token —
 API key). Configured in `.env` (`AGENT`, `MODEL`, `MODEL_EFFORT`, and the auth var). All runs
 share one quota, which is why the concurrency cap is global.
 
-Agent-agnostic within one limit: the agent must run **headless inside the Docker sandbox**.
-Sandcastle is what runs it in the container, so swapping to an agent it does not yet support is
-more than a config line — that agent has to be runnable in the sandbox first.
+Agent-agnostic within one limit: the agent must run **headless inside the Docker sandbox**. It lives
+behind a seam (`services/agent/index.mts`) that names no library type in its request or its result,
+so a second agent is a new file behind that seam rather than a refactor of every caller — but it
+still has to be runnable in the box first, which is more than a config line.
 
 > A subscription-token automation path may warrant checking the agent vendor's current terms.
 
 ## Accepted risks
 
-- **Quota ceiling** — ~5 agents/issue × cap 3, plus rebase agents, on one shared plan may hit
-  rate limits; levers: lower the cap, thin the roster.
+- **Quota ceiling** — ~5 agents/issue × cap 3 on one shared plan may hit rate limits; levers: lower
+  the cap, thin the roster.
 - **Ready stacked PRs on unreviewed bases.**
-- **Sandcastle is early / solo-maintained** — spike before committing.
-- **`gh webhook forward` has no replay** — reconcile compensates.
+- **Sandcastle is early / solo-maintained** — and it is a committed dependency
+  (`@ai-hero/sandcastle` 0.12.0), not a spike.
+- **`gh webhook forward` has no replay** — a **blackout** is re-derived by reconcile and by the
+  per-repo catch-up a respawned forwarder runs.

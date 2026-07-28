@@ -11,13 +11,17 @@ outage or a quota wall is a delay, never a silent loss.
 
 ## Failure taxonomy
 
+> **This section predates [ADR-0002](adr/0002-failure-scope-not-global-halt.md).** A failure now
+> carries a **scope** — `pipeline`, `repo` or `item` — and that, not a severity, decides how far it
+> reaches. ADR-0002 and [`architecture.md`](architecture.md#failure-handling) are the model of record.
+
 Every failed run is mapped to one class, which drives the response:
 
 | Class | Recognised by | Action | Severity |
 | --- | --- | --- | --- |
-| **quota** | a usage/limit error carrying a reset time | Pause **both** lanes; auto-resume at **reset + 5 min**. No parseable reset → hold and comment the issue `awaiting-human` (a human lifts it, see below). | P2 |
+| **quota** | a usage/limit error carrying a reset time | Pause **both** lanes; auto-resume at **reset + 60s**. No parseable reset → hold and comment the issue `awaiting-human` (a human lifts it, see below). | P2 |
 | **auth (403)** | a 403 / invalid-credential error | Abort every in-flight run and **halt**; a human re-authenticates, and reconcile re-admits the work on the next boot. | P1 |
-| **transient** | 429 / network / 5xx (or a `retry-after`) | **Bounded exponential backoff** (honours `retry-after`), then, after 3 tries, the `agent-failed` path. | P3 |
+| **transient** | 429 / network / 5xx (or a `retry-after`) **One** retry — re-queued, no backoff. A `retry-after` is not waited out: it is what tells a rate-limited blip from a quota wall at classification time. Failing again leaves the item `failed` for a human to re-label. | P3 |
 | **run-level** | the agent ran but produced nothing shippable (no valid result tag, a dirty worktree, an `error_*` result subtype) | Flag the issue `agent-failed`; no PR to open. | P3 |
 | **setup** | the sandbox couldn't be *created* — `Provider '…' create failed` / image not found locally (unbuilt image, docker daemon down) | **Halt + self-heal**: the setup watcher re-reads `config/repos.json` and re-runs the image preflight every 5 min, rebuilds once the fix lands, auto-resumes, and re-admits the issues that died on it (see below). | P1 |
 | **unknown** | anything unrecognised | **Fail-safe halt** — stop and notify, with the raw excerpt captured for inspection. Never silently dropped. | P1 |
