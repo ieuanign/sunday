@@ -1,4 +1,4 @@
-// test/smoke-restack-races.mts — the two merge races that motivated V2's
+// test/smoke-restack-races.mts — the two merge races that motivated Sunday's
 // fork-point anchor (ADR-0003), reproduced against a real bare origin.
 //   node test/smoke-restack-races.mts
 //
@@ -11,7 +11,7 @@
 //      forked from, so the rebase SUCCEEDS and quietly force-pushes the blocker's
 //      abandoned commits onto the dependent.
 //
-// V2 anchors on the dependent's OWN recorded fork point instead (`var/state.json`,
+// Sunday anchors on the dependent's OWN recorded fork point instead (`var/state.json`,
 // #42), which sits inside its ancestry — so neither race is expressible. Both
 // scenarios drive the live path (`Restacker.onMerge`, with an inline drain standing
 // in for the scheduler's restack lane) and assert observable repo state on the
@@ -121,7 +121,7 @@ function aheadOfMain(fx: Fixture, branch: string): number {
 // `refs/pull/<n>/head` once the branch is deleted. v1 hands B2 to the restack step
 // as the upstream — a commit the child clone has never heard of — so the step dies
 // on the first git command that names it, leaving the dependent stacked on a branch
-// that no longer exists. B1 is in the dependent's OWN ancestry, and that is what V2
+// that no longer exists. B1 is in the dependent's OWN ancestry, and that is what Sunday
 // recorded when it created the branch.
 {
   const fx = makeFixture("restack-deleted-branch");

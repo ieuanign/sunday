@@ -1,6 +1,6 @@
 // services/agent/token-report.mts — M5.3 cost-weighted token report (FREE, host-side,
 // no USD). Was v1's listener/token-report.mts; the arithmetic is ported untouched,
-// because these are the numbers #37's PR footer and #36's handoff threshold read.
+// because these are the numbers #37's PR footer and #67's handoff threshold read.
 //
 // On run completion the host reads the captured Claude session JSONL (the run's
 // `sessionFilePath`) plus its per-sub-agent files, sums real token usage, and ranks

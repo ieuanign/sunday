@@ -1,4 +1,4 @@
-// test/smoke-restacker.mts — hermetic smoke for restack-on-merge (V2, #43).
+// test/smoke-restacker.mts — hermetic smoke for restack-on-merge (#43).
 //   node test/smoke-restacker.mts
 //
 // Real git against a temporary bare origin (test/git-fixture.mts), a real StateStore

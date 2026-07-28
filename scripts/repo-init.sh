@@ -129,7 +129,7 @@ cat <<NEXT
 
 Next steps (child-specific — your judgement):
   1. Edit ${sc}/Dockerfile — base it on ${name}'s own dev image (see the onboarding recipe).
-     The listener's boot preflight (re)builds every configured image automatically (and its
+     Sunday's boot preflight (re)builds every configured image automatically (and its
      setup watcher picks the edit up while halted) — to build by hand instead:
        docker build --provenance=false -t ${image} \\
          --build-arg AGENT_UID=\$(id -u) --build-arg AGENT_GID=\$(id -g) ${sc}

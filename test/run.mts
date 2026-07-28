@@ -1,7 +1,7 @@
 // test/run.mts — the `npm test` entrypoint. Runs every hermetic smoke in this
 // dir (`smoke-*.mts`) as its own subprocess (each one owns `process.exit`), and
 // aggregates pass/fail. $0, no network/GitHub — the live smokes (dag, pr-comments,
-// gate, telegram) stay manual under .scratch/. `node test/run.mts` or `npm test`.
+// gate) stay manual under .scratch/. `node test/run.mts` or `npm test`.
 import { execFileSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";

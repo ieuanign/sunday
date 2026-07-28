@@ -1,6 +1,6 @@
 // assignor/scheduler.mts — the work loop: what starts, what waits, and what is already
 // running. Ported from v1's `listener/scheduler.mts` with its one console write replaced
-// by an injected logger, since a V2 module says everything through the Logger.
+// by an injected logger, since every module says everything through the Logger.
 //
 // TWO LANES, ONE SHARED PER-BRANCH LOCK:
 //  · Regular lane (issue + PR-comment runs) — capped at maxConcurrency (one
@@ -22,7 +22,7 @@ export interface WorkItem {
   key: string;
   /** The branch this item touches — the per-branch lock key. */
   branch: string;
-  /** The work to perform; the scheduler is agnostic to what it does. In V2 this is
+  /** The work to perform; the scheduler is agnostic to what it does. In practice this is
    *  typically a forked child, and it settles when that child exits — so the cap and
    *  the branch lock hold for the child's whole life. */
   run: () => Promise<void>;
@@ -50,7 +50,8 @@ export interface Scheduler {
   /** Lift the pause and drain whatever was retained. */
   resume(): void;
   isPaused(): boolean;
-  /** A point-in-time view for `sunday status` / Telegram `/status` (M3.6). */
+  /** A point-in-time view of both lanes — what is in flight, what is queued, and
+   *  whether the scheduler is paused. */
   snapshot(): SchedulerSnapshot;
 }
 

@@ -1,4 +1,4 @@
-// test/smoke-boot.mts — hermetic smoke for what happens when the V2 parent starts.
+// test/smoke-boot.mts — hermetic smoke for what happens when the parent starts.
 //   devbox run node test/smoke-boot.mts
 // Section one is PURE: the durable pause state (assignor/pause.mts) that survives the
 // restart the in-memory scheduler flag does not, and the rule that decides what boot does

@@ -2,7 +2,7 @@
 //
 // The tuning surface for the in-sandbox discipline roster: one row per phase,
 // each naming the sub-agent it dispatches to plus the model + reasoning effort to
-// run that phase at. The listener merges these onto the tracked agent BODIES
+// run that phase at. Sunday merges these onto the tracked agent BODIES
 // (.claude/agents/<agent>.md) at inject time (M5.1b) — bodies are the single
 // discipline source; this file is the knob you edit to retune a phase.
 //

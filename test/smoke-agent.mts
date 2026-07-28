@@ -1,4 +1,4 @@
-// test/smoke-agent.mts — hermetic smoke for the agent seam (V2, issue #33).
+// test/smoke-agent.mts — hermetic smoke for the agent seam (issue #33).
 //   devbox run node test/smoke-agent.mts
 // What can be wrong here without spending quota: which implementation the AGENT setting
 // selects, what an unsupported setting says, and what is refused BEFORE a run starts.
@@ -125,9 +125,8 @@ const rejection = async (promise: Promise<unknown>): Promise<string> => {
   /** The two files plan.md gives the library to: the implementation, and the service
    *  that owns containers and images. */
   const ALLOWED = ["services/agent/claude.mts", "services/sandbox.mts"];
-  /** `listener/` is v1, which imports it and is deleted at cutover (#45); `repos/` holds
-   *  child clones that are not this repo's code. */
-  const SKIP = new Set(["node_modules", "listener", "repos"]);
+  /** `repos/` holds child clones that are not this repo's code. */
+  const SKIP = new Set(["node_modules", "repos"]);
   const IMPORTS_LIBRARY = /(?:from|import|require)\s*\(?\s*["']@ai-hero\/sandcastle/;
 
   const importers: string[] = [];

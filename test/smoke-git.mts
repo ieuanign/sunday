@@ -1,4 +1,4 @@
-// test/smoke-git.mts — hermetic smoke for the child checkout's git seam (V2, #36).
+// test/smoke-git.mts — hermetic smoke for the child checkout's git seam (#36).
 //   node test/smoke-git.mts
 // Real git against a temporary bare origin (test/git-fixture.mts): offline, $0, no
 // network and no GitHub. `Gh` is deliberately untested — it needs a token and the

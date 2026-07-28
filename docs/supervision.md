@@ -14,9 +14,6 @@ The stack is one **host process** (not a container):
 There is no second supervised process and no launcher script: the process that owns the forwarder
 children is the one that can say something when one dies and catch that repo up (#40).
 
-v1 (`listener/listen.mts`) is **not** supervised — it stays hand-runnable, see
-[Manual invocation](#manual-invocation-debugging).
-
 ## Why host processes, not containers
 
 Sunday spawns Sandcastle Docker sandboxes on the **host** daemon. If the parent itself
@@ -25,7 +22,7 @@ bind-mounts against the host daemon — so `repos/` would have to be mounted at 
 with a matching working directory, and the docker socket passed through (docker-out-of-docker).
 
 Running it as a supervised **host process** sidesteps all of that: it talks to the host
-Docker daemon directly, exactly as a hand-run `npm run v2` does. process-compose
+Docker daemon directly, exactly as a hand-run `npm run sunday` does. process-compose
 gives the supervision (restart, health) without containerising anything.
 
 ## Running it
@@ -66,7 +63,7 @@ is answered as soon as the receiver serves, which is *before* the boot sequence:
 minutes, and a probe unanswered that long is the SIGKILL/restart loop
 [ADR-0001](adr/0001-fork-per-work-item.md) exists to stop. The probe port is a literal in
 `process-compose.yaml` (probe ports are ints, so they cannot read the env) — keep it in sync with
-`V2_PORT`.
+`SUNDAY_PORT`.
 
 Restart is safe by design. On every (re)start the parent:
 
@@ -123,7 +120,7 @@ untouched) before each (re)spawn, and a drop that fails never blocks the spawn.
   `devbox services up` in the foreground.
 - **One live agent run:** `tail -f var/log/<owner>/<repo>/<issue>/run.log` — each run streams to
   its own file; lines with no run to attribute them to land in `var/log/sunday.log`.
-- **What Sunday has done:** `var/log/events.jsonl` (`npm run status` still reports v1's state).
+- **What Sunday has done:** `var/log/events.jsonl`.
 
 ## Manual invocation (debugging)
 
@@ -131,21 +128,44 @@ Supervision is optional plumbing — the parent is still just a process. To run 
 attach a debugger or watch raw stdout), one terminal is enough; it starts its own forwarders:
 
 ```bash
-npm run v2            # node --env-file=.env main.mts
+npm run sunday        # node --env-file=.env main.mts
 ```
 
-v1 is hand-run only now, and its relay has no launcher script left, so it takes a terminal for the
-listener plus one per routed repo:
+## Rollback
+
+Rolling back to the pre-cutover pipeline is **one checkout plus a routing-table restore** — there
+is no migration to reverse: GitHub is the source of truth, the claim label (`agent-working`) is the
+same one both pipelines set, and everything either pipeline keeps locally is disposable.
 
 ```bash
-# Terminal 1 — the v1 listener
-node --env-file=.env listener/listen.mts
+devbox services stop                 # 1. stop CLEANLY — see the warning below
 
-# Terminal 2… — one forwarder per repo
+git log --oneline --grep '#45' main  # 2. find the commit the cutover PR landed as
+git checkout <cutover-sha>^1         #    its first parent is main as it stood before
+
+cp <your-backup>/repos.json config/  # 3. put the pre-cutover routing table back
+
+# 4. v1 is hand-run: a terminal for the listener, plus one per routed repo
+node --env-file=.env listener/listen.mts
 gh webhook forward --repo <owner/repo> \
   --events issues,issue_comment,pull_request,pull_request_review_comment \
   --url http://localhost:8787/
 ```
+
+1. **Stop cleanly, never SIGKILL.** `gh webhook forward` removes its own dev webhook on a clean
+   exit; a hard-killed one strands it and every later start dies on `HTTP 422 … Hook already exists
+   on this repository`. Two relays into the same port also means every event is delivered twice, so
+   the running pipeline must be down before the other one comes up.
+2. **The anchor needs no prior arrangement.** PRs land squashed, so the cutover is one commit on
+   `main` and its first parent is the branch exactly as it stood before — nothing had to be tagged
+   ahead of time, and nothing was. Both are findable after the fact: `git log` above, or the commit
+   the merged PR links to. The checkout brings v1 back whole — `listener/`, its smokes,
+   `npm run status` and the Telegram command poller are all there.
+3. **`config/repos.json` is gitignored runtime state**, so the checkout does not restore it. The
+   cutover trimmed it to finance; the backup taken before that trim is what widens routing again.
+4. **State does not need reversing.** v1 reads `.scratch/`, the current pipeline reads `var/`, so
+   neither sees the other's — and either one re-derives its outstanding work from GitHub on boot.
+   Delete `var/` only if you want the next start to rebuild from GitHub alone.
 
 ## Verify
 

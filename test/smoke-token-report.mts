@@ -2,8 +2,8 @@
 //   devbox run node test/smoke-token-report.mts
 // Deterministic synthetic fixtures (verified JSONL shape) + a real captured probe
 // session if one is around (grounds the per-phase attribution on real data). $0.
-// The arithmetic assertions are unchanged across the V2 move (issue #33) — the numbers
-// #37's PR footer and #36's handoff threshold read must not move with the module.
+// The arithmetic assertions are unchanged across the move (issue #33) — the numbers
+// #37's PR footer and #67's handoff threshold read must not move with the module.
 
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";

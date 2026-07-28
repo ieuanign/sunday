@@ -1,7 +1,7 @@
 # Resource management (M5)
 
-How Sunday tunes cost per run: a per-phase model/effort **matrix**, a context-threshold
-**handoff** that keeps long-lived sessions sharp, and a cost-weighted **token report**. All local,
+How Sunday tunes cost per run: a per-phase model/effort **matrix** and a cost-weighted **token
+report**, plus a context-threshold **handoff** that is designed but not built (below). All local,
 all `$0` (model switching is free on the Max token; no dollar figures anywhere).
 
 ## Per-phase matrix + the discipline floor
@@ -22,9 +22,11 @@ presence (Claude Code's project > user precedence), so the floor is a floor, not
   | Debug | debugger | opus | xhigh |
   | Sign-off | sign-off | sonnet | medium |
 
-- The injector merges the matrix onto the tracked agent bodies per run (`.scratch/<repo>/<issue>/
-  claude/`, disposable). `.env` `MODEL` / `MODEL_EFFORT` are the **global fallback** — the
-  orchestrator session's own model/effort.
+- The floor is assembled per run — the matrix merged onto the tracked agent bodies — under
+  `.scratch/floor/<work-item key>/`, one dir per work item so concurrent runs never share a floor.
+  Throwaway by construction: `.scratch/` is `rm -rf`-able, and nothing durable lives there.
+  `.env` `MODEL` / `MODEL_EFFORT` are the **global fallback** — the orchestrator session's own
+  model/effort.
 
 > **Why a single `~/.claude` mount (not `~/.claude/{agents,skills}`):** two subdir mounts make Docker
 > create the parent `~/.claude` root-owned, so the agent user can't write `~/.claude/projects/` and
@@ -32,13 +34,18 @@ presence (Claude Code's project > user precedence), so the floor is a floor, not
 
 ## Handoff-at-threshold
 
+> **Designed, not built.** The implementation lived in v1's `listener/` and went with it in #45;
+> nothing reads `HANDOFF_CTX_THRESHOLD` today, so a long gate cycle just keeps resuming its
+> session. The design is kept here for whoever reimplements it.
+
 The orchestrator session only grows across repeated **gate cycles** on one issue. At a gate resume,
 the host reads the prior context (`input + cacheRead + cacheCreation`):
 
 - **`< HANDOFF_CTX_THRESHOLD`** (default `120000`, `.env`-tunable) → cheap `run({ resumeSession })`.
 - **`≥ threshold`** → one bounded turn writes a handoff note (emitted as tagged output — nothing is
   written inside the credential-free box), then a **fresh** session is seeded with the note + the
-  human's reply. Notes live at `.scratch/<repo>/handoff/<issue>-<n>.md`, cleared when the PR opens.
+  human's reply. v1 kept notes at `.scratch/<repo>/handoff/<issue>-<n>.md`, cleared when the PR
+  opens; that is v1's path — a reimplementation belongs under `var/`, per `lib/paths.mts`.
 
 If the handoff turn can't produce a usable note, the issue fails as **`agent-failed`** (a relabel
 retries fresh) — never `awaiting-human`, which would loop re-resuming the bloated session.
@@ -52,6 +59,8 @@ ranking by raw tokens would bury the real offender.
 
 - Per row: the 4 raw token fields + `cacheHitRatio` + flags (`HIGH_OUTPUT`, `RECACHE`, `NEAR_ZONE`
   ≥120K, `OVER_ZONE` ≥150K); per run: totals by class, peak ctx + zone, top consumers.
-- Stored at `.scratch/<repo>/token-report/<run-id>.{json,md}` + `history.jsonl`; a headline is logged.
+- Stored under `var/log/<owner>/<repo>/token-report/` as `<run-id>.{json,md}` + `history.jsonl`,
+  beside that repo's run logs — durable state, not throwaway, so spend history survives a
+  `.scratch/` wipe. A headline is logged.
 - **Sentry-like Telegram:** only important events reach your phone — a PR opening and failures.
   Token reports stay on disk + console (no per-run spam).

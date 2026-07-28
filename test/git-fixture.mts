@@ -1,6 +1,6 @@
-// test/git-fixture.mts — the real-git fixture harness (V2, issue #32).
+// test/git-fixture.mts — the real-git fixture harness (issue #32).
 //
-// The merge races V2 re-anchors stacking against (ADR-0003) — a blocker's branch
+// The merge races Sunday re-anchors stacking against (ADR-0003) — a blocker's branch
 // deleted on merge, a blocker force-pushed, a swallowed blocker read — are rare,
 // silent, and unprovable by hand. This harness is the second test seam the PRD
 // names: real git against a temporary BARE ORIGIN, so a scenario can script
@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import type { WorkItem } from "#listener/scheduler.mts";
+import type { WorkItem } from "#assignor/scheduler.mts";
 import type { RepoConfig } from "#config/repos.mts";
 
 /** The repo root — `test/..`. Fixtures hang off it under `.scratch/`. */
@@ -112,7 +112,7 @@ export interface Fixture {
   /** The clone the scenario authors history in. Never the repo under test. */
   readonly author: string;
   /** Routing entry for the child, ready to hand to production code. Its `path` is
-   *  RELATIVE TO THE REPO ROOT — that is what the listener resolves it against. */
+   *  RELATIVE TO THE REPO ROOT — that is what Sunday resolves it against. */
   readonly cfg: RepoConfig;
   /** Run git in `dir` (any of the fixture's repos) and return trimmed stdout. */
   git(dir: string, ...args: string[]): string;
@@ -281,7 +281,7 @@ export function ok(label: string, cond: boolean, detail = ""): void {
 /** A behaviour we WANT but do not yet have: `desired` is the assertion the fixed
  *  code would satisfy. While the defect is present it is announced loudly and
  *  costs nothing — `npm test` has to stay green so it can keep gating the rest of
- *  V2 rather than being a permanently red suite nobody reads. The moment the
+ *  the pipeline rather than being a permanently red suite nobody reads. The moment the
  *  defect is fixed the marker FAILS, which is the point: it forces whoever fixed
  *  it to promote this line to a real `ok` and delete the marker. */
 export function knownDefect(label: string, desired: boolean, detail = ""): void {

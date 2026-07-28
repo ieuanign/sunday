@@ -1,5 +1,5 @@
 // services/github/index.mts — everything Sunday says to GitHub, in one place. v1
-// spread 39 `sh("gh", …)` call sites across the tree; V2 collapses them here so the
+// spread 39 `sh("gh", …)` call sites across the tree; they are collapsed here so the
 // shape of every write is visible at once. The spine writes exactly one thing — the
 // claim — #35 adds the reads a restart re-derives its work from, and #36/#40/#42 grow
 // the rest.

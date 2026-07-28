@@ -4,7 +4,7 @@
 //
 // One `gh webhook forward` per routed repo, in-process. The relay used to be
 // `scripts/webhook-forward.sh` — bash, so it could only `echo`, and on 2026-07-24 one
-// dropped forwarder blacked a repo out for 8h44m with a healthy listener and nobody told.
+// dropped forwarder blacked a repo out for 8h44m with a healthy parent and nobody told.
 // A process that owns the children can say something when one dies and measure the gap.
 //
 // It CONSTRUCTS NOTHING: the spawn, the hook drop, the timings and the Logger all come in

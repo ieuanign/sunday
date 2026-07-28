@@ -12,7 +12,7 @@ otherwise defers to each repo.
 
 > **Status: pipeline built (M1–M5), live-hardening in progress.** Everything here is built and
 > smoke-verified; a few paths are still owed an end-to-end live run — a real quota pause, a
-> Telegram round-trip, a supervised kill → restart → reconcile, a forced ≥120K handoff.
+> supervised kill → restart → reconcile.
 
 ## How it works
 
@@ -36,9 +36,9 @@ and recovery) is [`docs/architecture.md`](docs/architecture.md).
 | --- | --- |
 | [`CONTEXT.md`](CONTEXT.md) | The shared vocabulary — what a work item, a blackout, a fork point or the floor *is*. |
 | [`docs/architecture.md`](docs/architecture.md) | The pipeline design: shape, trigger labels, the label state machine, dependency stacking + restack, concurrency lanes, the human gate, state and recovery, auth. |
-| [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, `npm run status`, and the optional Telegram control channel. |
-| [`docs/supervision.md`](docs/supervision.md) | Running unattended: `devbox services up`, the singleton rule, startup ordering and the readiness probe, the in-process forwarders and blackout catch-up, restart recovery, and the manual invocation for debugging. |
-| [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, context-threshold handoff, the cost-weighted token report. |
+| [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, and the optional Telegram notifications. |
+| [`docs/supervision.md`](docs/supervision.md) | Running unattended: `devbox services up`, the singleton rule, startup ordering and the readiness probe, the in-process forwarders and blackout catch-up, restart recovery, the manual invocation for debugging, and how to roll back. |
+| [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, the cost-weighted token report — plus the context-threshold handoff, designed but not built. |
 | [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) | The baseline discipline injected into every issue run, and the result contract the host reads back. |
 | [`docs/sandbox-pr-comment-prompt.md`](docs/sandbox-pr-comment-prompt.md) | The same, for an `@sunday` summon on a pull request. |
 | [`docs/adr/`](docs/adr/) | Decisions that constrain the code: fork per work item, failure scope over a global halt, keeping PR stacking. |
@@ -58,7 +58,7 @@ everything else is declared in `devbox.json`:
 devbox shell          # enter the provisioned env; its init hook also installs the gh webhook
                       #   extension (cli/gh-webhook) — gh ships no built-in `webhook` command
 gh auth login         # gh drives the webhook forwarders, PRs, labels, comments
-cp .env.example .env  # agent auth + webhook secret (+ optional Telegram keys)
+cp .env.example .env  # agent auth (+ optional Telegram keys)
 ```
 
 Devbox provisions the **parent host** toolchain only — each child sandbox gets its dependencies
@@ -69,10 +69,10 @@ pointers are in `.env.example`). It must be runnable **headless inside the Docke
 agent Sandcastle does not support is more than a config line
 ([`docs/architecture.md`](docs/architecture.md#auth)).
 
-**Telegram (optional).** Phone notifications plus `/status` `/pause` `/resume` `/resume-at` over
-polling — $0, no public endpoint, nothing extra to install. Off until `TELEGRAM_BOT_TOKEN` +
+**Telegram (optional).** Phone notifications — $0, no public endpoint, nothing extra to install.
+Outbound only: Sunday sends, it takes no commands back. Off until `TELEGRAM_BOT_TOKEN` +
 `TELEGRAM_CHAT_ID` are set in `.env`; setup steps are in
-[`docs/operability.md`](docs/operability.md#telegram-control-optional).
+[`docs/operability.md`](docs/operability.md#telegram-notifications-optional).
 
 ## Onboarding a repo
 
@@ -110,7 +110,7 @@ works from anywhere.
 devbox services up            # foreground — the process + a live TUI
 devbox services up -b         # background
 devbox services stop          # stop the stack
-npm run v2                    # or run it by hand, unsupervised
+npm run sunday                # or run it by hand, unsupervised
 ```
 
 It is **one process** (`main.mts`): it starts a `gh webhook forward` per routed repo itself, so
@@ -133,8 +133,6 @@ operator guide is [`docs/supervision.md`](docs/supervision.md).
 ├── services/              the seams: GitHub CLI + receiver + forwarders, sandbox, logging, git
 ├── issue/                 the forked per-work-item worker (one process per run, ADR-0001)
 ├── lib/                   shared plumbing — the `var/` paths, shell-out, outcome + lock files
-├── listener/              v1's single-process pipeline — hand-run only now, and the source of
-│                          `npm run status` (docs/supervision.md#manual-invocation-debugging)
 ├── config/                per-repo routing (`repos.json`, gitignored; `repos.example.json`
 │                          tracked) + `roster.json`, the per-phase model/effort matrix
 ├── .claude/               the shipped discipline floor — the agent roster + its skills
@@ -148,8 +146,8 @@ Children are independent clones with their own `origin`, `.sandcastle/` and agen
 never tracks or commits them, and every git operation inside a run resolves to the child's own
 `.git`/`origin`, so branches and pushes land in the child, never in Sunday.
 
-Durable runtime state and logs are gitignored, under `var/` (v1's live under `.scratch/`) — what
-is written where is in [`docs/supervision.md`](docs/supervision.md#watching-a-run) and
+Durable runtime state and logs are gitignored, under `var/` — what is written where is in
+[`docs/supervision.md`](docs/supervision.md#watching-a-run) and
 [`docs/operability.md`](docs/operability.md#where-things-are-recorded).
 
 ## Security
@@ -159,9 +157,9 @@ is written where is in [`docs/supervision.md`](docs/supervision.md#watching-a-ru
   secrets) is published.
 - **Sandboxes are credential-free** — each run executes in Docker as a **non-root** user and
   cannot push; the host performs every GitHub write. Agents never run directly on the host.
-- **Telegram control fails closed** *(if enabled)* — a `chat_id` allowlist is the sole authz, and
-  polling means there is no inbound public endpoint to forge. `TELEGRAM_BOT_TOKEN` can drive the
-  pipeline, so treat it as a secret ([`docs/operability.md`](docs/operability.md#authz)).
+- **Telegram is outbound only** *(if enabled)* — Sunday sends to one `chat_id` and takes no
+  commands back, so there is no inbound surface to forge. `TELEGRAM_BOT_TOKEN` still posts as your
+  bot, so treat it as a secret ([`docs/operability.md`](docs/operability.md#authz)).
 - **The private recipe stays private** — the individual tooling used to improve Sunday itself
   (`CLAUDE.md`, `docs/agents/`, most of `.claude/`) is gitignored and never published. The
   exception is the shipped discipline floor — `.claude/agents/` and the

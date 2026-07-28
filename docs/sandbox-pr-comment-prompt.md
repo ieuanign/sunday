@@ -1,7 +1,7 @@
 # Sandbox PR-comment prompt (v0)
 
 Baseline Sunday injects when a human summons it with **@sunday** on a pull request. Governs
-in-sandbox behaviour only; the listener handles orchestration and every GitHub action. Same
+in-sandbox behaviour only; Sunday handles orchestration and every GitHub action. Same
 credential-free contract as [`sandbox-prompt.md`](sandbox-prompt.md) — read that for the roster and
 git invariants; this prompt only differs in the trigger and the outcome shape.
 

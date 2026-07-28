@@ -135,7 +135,7 @@ async function run() {
   }
 
   // ── I: the scheduler itself says nothing — every line goes through the injected
-  //    logger (a bare console write in a V2 file fails `npm run lint`), and as `info`:
+  //    logger (a bare console write fails `npm run lint`), and as `info`:
   //    `milestone` is reserved for the two events that post a comment on the issue ──
   {
     const h = harness(1);

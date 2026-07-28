@@ -39,8 +39,9 @@ export interface AgentRepo {
 
 /** How the agent must hand its result back. `schema` present → the tag's contents are
  *  JSON, validated against it, and `output` is that object; absent → `output` is the
- *  tag's raw text. v1 needs both shapes (issue result, PR-comment result, handoff
- *  note), so the seam carries both rather than forcing a caller to parse. */
+ *  tag's raw text. The seam carries both so a caller with a JSON contract (the issue
+ *  and PR-comment results) never parses the tag itself, and one without a schema still
+ *  gets its text. */
 export interface AgentOutputContract<T> {
   /** The XML tag the agent wraps its result in (e.g. `sunday-result`). The prompt must
    *  contain the literal — the caller composes the prompt, so the caller owns that. */
@@ -77,7 +78,7 @@ export interface AgentRunRequest<T = string> {
 }
 
 /** What one run consumed. Plain numbers — `#37`'s PR footer reports the totals and
- *  `#36`'s handoff threshold reads the context. */
+ *  `#67`'s handoff threshold reads the context. */
 export interface AgentUsage {
   input: number;
   cacheCreation: number;

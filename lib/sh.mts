@@ -1,5 +1,4 @@
-// lib/sh.mts — shelling out. Ported from v1 (`listener/helper.mts`) rather than
-// imported: v1 and V2 must not cross-import until cutover deletes v1.
+// lib/sh.mts — shelling out. Ported from v1 (`listener/helper.mts`).
 //
 // Changed from v1 deliberately: the stderr write-through is GONE — it was itself a bare
 // console write, and the stderr still travels on the thrown error, which is what the

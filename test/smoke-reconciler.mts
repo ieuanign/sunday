@@ -5,7 +5,6 @@
 // Sunday has not answered. The sections after it drive the real `Reconciler` over the
 // real Assignor, scheduler and state store, with GitHub substituted by synthetic issue
 // lists and comment streams — the one thing here that reaches the world.
-// Named apart from v1's `test/smoke-reconcile.mts`, which covers v1's own sweep.
 // $0, no network, no GitHub.
 
 import { rmSync } from "node:fs";
