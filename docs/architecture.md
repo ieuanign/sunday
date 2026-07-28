@@ -69,7 +69,8 @@ trigger labels (all), no claim, not a spec   (admitted)
         → agent-working
             ├── awaiting-human   gate: the agent asked a question, resumes on the reply
             ├── quarantined      failed twice: set aside for a human, everything else runs on
-            ├── agent-failed     the agent's own verdict: draft PR + diagnosis, relabel to retry
+            ├── agent-failed     the agent's own verdict: draft PR + diagnosis. Nothing retries
+            │                    it — a human removes the label to hand it back
             └── PR opened        ready on a clean sign-off, draft on anything else
 ```
 
@@ -77,6 +78,9 @@ trigger labels (all), no claim, not a spec   (admitted)
 - **What stops a second start is not a label list.** It is three things together: the claim label
   `agent-working`, the durable record in `var/state.json`, and a live PID lock in `var/running/`.
   Reconcile releases a stale claim only when no process is on the item.
+- **The parked labels are the exception.** `quarantined` and `agent-failed` are refused before
+  anything starts, so no boot sweep, blackout catch-up or re-label runs one again. Taking the label
+  off is the release signal; the item comes back on the next trigger re-label or reconcile pass.
 
 ## Preconditions
 
@@ -179,7 +183,9 @@ what an operator then sees, is [ADR-0002](adr/0002-failure-scope-not-global-halt
   Everything else keeps running.
 - **`run-failed`** is the agent's own verdict and the one item-scope class with no retry — it ran,
   and a second run would spend real quota re-deciding what it already decided. It gets
-  `agent-failed` and a human.
+  `agent-failed`, which admission then refuses, and the human is told wherever they are standing —
+  the notification carries the agent's own diagnosis of what it failed on, and names the label to
+  remove to hand it back.
 
 ## PR output
 
