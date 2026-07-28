@@ -39,6 +39,15 @@ export interface GitHub {
    *  with no PR open has no branch worth forking from yet. Redeclared for the same
    *  reason `readIssue` is. */
   openPrForHead(repo: string, head: string): Promise<string | undefined>;
+  /** The labels this issue wears RIGHT NOW — what a release tells the two parked states
+   *  apart on, and the list it re-admits with (#66). Its own method rather than widening
+   *  `readIssue` to `RunIssueDetail`: that would rewrite every per-case `readIssue`
+   *  override in the smokes, where `Gh` answers this off the read it already makes. */
+  issueLabels(repo: string, issue: number): Promise<string[]>;
+  /** Take labels off — the parked label a release lifts (#66). Redeclared from `GitHubRun`
+   *  the way `readIssue` is: a resuming run drops `awaiting-human` and a release drops
+   *  `quarantined`/`agent-failed`, and `Gh` still implements it exactly once. */
+  removeLabels(repo: string, issue: number, labels: string[]): Promise<void>;
   /** The pull request a summon landed on (#44) — read for its HEAD BRANCH, which is
    *  what admission holds the scheduler's branch lock on. Nothing else can answer it:
    *  a PR's conversation comment arrives as an `issue_comment` carrying no branch at

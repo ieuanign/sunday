@@ -99,6 +99,12 @@ class FakeGitHub implements GitHubRestack {
   async readPr(): Promise<PrDetail> {
     throw new Error("the restack does not read pull requests");
   }
+  async issueLabels(): Promise<string[]> {
+    throw new Error("the restack does not read issue labels");
+  }
+  async removeLabels(): Promise<void> {
+    throw new Error("the restack does not take labels off issues");
+  }
 }
 
 // ── the harness ───────────────────────────────────────────────────────────────

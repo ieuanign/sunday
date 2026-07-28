@@ -280,6 +280,14 @@ function harness(over: { pause?: PauseStore; resumeGraceMs?: number; labelFails?
     readPr: async () => {
       throw new Error("readPr: no case in this smoke reads a pull request");
     },
+    // #66's release, and nothing here releases: stubs that ANSWERED would let a case reach
+    // a decision this smoke never checked.
+    issueLabels: async () => {
+      throw new Error("issueLabels: no case in this smoke releases a parked item");
+    },
+    removeLabels: async () => {
+      throw new Error("removeLabels: no case in this smoke releases a parked item");
+    },
   };
 
   /** The policy's own seam, narrower than the Assignor's: one label write, which is a
