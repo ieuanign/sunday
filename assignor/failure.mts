@@ -326,6 +326,36 @@ export class FailurePolicy {
     });
   }
 
+  /** Lift a pause that is waiting on a HUMAN (#66) — the phone's `/resume`, and the line to
+   *  reply with. Only a pause with no `resumeAt`: the quota whose reset was unreadable
+   *  (`:211`) or unholdable (`:514`), and the auth halt — the three `docs/operability.md`
+   *  otherwise clears by deleting the pause file and restarting. One that lifts itself is
+   *  refused with the time it lifts at: resuming a window early feeds the whole backlog
+   *  back into the wall it is waiting out. The reason is quoted because a human resuming
+   *  into a 403 has to see what they are resuming into. */
+  resume(): string {
+    try {
+      const held = this.pause.read();
+      if (!held) return "· the pipeline is not paused";
+      if (held.resumeAt !== undefined) {
+        return `✗ the pipeline lifts itself at ${new Date(held.resumeAt).toISOString()} — ${held.reason}. Nothing to do.`;
+      }
+      // The two writes the auto-resume makes, in its order (`scheduleResume`).
+      this.pause.clear();
+      this.scheduler.resume();
+      // `info`, as the auto-resume is: what a human acts on is the pipeline being stopped.
+      const line = `▶ pipeline resumed by hand — it was halted on ${held.reason}`;
+      this.log.info(line);
+      return line;
+    } catch (err) {
+      // Constraint 9 covers this entry too, and a throw here also costs the human waiting
+      // on the other end their answer.
+      const line = `✗ the pause could not be lifted — ${err instanceof Error ? err.message : String(err)}`;
+      this.log.error(line);
+      return line;
+    }
+  }
+
   /** Stop ONE child repo: its environment cannot be produced, so every run in it would die
    *  the same way — and every run in every OTHER repo is fine. v1 read exactly this create
    *  failure as unrecognised and stopped the whole pipeline for it, which is the defect
