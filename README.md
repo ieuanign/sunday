@@ -38,7 +38,7 @@ and recovery) is [`docs/architecture.md`](docs/architecture.md).
 | [`docs/architecture.md`](docs/architecture.md) | The pipeline design: shape, trigger labels, the label state machine, dependency stacking + restack, concurrency lanes, the human gate, state and recovery, auth. |
 | [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, and the optional Telegram notifications. |
 | [`docs/supervision.md`](docs/supervision.md) | Running unattended: `devbox services up`, the singleton rule, startup ordering and the readiness probe, the in-process forwarders and blackout catch-up, restart recovery, the manual invocation for debugging, and how to roll back. |
-| [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, context-threshold handoff, the cost-weighted token report. |
+| [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, the cost-weighted token report — plus the context-threshold handoff, designed but not built. |
 | [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) | The baseline discipline injected into every issue run, and the result contract the host reads back. |
 | [`docs/sandbox-pr-comment-prompt.md`](docs/sandbox-pr-comment-prompt.md) | The same, for an `@sunday` summon on a pull request. |
 | [`docs/adr/`](docs/adr/) | Decisions that constrain the code: fork per work item, failure scope over a global halt, keeping PR stacking. |

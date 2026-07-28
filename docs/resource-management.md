@@ -1,7 +1,7 @@
 # Resource management (M5)
 
-How Sunday tunes cost per run: a per-phase model/effort **matrix**, a context-threshold
-**handoff** that keeps long-lived sessions sharp, and a cost-weighted **token report**. All local,
+How Sunday tunes cost per run: a per-phase model/effort **matrix** and a cost-weighted **token
+report**, plus a context-threshold **handoff** that is designed but not built (below). All local,
 all `$0` (model switching is free on the Max token; no dollar figures anywhere).
 
 ## Per-phase matrix + the discipline floor
@@ -32,13 +32,18 @@ presence (Claude Code's project > user precedence), so the floor is a floor, not
 
 ## Handoff-at-threshold
 
+> **Designed, not built.** The implementation lived in v1's `listener/` and went with it in #45;
+> nothing reads `HANDOFF_CTX_THRESHOLD` today, so a long gate cycle just keeps resuming its
+> session. The design is kept here for whoever reimplements it.
+
 The orchestrator session only grows across repeated **gate cycles** on one issue. At a gate resume,
 the host reads the prior context (`input + cacheRead + cacheCreation`):
 
 - **`< HANDOFF_CTX_THRESHOLD`** (default `120000`, `.env`-tunable) → cheap `run({ resumeSession })`.
 - **`≥ threshold`** → one bounded turn writes a handoff note (emitted as tagged output — nothing is
   written inside the credential-free box), then a **fresh** session is seeded with the note + the
-  human's reply. Notes live at `.scratch/<repo>/handoff/<issue>-<n>.md`, cleared when the PR opens.
+  human's reply. v1 kept notes at `.scratch/<repo>/handoff/<issue>-<n>.md`, cleared when the PR
+  opens; that is v1's path — a reimplementation belongs under `var/`, per `lib/paths.mts`.
 
 If the handoff turn can't produce a usable note, the issue fails as **`agent-failed`** (a relabel
 retries fresh) — never `awaiting-human`, which would loop re-resuming the bloated session.
