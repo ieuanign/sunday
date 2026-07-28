@@ -63,12 +63,15 @@ export interface Outcome {
    *  number carried over from some earlier session would cost a whole handoff. */
   contextTokens?: number;
   /** The agent RAN and reported the failure ITSELF (#39) — a `fail` signal, or a run that
-   *  committed nothing — as opposed to something blowing up around it. Carried as a typed
+   *  committed nothing — as opposed to something blowing up around it. Set for a THIRD
+   *  reason since #67: a handoff turn that ran and came back with no usable note, which
+   *  the agent never gets to describe but which is a turn spent inside it all the same,
+   *  and is the human's to hand back rather than anyone's to retry. Carried as a typed
    *  fact because the summary on those paths is prose SUNDAY composed around the agent's
    *  own description: classifying that by pattern would break the day the wording changes,
    *  and would let anything the agent happened to write ("hit the usage limit") stop the
-   *  whole pipeline. Absent on every other path, which is every failure the agent never
-   *  got to describe. */
+   *  whole pipeline. Absent on every other path, which is every failure that happened
+   *  AROUND the agent rather than in its turn. */
   agentFailed?: boolean;
   /** WHICH assertion stopped the run (#38), when one did. Typed, and travelling in this
    *  file rather than as an exit code (ADR-0001), because the parent reacts to each reason
