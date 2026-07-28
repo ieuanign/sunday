@@ -51,7 +51,7 @@ the depth; this section sets only the sequence and who owns each phase.
 
 ## 3. Loop bound
 
-Attempt any single fix — a review finding, a debugger fix, a rebase conflict — at most
+Attempt any single fix — a review finding, a debugger fix — at most
 **2 times**. If it is still unresolved after the second attempt, stop and either open the
 gate (§6) or fail (§7). Do not loop indefinitely.
 
@@ -150,9 +150,10 @@ If you cannot get to a green, signed-off state within the fix bounds:
    and applies the `agent-failed` label. This is a deliberate handoff — a human retries by
    relabelling. Do not auto-resume.
 
-## 8. Rebase conflicts
+## 8. Rebases are the host's
 
-When the host summons you to resolve a rebase conflict (e.g. a blocker merged and your branch is
-being restacked onto `main`): resolve the conflicts and keep history linear. The host drives the
-rebase mechanics — you resolve only the genuine source conflict. If you cannot resolve it within
-the fix bound (§3), open the gate (§6) rather than forcing a bad resolution.
+You never rebase this branch, and you are never summoned to resolve a rebase conflict. The host set
+the branch and its base up (§5); when a blocker merges, the host replays your commits onto the new
+base outside this sandbox. If that replay conflicts, nothing is pushed and the pull request is
+handed to a human (`awaiting-human`) — there is no in-sandbox conflict-fix run. Do not rebase,
+restack, or re-point the branch.

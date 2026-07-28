@@ -22,9 +22,11 @@ presence (Claude Code's project > user precedence), so the floor is a floor, not
   | Debug | debugger | opus | xhigh |
   | Sign-off | sign-off | sonnet | medium |
 
-- The injector merges the matrix onto the tracked agent bodies per run (`.scratch/<repo>/<issue>/
-  claude/`, disposable). `.env` `MODEL` / `MODEL_EFFORT` are the **global fallback** — the
-  orchestrator session's own model/effort.
+- The floor is assembled per run — the matrix merged onto the tracked agent bodies — under
+  `.scratch/floor/<work-item key>/`, one dir per work item so concurrent runs never share a floor.
+  Throwaway by construction: `.scratch/` is `rm -rf`-able, and nothing durable lives there.
+  `.env` `MODEL` / `MODEL_EFFORT` are the **global fallback** — the orchestrator session's own
+  model/effort.
 
 > **Why a single `~/.claude` mount (not `~/.claude/{agents,skills}`):** two subdir mounts make Docker
 > create the parent `~/.claude` root-owned, so the agent user can't write `~/.claude/projects/` and
@@ -57,6 +59,8 @@ ranking by raw tokens would bury the real offender.
 
 - Per row: the 4 raw token fields + `cacheHitRatio` + flags (`HIGH_OUTPUT`, `RECACHE`, `NEAR_ZONE`
   ≥120K, `OVER_ZONE` ≥150K); per run: totals by class, peak ctx + zone, top consumers.
-- Stored at `.scratch/<repo>/token-report/<run-id>.{json,md}` + `history.jsonl`; a headline is logged.
+- Stored under `var/log/<owner>/<repo>/token-report/` as `<run-id>.{json,md}` + `history.jsonl`,
+  beside that repo's run logs — durable state, not throwaway, so spend history survives a
+  `.scratch/` wipe. A headline is logged.
 - **Sentry-like Telegram:** only important events reach your phone — a PR opening and failures.
   Token reports stay on disk + console (no per-run spam).
