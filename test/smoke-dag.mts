@@ -106,8 +106,46 @@ function github(over: Partial<GitHub> = {}): GitHub {
   );
 }
 
-// ── more than one blocker with any of them open: one branch cannot be stacked on two
-//    bases, so the dependent waits for them all ──
+// ── blockers that LANDED do not count toward "too many to stack on" (#69): the rule is
+//    about the OPEN set, and one open blocker has a branch whatever sits closed beside
+//    it. Landing one at a time is the normal shape here, so this is the case stacking
+//    exists for ──
+{
+  const mixed: Blocker[] = [{ number: 7, state: "closed" }, { number: BLOCKER, state: "open" }, { number: 8, state: "closed" }];
+
+  const heads: string[] = [];
+  const stacked = await resolveBase(
+    github({
+      blockedBy: async () => mixed,
+      openPrForHead: async (_repo, head) => {
+        heads.push(head);
+        return "https://github.com/acme/finance/pull/12";
+      },
+    }),
+    REPO,
+    ISSUE,
+  );
+  ok(
+    "one open blocker among closed ones: it stacks on the open one rather than deferring on the count",
+    stacked.admit && stacked.base === `feat/${BLOCKER}`,
+    JSON.stringify(stacked),
+  );
+  ok(
+    "and the PR is looked for on the OPEN blocker's branch — a closed one's is not what it forks from",
+    heads.length === 1 && heads[0] === `feat/${BLOCKER}`,
+    heads.join(", "),
+  );
+
+  const waiting = await resolveBase(github({ blockedBy: async () => mixed }), REPO, ISSUE);
+  ok(
+    "the same set with no PR up waits on THAT blocker's missing PR, not on blockers still being open",
+    !waiting.admit && waiting.reason.includes(`#${BLOCKER}`) && waiting.reason.includes("no open PR"),
+    JSON.stringify(waiting),
+  );
+}
+
+// ── more than one OPEN blocker: one branch cannot be stacked on two bases, so the
+//    dependent waits for them all, however many of them have already landed ──
 {
   const many = await resolveBase(
     github({

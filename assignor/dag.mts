@@ -25,7 +25,7 @@ export async function decideBase(
   if (open.length === 0) return { admit: true, base: MAIN };
   // More than one open blocker cannot be stacked on: a branch has ONE base, and picking
   // either of them would ship the other's work unreviewed. They all have to land first.
-  if (blockers.length > 1) return { admit: false, reason: `blockers still open: ${open.map((b) => `#${b.number}`).join(", ")}` };
+  if (open.length > 1) return { admit: false, reason: `blockers still open: ${open.map((b) => `#${b.number}`).join(", ")}` };
   const only = open[0].number;
   // The PR is the gate, not the branch: a blocker nobody has pushed for yet has nothing
   // worth forking from, and a fork from `main` wearing its name would be a lie.
