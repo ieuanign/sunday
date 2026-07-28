@@ -265,6 +265,13 @@ const said = (lines: LogLine[], text: string) => lines.some((l) => l.message.inc
     JSON.stringify(claimed),
   );
 
+  const agentFailed = admitIssue("acme/finance", ["sunday", "ready-for-agent", "agent-failed"], TABLE);
+  ok(
+    "reject: the agent's OWN verdict — a run that already happened is nobody's to re-run, and the reason names the label a human takes off",
+    !agentFailed.admit && agentFailed.reason.includes("agent-failed"),
+    JSON.stringify(agentFailed),
+  );
+
   const spec = admitIssue("acme/finance", ["sunday", "ready-for-agent", "spec"], TABLE);
   ok(
     "reject: a spec is a manifest, whatever else is on it — checked BEFORE the triggers",
@@ -797,6 +804,37 @@ try {
       "release: the label gone, the item is admitted like any other — with its retry budget back",
       h.forked.length === before + 1 && h.state.get(other)?.status === "in-flight" && h.state.get(other)?.retried === undefined,
       `${h.forked.length} forks, state ${JSON.stringify(h.state.get(other))}`,
+    );
+
+    // …and the OTHER park-until-a-human state (#68): the agent ran and gave up itself. It
+    // settles at plain `failed` — the same status a transient's first failure leaves — so
+    // the label is the only record there is, and the guard reads nothing else. The
+    // delivery is the sharp one: `labeled` is in `ADMIT_ACTIONS`, so Sunday's own
+    // `agent-failed` write fires the very delivery that used to re-run the item on the spot.
+    // The claim is what says "admitted" here rather than the fork count: it is taken before
+    // the queue, so it holds whether or not the lane has room for a third child.
+    const failed = "acme/finance#59";
+    h.state.set(failed, { status: "failed" });
+    h.assignor.handle(delivery({ number: 59, labels: ["sunday", "ready-for-agent", "agent-failed"] }));
+    await tick();
+
+    ok(
+      "agent-failed: the label refuses the item, where the same delivery without it re-admits a failed one",
+      !h.claimed.includes(failed) && h.state.get(failed)?.status === "failed",
+      `claimed=${h.claimed.join(",")}, state ${JSON.stringify(h.state.get(failed))}`,
+    );
+    ok(
+      "agent-failed: and the skip names the label and the hand-back, since nothing but a human ever moves it again",
+      said(h.lines, "agent-failed") && said(h.lines, "hand it back"),
+      JSON.stringify(h.lines.map((l) => l.message)),
+    );
+
+    h.assignor.handle(delivery({ number: 59 })); // the human took the label off and re-labelled it
+    await tick();
+    ok(
+      "agent-failed: the label gone, the item is handed back through the ordinary admission — nothing removes it but a human",
+      h.claimed.includes(failed) && h.state.get(failed)?.status === "in-flight",
+      `claimed=${h.claimed.join(",")}, state ${JSON.stringify(h.state.get(failed))}`,
     );
   }
 

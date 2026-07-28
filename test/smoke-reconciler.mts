@@ -19,7 +19,7 @@ import { StateStore } from "#assignor/state.mts";
 import type { RepoConfig } from "#config/repos.mts";
 import { acquireLock, readLock } from "#lib/lock.mts";
 import { sundayComment, sundayReply } from "#lib/markers.mts";
-import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue, type OpenPullRequest, type ReviewComment } from "#services/github/index.mts";
+import { AGENT_FAILED_LABEL, CLAIM_LABEL, QUARANTINE_LABEL, type GitHubLabels, type GitHubReconcile, type IssueComment, type OpenIssue, type OpenPullRequest, type ReviewComment } from "#services/github/index.mts";
 import { Logger, type Destinations, type LogLine } from "#services/logger.mts";
 
 const dir = resolve(import.meta.dirname, "..", ".scratch", `smoke-reconciler-${process.pid}`);
@@ -346,6 +346,28 @@ try {
 
     ok("quarantine: a pull request still wearing the label is not re-derived, whatever its thread says", !h.queued().includes("acme/finance#pr110"), h.queued().join(","));
     ok("quarantine: and one a human has taken it off is handed straight back, through the same pass", h.queued().includes("acme/finance#pr111"), h.queued().join(","));
+  }
+
+  // ── the issue lane's other parked label (#68). An item the agent RAN and gave up on
+  //    settles at plain `failed` — the status a transient's first failure leaves — so the
+  //    label is the whole record, and it has to hold with NO state entry behind it: a fresh
+  //    boot off a lost `var/` re-derives every open issue, and one handed back there is a
+  //    real agent run re-deciding what the agent already decided. This one case covers all
+  //    three callers — boot, blackout catch-up and the per-repo recheck are the same pass ──
+  {
+    const h = harness({
+      issues: {
+        "acme/finance": [
+          { number: 57, labels: [...TRIGGERS, AGENT_FAILED_LABEL] },
+          { number: 58, labels: TRIGGERS }, // the same triggers, and no verdict on it
+        ],
+      },
+    });
+    await h.reconciler.run();
+
+    ok("agent-failed: an open issue wearing the label is not re-derived, and the one beside it still is", h.queued().join(",") === "acme/finance#58", `${h.queued().join(",")} claimed=${h.claimed.join(",")}`);
+    ok("agent-failed: and no claim is taken on it — a claim without a run behind it is the orphan the sweep above exists to strip", h.claimed.join(",") === "acme/finance#58", h.claimed.join(","));
+    ok("agent-failed: it is named, since an item nothing moves again until a human acts must not drop out of the pass in silence", said(h.lines, "acme/finance#57") && said(h.lines, AGENT_FAILED_LABEL), JSON.stringify(h.lines.map((l) => l.message)));
   }
 
   // ── reconcile is the ONE place Sunday reads somebody else's service in bulk, and that

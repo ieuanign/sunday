@@ -15,7 +15,9 @@ export const QUARANTINE_LABEL = "quarantined";
 
 /** The label that says the agent RAN and reported the failure itself — its own verdict,
  *  not something that blew up around it. Nothing retries one: the run happened, and a
- *  second one would spend a whole agent run re-deciding what it already decided. */
+ *  second one would spend a whole agent run re-deciding what it already decided. Like
+ *  `QUARANTINE_LABEL` it is the RELEASE signal as much as the record — admission refuses
+ *  the item while this is on the issue, and a human takes it off to hand it back. */
 export const AGENT_FAILED_LABEL = "agent-failed";
 
 /** The label that says a HUMAN has to act before this moves again: an issue run that
