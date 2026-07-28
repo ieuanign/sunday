@@ -85,15 +85,16 @@ whatever was retained.
 
 - **Quota with a reset** → auto-pauses and auto-resumes; no action needed.
 - **Quota with no reset time / a 403 halt** → stays paused until a human lifts it: fix the cause
-  (re-auth for a 403, wait out an unparseable quota), delete the pause file and restart Sunday —
-  boot re-arms whatever the file still says, and reconcile re-admits the work. The reason is in the
-  pause file and in the event log.
+  (re-auth for a 403, wait out an unparseable quota), then send `/resume` from the phone — or
+  delete the pause file and restart Sunday, where boot re-arms whatever the file still says and
+  reconcile re-admits the work. The reason is in the pause file and in the event log.
 
 ## Telegram notifications (optional)
 
-An optional $0 phone channel for what Sunday says. **Outbound only** — Sunday sends, it takes no
-commands back. No webhook, no tunnel, no public endpoint. Off by default: with either key unset,
-notifications no-op and nothing else changes.
+An optional $0 phone channel, **both ways** — Sunday sends what it has to say, and long-polls the
+Bot API for commands from inside the one supervised parent. Still no webhook, no tunnel, no public
+endpoint. Off by default: with either key unset, notifications no-op, nothing polls, and the
+pipeline is unchanged.
 
 ### Setup
 
@@ -107,8 +108,29 @@ notifications no-op and nothing else changes.
    TELEGRAM_CHAT_ID=987654321
    ```
 
+### Commands
+
+- **`/status`** — paused or running (with the reason), what is in flight, queued, in the restack
+  lane, and what is quarantined.
+- **`/fix <owner>/<repo>#<n> [steer]`** — releases a parked item: takes the `quarantined` /
+  `agent-failed` label off the issue and hands it straight back through admission, retry budget
+  restored. The optional steer reaches that run's prompt as the human's instruction — for **that
+  run only**; a later retry of it does not carry the note. An item in any other state is refused
+  naming the state it is in.
+- **`/resume`** — lifts a pause that is waiting on a human (above). One that lifts itself is
+  refused with the time it lifts at, because resuming a quota window early feeds the backlog back
+  into the wall it is waiting out.
+- **`/help`** — the list.
+
+Anything typed while Sunday was down is dropped on the next start: a `/fix` from a three-hour
+outage would act on a pipeline that has moved on. Replies are truncated to stay under Telegram's
+4096-char message limit, since an oversize one is rejected outright and reads as a dead channel.
+
 ### Authz
 
-`TELEGRAM_CHAT_ID` is the single destination, and the channel **fails closed**: with either key
-unset nothing is sent. Nothing is ever read back — there is no poller and no inbound surface to
-forge. Treat `TELEGRAM_BOT_TOKEN` as a secret: it posts as your bot.
+`TELEGRAM_CHAT_ID` is the single destination **and the only authz there is** — the one thing
+between a stranger's message and `/fix` starting an agent run on your quota. The channel **fails
+closed**: with either key unset nothing is sent and nothing polls, and a token with no chat id
+refuses to poll and says why. A command from any other chat is dropped (said once, then quiet), and
+every reply goes to the configured chat, never to whoever sent the message. Treat
+`TELEGRAM_BOT_TOKEN` as a secret: it posts as your bot.

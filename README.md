@@ -36,7 +36,7 @@ and recovery) is [`docs/architecture.md`](docs/architecture.md).
 | --- | --- |
 | [`CONTEXT.md`](CONTEXT.md) | The shared vocabulary — what a work item, a blackout, a fork point or the floor *is*. |
 | [`docs/architecture.md`](docs/architecture.md) | The pipeline design: shape, trigger labels, the label state machine, dependency stacking + restack, concurrency lanes, the human gate, state and recovery, auth. |
-| [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, and the optional Telegram notifications. |
+| [`docs/operability.md`](docs/operability.md) | Behaviour under failure: the failure taxonomy, quota pause/resume, the 403 halt, the self-healing sandbox-image preflight, per-flow logs and the event log, and the optional Telegram channel — notifications out, commands in. |
 | [`docs/supervision.md`](docs/supervision.md) | Running unattended: `devbox services up`, the singleton rule, startup ordering and the readiness probe, the in-process forwarders and blackout catch-up, restart recovery, the manual invocation for debugging, and how to roll back. |
 | [`docs/resource-management.md`](docs/resource-management.md) | Cost per run: the per-phase model/effort matrix, the discipline floor mounted into every sandbox, the cost-weighted token report, and the context-threshold handoff that retires a gate session grown too big to resume. |
 | [`docs/sandbox-prompt.md`](docs/sandbox-prompt.md) | The baseline discipline injected into every issue run, and the result contract the host reads back. |
@@ -69,9 +69,11 @@ pointers are in `.env.example`). It must be runnable **headless inside the Docke
 agent Sandcastle does not support is more than a config line
 ([`docs/architecture.md`](docs/architecture.md#auth)).
 
-**Telegram (optional).** Phone notifications — $0, no public endpoint, nothing extra to install.
-Outbound only: Sunday sends, it takes no commands back. Off until `TELEGRAM_BOT_TOKEN` +
-`TELEGRAM_CHAT_ID` are set in `.env`; setup steps are in
+**Telegram (optional).** Phone channel — $0, no public endpoint, nothing extra to install. It runs
+both ways: Sunday sends notifications, and polls for commands — `/status`, `/resume`, and
+`/fix <owner>/<repo>#<n> [steer]` to hand a parked item back with a note for the agent. Off until
+`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set in `.env`, and that chat id is the whole authz.
+Setup and the command set are in
 [`docs/operability.md`](docs/operability.md#telegram-notifications-optional).
 
 ## Onboarding a repo
@@ -130,7 +132,8 @@ operator guide is [`docs/supervision.md`](docs/supervision.md).
 ├── devbox.json            host toolchain (node, gh, git, …)
 ├── .env.example           config template (copy to .env)
 ├── assignor/              admission, scheduling, state, reconcile — the decisions
-├── services/              the seams: GitHub CLI + receiver + forwarders, sandbox, logging, git
+├── services/              the seams: GitHub CLI + receiver + forwarders, sandbox, telegram,
+│                          logging, git
 ├── issue/                 the forked per-work-item worker (one process per run, ADR-0001)
 ├── lib/                   shared plumbing — the `var/` paths, shell-out, outcome + lock files
 ├── config/                per-repo routing (`repos.json`, gitignored; `repos.example.json`
@@ -157,9 +160,11 @@ Durable runtime state and logs are gitignored, under `var/` — what is written 
   secrets) is published.
 - **Sandboxes are credential-free** — each run executes in Docker as a **non-root** user and
   cannot push; the host performs every GitHub write. Agents never run directly on the host.
-- **Telegram is outbound only** *(if enabled)* — Sunday sends to one `chat_id` and takes no
-  commands back, so there is no inbound surface to forge. `TELEGRAM_BOT_TOKEN` still posts as your
-  bot, so treat it as a secret ([`docs/operability.md`](docs/operability.md#authz)).
+- **Telegram is one chat, both ways** *(if enabled)* — Sunday sends to one `chat_id` and takes
+  commands from that same chat only, by polling; there is still no inbound port, tunnel or public
+  endpoint to forge. That chat id is the whole authz, and `/fix` starts an agent run on your quota,
+  so treat it and `TELEGRAM_BOT_TOKEN` (it posts as your bot) as secrets
+  ([`docs/operability.md`](docs/operability.md#authz)).
 - **The private recipe stays private** — the individual tooling used to improve Sunday itself
   (`CLAUDE.md`, `docs/agents/`, most of `.claude/`) is gitignored and never published. The
   exception is the shipped discipline floor — `.claude/agents/` and the

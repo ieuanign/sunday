@@ -79,7 +79,10 @@ trigger labels (all), no claim, not a spec   (admitted)
   Reconcile releases a stale claim only when no process is on the item.
 - **The parked labels are the exception.** `quarantined` and `agent-failed` are refused before
   anything starts, so no boot sweep, blackout catch-up or re-label runs one again. Taking the label
-  off is the release signal; the item comes back on the next trigger re-label or reconcile pass.
+  off is the release signal; the item comes back on the next trigger re-label or reconcile pass —
+  or straight away from the phone, where `/fix <owner>/<repo>#<n> [steer]` takes the label off and
+  hands the item back through admission with a note for the agent
+  ([`operability.md`](operability.md#commands)).
 
 ## Preconditions
 
