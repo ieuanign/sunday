@@ -743,7 +743,43 @@ try {
       JSON.stringify(h.state.get(ITEM.key)),
     );
     ok("run-failed: and the retry budget is left unspent, because nothing spent it", h.state.get(ITEM.key)?.retried === undefined, JSON.stringify(h.state.get(ITEM.key)));
-    ok("run-failed: the agent's own words cost the issue no second comment — the outcome milestone carried them", h.comments.filter((c) => c.message.includes("integration test")).length === 1, JSON.stringify(h.comments.map((c) => c.message)));
+
+    // …and because nothing moves it again, the human is PAGED. The level is the whole of
+    // it: `error` is the one that reaches the phone, and the phone is the only place a
+    // human standing away from a desk finds out (`test/smoke-logger.mts` owns the routing;
+    // the level is the complete pin here).
+    const parked = h.lines.find((l) => l.module === "failure" && l.message.includes(ITEM.key));
+    ok(
+      "run-failed: the human is told at error — an item that will not move again until they act is not routine progress",
+      parked?.level === "error",
+      JSON.stringify(h.lines.filter((l) => l.module === "failure").map((l) => `${l.level} ${l.message}`)),
+    );
+    ok(
+      "run-failed: addressed at the issue as well, so the hand-back is readable from where the work is",
+      parked?.context.repo === "acme/finance" && parked.context.target === 57,
+      JSON.stringify(parked?.context),
+    );
+    ok(
+      "run-failed: carrying what the agent actually said — a page that only says 'it failed' still costs a trip to a desktop",
+      parked?.message.includes("Could not make the integration test pass") === true,
+      JSON.stringify(parked?.message),
+    );
+    ok(
+      "run-failed: and how to hand it back, naming the label — a parked item with no instructions is a lost one",
+      parked?.message.includes("agent-failed") === true && parked.message.includes("trigger label"),
+      JSON.stringify(parked?.message),
+    );
+    // Rewritten (#68): this used to pin that the agent's words cost the issue no second
+    // comment. Paging the diagnosis is what buys the repeat, so the bound is now the intent —
+    // exactly two, the outcome milestone and this parked notice, and never a third.
+    ok(
+      "run-failed: the agent's words reach the thread exactly twice — the outcome milestone, then the notice that says what to do about them",
+      h.comments
+        .filter((c) => c.message.includes("integration test"))
+        .map((c) => c.level)
+        .join(",") === "milestone,error",
+      JSON.stringify(h.comments.map((c) => `${c.level} ${c.message}`)),
+    );
   }
 
   // ── a blip gets the same single retry, and ends differently: `failed` is where a
