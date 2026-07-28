@@ -11,7 +11,7 @@ import type { PrJob } from "#pr/run.mts";
 import { readLock, releaseLock } from "#lib/lock.mts";
 import { isSummon, SUNDAY_MARKER } from "#lib/markers.mts";
 import { clearOutcome, OUTCOME_STATUSES, readOutcome, type Outcome } from "#lib/outcome.mts";
-import { CLAIM_LABEL, QUARANTINE_LABEL, type GitHub } from "#services/github/index.mts";
+import { AGENT_FAILED_LABEL, CLAIM_LABEL, QUARANTINE_LABEL, type GitHub } from "#services/github/index.mts";
 import type { ModuleLogger } from "#services/logger.mts";
 import { resolveBase, type BaseDecision } from "./dag.mts";
 // Type-only: the policy is a shape here (it is injected, constraint 8), so `failure.mts`
@@ -133,7 +133,8 @@ interface Deferred {
 type Refusal = Extract<BaseDecision, { admit: false }>;
 
 /** Is this issue Sunday's to work? Its repo must be routed, it must not already be
- *  claimed, it must not be a spec, and ALL of its repo's trigger labels must be present.
+ *  claimed, the agent must not have failed it, it must not be a spec, and ALL of its
+ *  repo's trigger labels must be present.
  *
  *  PURE, and the ORDER is load-bearing: the spec check precedes the trigger check, so a
  *  spec mis-labelled for the agent is rejected whatever else is on it — admitted, it
@@ -147,6 +148,13 @@ export function admitIssue(
   if (!cfg) return { admit: false, reason: `${repo} not in config/repos.json` };
   const present = new Set(labels);
   if (present.has(CLAIM_LABEL)) return { admit: false, reason: `already claimed (${CLAIM_LABEL})` };
+  // The LABEL decides and no state does (#68): a run-failed item settles at `failed`, exactly
+  // as a transient's first failure does, so a parent with no state file (a fresh boot, a lost
+  // `var/`) would otherwise hand it straight back. Here rather than in a caller so the live
+  // `labeled` delivery, the re-derive and the missed-summon replay share the one rule.
+  if (present.has(AGENT_FAILED_LABEL)) {
+    return { admit: false, reason: `the agent ran and failed it (${AGENT_FAILED_LABEL}) — remove the label to hand it back` };
+  }
   if (present.has(SPEC_LABEL)) return { admit: false, reason: "spec issue — a manifest, not implementable" };
   const missing = cfg.triggerLabels.filter((label) => !present.has(label));
   if (missing.length > 0) return { admit: false, reason: `missing trigger label(s) [${missing.join(", ")}]` };

@@ -410,9 +410,19 @@ export class FailurePolicy {
     // The agent ran and reported its own defeat: marked for a human to triage, and that is
     // all. Retrying it would spend a whole agent run re-deciding what it already decided,
     // and setting it aside would be Sunday quarantining an ISSUE that is simply hard.
+    //
+    // `error`, not `info` (#68): quarantine's rule — what the mechanism moves again is `info`,
+    // what waits on a human is `error`, the level that reaches the phone. And the EXCERPT, not
+    // the fixed headline `classify` writes for the summary (`:140`): repeating the outcome
+    // milestone's diagnosis is deliberate where quarantine avoids it, because this is prose
+    // the agent wrote for a human (`docs/sandbox-prompt.md`), not a machine's log dump.
     if (failure.class === "run-failed") {
       this.label(item, AGENT_FAILED_LABEL);
-      this.log.info(`· ${failure.class} (item) ${item.key} — ${failure.summary}`, about);
+      this.log.error(
+        `⏸ ${item.key} — the agent ran and gave up. ${failure.excerpt}\n\n` +
+          `Nothing retries it. To hand it back: remove the \`${AGENT_FAILED_LABEL}\` label and re-add the trigger label.`,
+        about,
+      );
       return;
     }
     const prior = this.state.get(item.key);
