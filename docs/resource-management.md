@@ -1,8 +1,8 @@
 # Resource management (M5)
 
-How Sunday tunes cost per run: a per-phase model/effort **matrix** and a cost-weighted **token
-report**, plus a context-threshold **handoff** that is designed but not built (below). All local,
-all `$0` (model switching is free on the Max token; no dollar figures anywhere).
+How Sunday tunes cost per run: a per-phase model/effort **matrix**, a cost-weighted **token
+report**, and a context-threshold **handoff** that retires a session before it grows too big to
+work in. All local, all `$0` (model switching is free on the Max token; no dollar figures anywhere).
 
 ## Per-phase matrix + the discipline floor
 
@@ -34,21 +34,23 @@ presence (Claude Code's project > user precedence), so the floor is a floor, not
 
 ## Handoff-at-threshold
 
-> **Designed, not built.** The implementation lived in v1's `listener/` and went with it in #45;
-> nothing reads `HANDOFF_CTX_THRESHOLD` today, so a long gate cycle just keeps resuming its
-> session. The design is kept here for whoever reimplements it.
+The orchestrator session only grows across repeated **gate cycles** on one issue. Each gate outcome
+records the context the session had reached (`input + cacheRead + cacheCreation`) in the work item's
+durable state, so the reply that comes back hours later knows what it would be resuming:
 
-The orchestrator session only grows across repeated **gate cycles** on one issue. At a gate resume,
-the host reads the prior context (`input + cacheRead + cacheCreation`):
+- **`< HANDOFF_CTX_THRESHOLD`** (default `120000`, `.env`-tunable) → cheap `run({ resumeSession })`,
+  exactly as before. An unknown context reads as "small" and resumes.
+- **`≥ threshold`** → the reply does **not** go to that session. One bounded turn resumes it just
+  long enough to compact it into a handoff note, emitted as tagged output (`<sunday-handoff>`) —
+  nothing is written inside the credential-free box. A **fresh** session is then started with the
+  note + the human's reply. The host keeps the note at `var/handoff/<work-item key>.md` (one per
+  work item — a second handoff overwrites the first, and both texts are in the run log anyway) and
+  clears it once the PR opens. Writing it is best-effort: the fresh session is seeded from the note
+  in memory, so a disk that can't take a copy never costs a run.
 
-- **`< HANDOFF_CTX_THRESHOLD`** (default `120000`, `.env`-tunable) → cheap `run({ resumeSession })`.
-- **`≥ threshold`** → one bounded turn writes a handoff note (emitted as tagged output — nothing is
-  written inside the credential-free box), then a **fresh** session is seeded with the note + the
-  human's reply. v1 kept notes at `.scratch/<repo>/handoff/<issue>-<n>.md`, cleared when the PR
-  opens; that is v1's path — a reimplementation belongs under `var/`, per `lib/paths.mts`.
-
-If the handoff turn can't produce a usable note, the issue fails as **`agent-failed`** (a relabel
-retries fresh) — never `awaiting-human`, which would loop re-resuming the bloated session.
+If the handoff turn can't produce a usable note, the issue fails as **`agent-failed`** — never
+`awaiting-human`, which would loop re-resuming the bloated session. Nothing retries it: hand it back
+by removing the `agent-failed` label and re-adding the trigger label, which runs the issue fresh.
 
 ## Token report
 

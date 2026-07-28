@@ -4,8 +4,7 @@
 > *why* the pipeline has the shape it has — written from the code and the ADRs. Running it,
 > watching it and tuning its cost belong to [`supervision.md`](supervision.md),
 > [`operability.md`](operability.md) and [`resource-management.md`](resource-management.md); the
-> ordered build record is [`implementation-plan.md`](implementation-plan.md). The one thing
-> described here that is **designed and not built** is the context-threshold handoff.
+> ordered build record is [`implementation-plan.md`](implementation-plan.md).
 
 ## What this is
 
@@ -222,8 +221,9 @@ Cost per run is tuned in three places, all of them
   own `.claude/` overrides it by presence, so it is a floor and not an override.
 - The **token report** is host-side and free (no dollar figures anywhere), and lands under
   `var/log/<owner>/<repo>/token-report/`.
-- The context-threshold **handoff** is
-  [**designed, not built**](resource-management.md#handoff-at-threshold).
+- The context-threshold **[handoff](resource-management.md#handoff-at-threshold)** keeps a gate
+  cycle from resuming a session it has outgrown: past `HANDOFF_CTX_THRESHOLD` one bounded turn
+  compacts that session into a note, and a fresh one takes the human's reply instead.
 
 ## Process & state model
 
