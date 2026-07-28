@@ -14,7 +14,16 @@ import { AWAITING_HUMAN_LABEL, type GitHubRun } from "#services/github/index.mts
 import type { LogContext, ModuleLogger } from "#services/logger.mts";
 import { composeBody } from "./body.mts";
 import { beforeShip, beforeWork, type ImagePresent } from "./preconditions.mts";
-import { freshPrompt, RESULT_TAG, resultSchema, resumePrompt, type IssueResult } from "./prompt.mts";
+import {
+  freshPrompt,
+  handoffPrompt,
+  handoffSeedPrompt,
+  HANDOFF_TAG,
+  RESULT_TAG,
+  resultSchema,
+  resumePrompt,
+  type IssueResult,
+} from "./prompt.mts";
 import type { IssueModuleDeps, IssueRunInput } from "./types.mts";
 
 // The declarations moved out (CLAUDE.md §7) come back through here, so every caller
@@ -32,6 +41,8 @@ export class IssueModule {
   private readonly github: GitHubRun;
   private readonly git: Git;
   private readonly imagePresent: ImagePresent;
+  private readonly writeHandoffNote: (note: string) => void;
+  private readonly clearHandoffNote: () => void;
   private readonly log: ModuleLogger;
 
   constructor(deps: IssueModuleDeps) {
@@ -39,6 +50,8 @@ export class IssueModule {
     this.github = deps.github;
     this.git = deps.git;
     this.imagePresent = deps.imagePresent;
+    this.writeHandoffNote = deps.writeHandoffNote;
+    this.clearHandoffNote = deps.clearHandoffNote;
     this.log = deps.log;
   }
 
@@ -100,21 +113,60 @@ export class IssueModule {
       const startPoint = await this.git.resolveRef(input.childDir, `origin/${input.base}`);
       if (!input.resume) forkPoint = startPoint;
 
+      /** What the agent is started with, and the session it continues — the ordinary
+       *  resume, until the fork below decides that session is too big to continue. */
+      let prompt = input.resume
+        ? resumePrompt(input.resume.reply)
+        : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body, input.retryError);
+      let resumeSession = input.resume?.sessionId;
+      // The fork (#67). A gated session only ever grows, so past the threshold the human's
+      // answer does NOT go to it: one bounded turn compacts it, and a fresh session takes
+      // the answer instead. HERE — after the whole before-work set, so a run that must not
+      // start never spends the turn, and after the resolve, so both turns share one start
+      // point. Absent context reads as unknown and resumes, which costs one turn where a
+      // number kept from a retired session would cost a whole handoff.
+      if (input.resume && (input.resume.contextTokens ?? 0) >= input.handoffThreshold) {
+        const handed = await this.handoff(input, input.resume, branch, startPoint, about);
+        // Even on the refusal below: that turn's worktree holds the branch checked out,
+        // and the cleanup in the `finally` cannot delete the branch while it is there.
+        preserved = handed.preserved;
+        if (!handed.note) {
+          // NOT `awaiting-human`, which would send the reply straight back to the session
+          // this just refused to resume, and not a throw, which #39 would classify as an
+          // unknown failure and spend another agent run on. `agentFailed` parks it for a
+          // human, who hands it back by taking the label off (#68).
+          this.log.info("failed — the session could not be compacted into a handoff note", about);
+          return this.outcome({
+            key: input.key,
+            status: "failed",
+            summary:
+              `This issue's agent session grew to ${input.resume.contextTokens} tokens of context — past the ` +
+              `${input.handoffThreshold} handoff threshold — and could not be compacted into a handoff note, so ` +
+              `your reply was not sent to it. Nothing was pushed; handing the issue back runs it again from scratch.`,
+            agentFailed: true,
+          });
+        }
+        prompt = handoffSeedPrompt(handed.note, input.resume.reply);
+        resumeSession = undefined;
+      }
+
       const result = await this.agent.run<IssueResult>({
         key: input.key,
         repo: { fullName: input.repo, childDir: input.childDir, imageName: input.imageName },
-        prompt: input.resume
-          ? resumePrompt(input.resume.reply)
-          : freshPrompt(input.baselinePrompt, input.repo, input.issue, detail.title, detail.body, input.retryError),
+        prompt,
         branch,
         // RESOLVED, never a bare branch name: handed one, the library prefers a stale
         // local branch over the origin's (#33's contract).
         startPoint,
         logPath: input.logPath,
         output: { tag: RESULT_TAG, schema: resultSchema },
-        ...(input.resume ? { resumeSession: input.resume.sessionId } : {}),
+        ...(resumeSession ? { resumeSession } : {}),
       });
-      preserved = result.preservedWorktreePath;
+      // `??`, not `=`: a handoff ran two turns on this branch, and dropping the first
+      // one's preserved worktree for the second one's "nothing preserved" leaves a
+      // worktree holding the branch checked out — which `deleteBranch` can never get past,
+      // and a stale local `feat/<n>` is what the next fresh run silently builds on (#33).
+      preserved = result.preservedWorktreePath ?? preserved;
 
       const { signal, description, question } = result.output;
       if (signal === "gate") {
@@ -168,6 +220,9 @@ export class IssueModule {
       await this.git.push(input.childDir, branch);
       const draft = signal !== "ready";
       const url = await this.openPr(input, branch, detail.title, result, ahead, draft);
+      // The note has done its job the moment the work is on the table — for the adopted PR
+      // and for the draft a `fail` ships alike, both of which come back through there.
+      this.noteFile(() => this.clearHandoffNote(), about);
       this.log.info(`${signal} — ${draft ? "draft " : ""}PR ${url}`, about);
       // A `fail` that shipped a draft is still a FAILED work item: the PR is there for a
       // human to read, not because the run succeeded — and it is the agent's OWN verdict,
@@ -190,6 +245,61 @@ export class IssueModule {
       return this.outcome({ key: input.key, status: "failed", summary: failure, forkPoint });
     } finally {
       if (!gated && !stopped) await this.cleanup(input, branch, preserved, about);
+    }
+  }
+
+  /** One bounded turn on the session that is about to be RETIRED (#67): compact it into a
+   *  note the fresh session can continue from. The same agent seam the work itself runs
+   *  through — same branch, same start point, same log — with a tag and no schema, because
+   *  a summary is prose. Nothing about the sandbox library is named here or anywhere else
+   *  in this module.
+   *
+   *  Answers the note, or no note at all when the turn produced nothing usable — the
+   *  caller fails the item on that rather than falling back to the session this exists to
+   *  retire. A turn that THROWS needs nothing here: `run`'s own catch already turns it into
+   *  a classified failure, so a quota wall pauses the pipeline and a blip gets its retry.
+   *
+   *  The preserved worktree comes back either way (constraint 8): it holds the branch
+   *  checked out, and a branch left behind is the next fresh run's stale local base. */
+  private async handoff(
+    input: IssueRunInput,
+    resume: NonNullable<IssueRunInput["resume"]>,
+    branch: string,
+    startPoint: string,
+    about: LogContext,
+  ): Promise<{ note?: string; preserved?: string }> {
+    this.log.info(
+      `context ${resume.contextTokens} ≥ ${input.handoffThreshold} — compacting the session and starting a fresh one`,
+      about,
+    );
+    const turn = await this.agent.run<string>({
+      key: input.key,
+      repo: { fullName: input.repo, childDir: input.childDir, imageName: input.imageName },
+      prompt: handoffPrompt,
+      branch,
+      startPoint,
+      logPath: input.logPath,
+      // No schema: the seam hands back the tag's raw text, which is what a note is.
+      output: { tag: HANDOFF_TAG },
+      resumeSession: resume.sessionId,
+    });
+    const note = turn.output.trim();
+    // Only what is usable — a blank tag is not a handoff, and seeding a fresh session with
+    // it would spend a whole run on an agent that knows nothing about the work.
+    if (note) this.noteFile(() => this.writeHandoffNote(note), about);
+    return { note: note || undefined, preserved: turn.preservedWorktreePath };
+  }
+
+  /** The note file, kept or dropped — and NEVER a reason a run fails, the same best-effort
+   *  discipline the footer's file stats get. The fresh session is seeded from the note in
+   *  MEMORY, so a disk that cannot take a copy must not cost the handoff; and the clear
+   *  runs after the pull request is already open, where a throw would turn a shipped PR
+   *  into a failed work item (ADR-0001). */
+  private noteFile(op: () => void, about: LogContext): void {
+    try {
+      op();
+    } catch (err) {
+      this.log.info(`handoff note — ${describe(err)}`, about);
     }
   }
 

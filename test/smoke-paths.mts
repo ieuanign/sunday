@@ -77,6 +77,17 @@ const paths = await import("#lib/paths.mts");
   );
 }
 
+// ── handoff note: one durable file per work item, under var/ — never .scratch/, which
+//    the pipeline rm -rf's out from under the note the fresh session was seeded with ──
+{
+  const note = paths.handoffNotePath("acme/finance#57");
+  ok(
+    "handoff: one flat note per work-item key under var/handoff",
+    relative(repoRoot, note) === "var/handoff/acme-finance-57.md",
+    note,
+  );
+}
+
 // ── result + PID lock: one flat file per work-item key (the key carries `/` and `#`) ──
 {
   const result = paths.resultPath("acme/finance#57");
@@ -109,6 +120,7 @@ const paths = await import("#lib/paths.mts");
     paths.resultPath("acme/finance#57"),
     paths.pidPath("acme/finance#pr12"),
     paths.restackWorktreePath("acme/finance", "feat/57"),
+    paths.handoffNotePath("acme/finance#57"),
   ];
   const stray = all.filter((p) => p !== varRoot && !p.startsWith(`${varRoot}${sep}`));
   ok("layout: every durable path is under var/", stray.length === 0, stray.join("\n    "));

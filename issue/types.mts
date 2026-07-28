@@ -42,6 +42,11 @@ export interface IssueRunInput {
    *  big that session had grown when it gated (#67), which only the parent's durable state
    *  still knows. Absent is unknown, and unknown resumes. */
   resume?: { sessionId: string; reply: string; contextTokens?: number };
+  /** The context a session may reach before a reply is handed off to a fresh one instead
+   *  of resuming it (#67). A resolved NUMBER: `.env`'s `HANDOFF_CTX_THRESHOLD` is read and
+   *  validated by the entry point, because `Number("12O000")` is `NaN` and `ctx >= NaN` is
+   *  `false` — a typo would disable the feature in silence, which is v1's bug. */
+  handoffThreshold: number;
   /** What the PREVIOUS attempt at this item died on, when this run is #39's one retry.
    *  Handed to the agent in the prompt: it is the only thing this run knows that the last
    *  one did not, and without it a retry is the same run again on fresh quota. */
@@ -57,5 +62,13 @@ export interface IssueModuleDeps {
    *  service: nothing in `issue/` may import that library, and a check that constructed
    *  its own probe could not be driven without docker (#34 constraint 7). */
   imagePresent: ImagePresent;
+  /** Keep this run's handoff note (#67). Injected, and injected as a function taking only
+   *  the TEXT, for the same reason `imagePresent` is: the module resolves no path and
+   *  opens no file, so the entry point owns where a note lands and a smoke sees what would
+   *  have been written without a temp dir. May throw — the run catches it. */
+  writeHandoffNote: (note: string) => void;
+  /** Drop the spent note, once the pull request the fresh session opened exists. May
+   *  throw, and the run catches that too: this one fires AFTER the push. */
+  clearHandoffNote: () => void;
   log: ModuleLogger;
 }

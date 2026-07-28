@@ -10,7 +10,7 @@
 
 import { IssueModule, type IssueRunInput } from "#issue/index.mts";
 import type { ImagePresent } from "#issue/preconditions.mts";
-import { RESULT_TAG, type IssueResult } from "#issue/prompt.mts";
+import { HANDOFF_TAG, RESULT_TAG, type IssueResult } from "#issue/prompt.mts";
 import type { Agent, AgentRunRequest, AgentRunResult, AgentUsage } from "#services/agent/index.mts";
 import type { Git } from "#services/git.mts";
 import type { GitHubRun, NewPullRequest } from "#services/github/index.mts";
@@ -34,6 +34,14 @@ const FORK_POINT = "9c1f0b2e4d6a8c0e2f4a6b8d0c2e4f6a8b0d2c4e";
 /** The labels this repo admits an issue on, and what the fake issue wears by default —
  *  the before-work set asserts the second still contains the first (#38). */
 const TRIGGER_LABELS = ["sunday", "ready-for-agent"];
+
+/** The context this case's runs are handed as their handoff threshold (#67). A resume
+ *  says how big its session was against THIS, so both sides of the boundary are sayable
+ *  without depending on whatever `.env` defaults to. */
+const THRESHOLD = 120_000;
+
+/** What the handoff turn answers with, when a case does not say otherwise. */
+const NOTE = "## Where this got to\n\nThe migration is written; the backfill is not.";
 
 /** What this case's fakes answer with. Everything else is the ordinary happy path: an
  *  agent that says `ready`, a branch one commit ahead, and no PR open yet. */
@@ -68,7 +76,17 @@ interface Scenario {
    *  context out so a resume can decide whether continuing it is affordable (#67). */
   usage?: AgentUsage;
   preservedWorktreePath?: string;
-  resume?: { sessionId: string; reply: string };
+  resume?: { sessionId: string; reply: string; contextTokens?: number };
+  /** What the bounded handoff turn emits inside its tag — a session too big to resume is
+   *  compacted into this and a FRESH one is seeded with it (#67). */
+  handoffNote?: string;
+  /** The COMPACTION turn left the worktree dirty and the library kept it host-side —
+   *  the work turn that follows leaves none of its own. */
+  handoffPreservedWorktreePath?: string;
+  /** Keeping the note on disk blows up (a full disk, a read-only `var/`). */
+  noteWriteError?: string;
+  /** Dropping the spent note blows up — AFTER the pull request is already open. */
+  noteClearError?: string;
   /** Cleanup blows up (a `git` that threw with its own stderr). */
   cleanupError?: string;
   /** The footer's file-stat read blows up — a `git` blip AFTER the push. */
@@ -121,11 +139,17 @@ function harness(s: Scenario = {}) {
       requests.push(request as unknown as AgentRunRequest<IssueResult>);
       if (s.agentError) throw new Error(s.agentError);
       return {
-        output: (s.result ?? { signal: "ready", description: "shipped it" }) as unknown as T,
+        // BY THE TAG the request asked for, because a handed-off run makes two calls and
+        // they want different answers: the bounded compaction turn gets prose (no schema
+        // — the seam hands back the tag's raw text), the work run gets a result object.
+        output: (request.output.tag === HANDOFF_TAG
+          ? (s.handoffNote ?? NOTE)
+          : (s.result ?? { signal: "ready", description: "shipped it" })) as unknown as T,
         sessionId: s.sessionId,
         usage: s.usage,
         commits: s.agentCommits ?? [],
-        preservedWorktreePath: s.preservedWorktreePath,
+        preservedWorktreePath:
+          request.output.tag === HANDOFF_TAG ? s.handoffPreservedWorktreePath : s.preservedWorktreePath,
         model: s.model,
         durationMs: s.durationMs ?? 1,
         logPath: request.logPath,
@@ -217,6 +241,21 @@ function harness(s: Scenario = {}) {
     return !s.imageMissing;
   };
 
+  /** The note text this run persisted, in order — the module resolves no path, so the
+   *  write it is handed is the whole of what reaches the disk. */
+  const notesWritten: string[] = [];
+  const writeHandoffNote = (note: string) => {
+    trace.push("writeNote");
+    if (s.noteWriteError) throw new Error(s.noteWriteError);
+    notesWritten.push(note);
+  };
+  let notesCleared = 0;
+  const clearHandoffNote = () => {
+    trace.push("clearNote");
+    if (s.noteClearError) throw new Error(s.noteClearError);
+    notesCleared++;
+  };
+
   const input: IssueRunInput = {
     key: "acme/finance#57",
     repo: "acme/finance",
@@ -227,11 +266,20 @@ function harness(s: Scenario = {}) {
     triggerLabels: TRIGGER_LABELS,
     baselinePrompt: BASELINE,
     logPath: "/var/log/acme/finance/57/run.log",
+    handoffThreshold: THRESHOLD,
     ...(s.resume ? { resume: s.resume } : {}),
     ...(s.retryError ? { retryError: s.retryError } : {}),
   };
 
-  const module = new IssueModule({ agent, github, git, imagePresent, log: new Logger(dests).child("issue") });
+  const module = new IssueModule({
+    agent,
+    github,
+    git,
+    imagePresent,
+    writeHandoffNote,
+    clearHandoffNote,
+    log: new Logger(dests).child("issue"),
+  });
   return {
     run: () => module.run(input),
     trace,
@@ -249,6 +297,8 @@ function harness(s: Scenario = {}) {
     resolved,
     remoteChecked,
     imagesProbed,
+    notesWritten,
+    clearedNotes: () => notesCleared,
   };
 }
 
@@ -536,6 +586,175 @@ function harness(s: Scenario = {}) {
   const h = harness();
   await h.run();
   ok("fresh: a fresh run touches no label at all", h.labelsRemoved.length === 0 && h.labelsAdded.length === 0, h.trace.join(" → "));
+}
+
+// ── the handoff (#67): a gated session only grows, so at or past the threshold the reply
+//    does NOT go to it. One bounded turn compacts it into a note, and a FRESH session is
+//    seeded with the note and the human's answer. Asserted AT the threshold exactly —
+//    `>` instead of `>=` is a run that hands off one turn later than it said it would ──
+{
+  const h = harness({
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices, anonymise the account.", contextTokens: THRESHOLD },
+    preservedWorktreePath: "/repos/finance/.worktrees/feat-57",
+  });
+  const outcome = await h.run();
+  const [compaction, work] = h.requests;
+
+  ok("handoff: exactly two agent turns — the compaction, then the work", h.requests.length === 2, String(h.requests.length));
+  ok(
+    "handoff: the first turn continues the OLD session — it is the only thing that can compact it",
+    compaction?.resumeSession === "sess-abc123" && compaction?.output.tag === HANDOFF_TAG,
+    JSON.stringify({ resume: compaction?.resumeSession, tag: compaction?.output.tag }),
+  );
+  ok(
+    "handoff: and takes the note as raw text — a summary is prose, not a JSON contract",
+    compaction?.output.schema === undefined,
+    String(compaction?.output.schema),
+  );
+  ok(
+    "handoff: the compaction turn is told to write nothing — it runs in a sandbox with no credentials, and a file it wrote would dirty the worktree",
+    /write no|no file|do not write/i.test(compaction?.prompt ?? "") && compaction?.prompt.includes(`<${HANDOFF_TAG}>`) === true,
+    compaction?.prompt ?? "",
+  );
+  ok(
+    "handoff: the work turn resumes NOTHING — the whole point is that the old session is retired",
+    work?.resumeSession === undefined,
+    String(work?.resumeSession),
+  );
+  ok(
+    "handoff: it is seeded with the note, so the fresh session knows what the retired one did",
+    work?.prompt.includes(NOTE) === true,
+    work?.prompt ?? "",
+  );
+  ok(
+    "handoff: and with the human's reply — the answer the whole resume exists for",
+    work?.prompt.includes("Keep the invoices, anonymise the account.") === true,
+    work?.prompt ?? "",
+  );
+  ok(
+    "handoff: carrying the result tag literal — a fresh session was never told how to finish",
+    work?.prompt.includes(`<${RESULT_TAG}>`) === true,
+    work?.prompt ?? "",
+  );
+  ok(
+    "handoff: the note is kept on disk — the run log has the raw turn, this is the readable record",
+    h.notesWritten.length === 1 && h.notesWritten[0] === NOTE,
+    h.notesWritten.join(" | "),
+  );
+  ok(
+    "handoff: and dropped once the PR exists — the note has done its job the moment the work ships",
+    h.clearedNotes() === 1 && h.trace.indexOf("createPr") < h.trace.indexOf("clearNote"),
+    h.trace.join(" → "),
+  );
+  ok("handoff: the handed-off run ships its PR like any other", outcome.status === "done" && h.created.length === 1, JSON.stringify(outcome));
+}
+
+{
+  // One token under. A session that still fits is CHEAPER to continue than to compact —
+  // the handoff costs a whole extra turn of real quota.
+  const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD - 1 } });
+  const outcome = await h.run();
+
+  ok("below: one agent turn only — nothing is compacted", h.requests.length === 1, String(h.requests.length));
+  ok("below: and it continues the session it was handed", h.requests[0]?.resumeSession === "sess-abc123", String(h.requests[0]?.resumeSession));
+  ok("below: no note is written", h.notesWritten.length === 0, h.notesWritten.join(" | "));
+  ok("below: the resume ships as it always did", outcome.status === "done", JSON.stringify(outcome));
+}
+{
+  // A parent with no number for this item — an outcome recorded before #67, or an agent
+  // that reported no usage. Unknown resumes: it costs one turn, where guessing "big"
+  // costs a whole handoff on a session that may be tiny.
+  const h = harness({ resume: { sessionId: "sess-abc123", reply: "Keep the invoices." } });
+  await h.run();
+
+  ok(
+    "unknown context: the run resumes rather than handing off — absent is unknown, not oversized",
+    h.requests.length === 1 && h.requests[0]?.resumeSession === "sess-abc123",
+    String(h.requests.length),
+  );
+}
+
+// ── a compaction turn that came back with nothing: the ONE thing that must not happen is
+//    falling back to the session it just refused to resume ──
+{
+  const h = harness({
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: 250_000 },
+    handoffNote: "   \n  ",
+    handoffPreservedWorktreePath: "/repos/finance/.worktrees/feat-57",
+  });
+  const outcome = await h.run();
+
+  ok("no note: the bloated session is never run again — the compaction turn is the only one", h.requests.length === 1, String(h.requests.length));
+  ok("no note: nothing is written, pushed or opened", h.pushed.length === 0 && h.created.length === 0, h.trace.join(" → "));
+  ok("no note: a blank note is not kept either", h.notesWritten.length === 0, h.notesWritten.join(" | "));
+  ok(
+    "no note: the work item FAILS — `awaiting-human` would send the reply straight back to the session that could not be compacted",
+    outcome.status === "failed",
+    JSON.stringify(outcome),
+  );
+  ok(
+    "no note: flagged as the agent's own (#39), so it parks for a human instead of spending another run being classified",
+    outcome.agentFailed === true,
+    JSON.stringify(outcome),
+  );
+  ok(
+    "no note: and the summary is written for the human's phone — what happened, and that a hand-back starts over",
+    outcome.summary.includes("250000") && outcome.summary.includes(String(THRESHOLD)) && /scratch|again/i.test(outcome.summary),
+    outcome.summary,
+  );
+  ok(
+    "no note: the compaction turn's preserved worktree still reaches cleanup — it holds the branch checked out, and the delete cannot run while it is there",
+    h.removedWorktrees.length === 1 && h.trace.indexOf("removeWorktree") < h.trace.indexOf("deleteBranch") && h.deleted.includes("feat/57"),
+    h.trace.join(" → "),
+  );
+}
+
+{
+  // The compaction turn left the worktree dirty and the work turn that followed did not.
+  // The worktree still holds the branch checked out, so a run that forgot it leaves a
+  // branch nothing can delete — and a stale local `feat/57` is what the next fresh run
+  // would silently build on (#33).
+  const h = harness({
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD },
+    handoffPreservedWorktreePath: "/repos/finance/.worktrees/feat-57",
+  });
+  await h.run();
+
+  ok(
+    "handoff: a worktree the COMPACTION turn left behind is still removed, and the branch after it",
+    h.removedWorktrees.join(",") === "/repos/finance/.worktrees/feat-57" && h.deleted.includes("feat/57"),
+    h.trace.join(" → "),
+  );
+}
+
+// ── the note is a RECORD, not the handoff: the fresh session is seeded from the note in
+//    memory, so neither keeping it nor dropping it may cost the run (ADR-0001) ──
+{
+  const h = harness({
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD },
+    noteWriteError: "ENOSPC: no space left on device",
+  });
+  const outcome = await h.run();
+
+  ok("note write: a disk that cannot take the note does not cost the handoff", h.requests.length === 2 && outcome.status === "done", JSON.stringify(outcome));
+  ok(
+    "note write: and it is not silent",
+    h.lines.some((l) => l.message.includes("ENOSPC")),
+    h.lines.map((l) => l.message).join(" | "),
+  );
+}
+{
+  const h = harness({
+    resume: { sessionId: "sess-abc123", reply: "Keep the invoices.", contextTokens: THRESHOLD },
+    noteClearError: "EACCES: permission denied",
+  });
+  const outcome = await h.run();
+
+  ok(
+    "note clear: it runs AFTER the push — a throw there would turn a shipped pull request into a failed work item",
+    outcome.status === "done" && outcome.summary.includes(PR_URL),
+    JSON.stringify(outcome),
+  );
 }
 
 // ── the one retry (#39): this run is the second attempt at an item that failed once, and
