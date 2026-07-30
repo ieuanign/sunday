@@ -57,9 +57,13 @@ function parseBlockedBy(body: string, repo: string): number[] | undefined {
     if ((urlRepo ?? refRepo) !== undefined && (urlRepo ?? refRepo) !== repo) return undefined;
     numbers.add(Number(urlNumber ?? refNumber));
   }
+  if (numbers.size > 0) return [...numbers];
+  // `- None` written out is an explicit zero — an author saying "nothing blocks this",
+  // not a format Sunday cannot read (finance#100 deferred on exactly this).
+  if (/^\s*[-*]?\s*none\b/im.test(section)) return [];
   // A heading naming nothing this repo can resolve is a section written some way Sunday
   // does not read — the same unknown as a failed request, and it waits for the same reason.
-  return numbers.size > 0 ? [...numbers] : undefined;
+  return undefined;
 }
 
 /** Everything that blocks `issue`: GitHub's native dependency links, and the body

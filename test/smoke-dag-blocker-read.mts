@@ -94,4 +94,18 @@ ok(
   JSON.stringify(viaUrl),
 );
 
+// An explicit `- None` under the heading is an author's genuine zero, not an unreadable
+// section — finance#100 wrote exactly this and was deferred as "blockers unreadable".
+const NONE_BODY = ["Rework the widget.", "", "## Blocked by", "", "- None — can start immediately.", ""].join("\n");
+fx.stubGh({
+  "dependencies/blocked_by": "",
+  "--json title,body,state,labels": JSON.stringify({ title: "Rework the widget", body: NONE_BODY, state: "OPEN", labels: [] }),
+});
+const explicitNone = await resolveBase(gh, REPO, ISSUE);
+ok(
+  "a `## Blocked by` section saying `- None` admits the issue on main instead of deferring as unreadable",
+  explicitNone.admit && explicitNone.base === "main",
+  JSON.stringify(explicitNone),
+);
+
 report();
