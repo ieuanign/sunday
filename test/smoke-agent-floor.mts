@@ -3,14 +3,15 @@
 // Was smoke-roster-inject.mts: the assembly is unchanged, so the assertions follow the
 // module to services/agent/floor.mts. Asserts assembleFloor() writes one agent def per
 // roster phase (tracked body + the matrix's model/effort applied to frontmatter) + the
-// 3 floor skills, into a throwaway dir. Pure host-side — no sandbox, no quota. Proves
+// floor skills, into a throwaway dir. Pure host-side — no sandbox, no quota. Proves
 // the model/effort OVERRIDE actually rewrites frontmatter (reviewer: tracked xhigh →
 // roster high). $0, offline, no docker, no tokens.
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
-import { assembleFloor, floorDir } from "#services/agent/floor.mts";
+import { assembleFloor, floorDir, FLOOR_SKILLS } from "#services/agent/floor.mts";
+import { handoffPrompt } from "#issue/prompt.mts";
 import { loadRoster, PHASES } from "#config/roster.mts";
 
 let fails = 0;
@@ -51,9 +52,32 @@ for (const phase of PHASES) {
   ok("override: injected reviewer effort is high", fm(injected, "effort") === "high", fm(injected, "effort"));
 }
 
-// ── the 3 floor skills copied ──
-for (const s of ["tdd", "code-review-mp", "diagnosing-bugs"]) {
-  ok(`skill: ${s}/SKILL.md present`, existsSync(resolve(skillsDir, s, "SKILL.md")));
+// ── every floor skill copied, and invocable by the agent that is told to use it ──
+for (const s of FLOOR_SKILLS) {
+  const p = resolve(skillsDir, s, "SKILL.md");
+  if (!existsSync(p)) {
+    ok(`skill: ${s}/SKILL.md present`, false, p);
+    continue;
+  }
+  ok(
+    `skill: ${s} is model-invocable in the sandbox`,
+    fm(readFileSync(p, "utf8"), "disable-model-invocation") === "false",
+  );
+}
+
+// ── a prompt that names a skill has that skill mounted. The drift this catches shipped
+//    `/implement` into a sandbox where no `implement` skill existed ──
+{
+  const mounted = FLOOR_SKILLS as readonly string[];
+  const prPrompt = readFileSync(resolve(import.meta.dirname, "..", "docs/sandbox-pr-comment-prompt.md"), "utf8");
+  ok(
+    "prompt: the PR-comment prompt's /implement is mounted",
+    prPrompt.includes("/implement") && mounted.includes("implement"),
+  );
+  ok(
+    "prompt: the handoff turn's /handoff is mounted",
+    handoffPrompt.includes("/handoff") && mounted.includes("handoff"),
+  );
 }
 
 rmSync(dest, { recursive: true, force: true });

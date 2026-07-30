@@ -113,21 +113,19 @@ export function resumePrompt(reply: string): string {
   return `${reply}${RESUME_REMINDER}`;
 }
 
-/** The one bounded turn a session too big to resume gets (#67). Written here, not lifted
- *  from `.claude/skills/handoff/SKILL.md` as v1 did — that text tells the agent to SAVE a
- *  file, and the line v1's regex swapped for "emit it in a tag" no longer exists. */
+/** The one bounded turn a session too big to resume gets (#67). INVOKES the tracked
+ *  `handoff` skill (mounted for every run — `FLOOR_SKILLS`) rather than restating it: one
+ *  discipline source, the same reason `floor.mts` injects agent BODIES. What is spelled
+ *  here is only what that skill gets wrong for this caller — it saves a file, and it does
+ *  not forbid doing the work. */
 export const handoffPrompt =
-  `You are compacting THIS session into a handoff note for a fresh agent that will ` +
-  `continue and finish the work. Do ONLY that: write no code, change no file, make no ` +
-  `commit, run nothing.\n\n` +
-  `Summarise the session so the fresh agent can carry on without you: what the work is, ` +
-  `what has been done and committed so far, what is left, and the decisions and dead ends ` +
-  `it would otherwise repeat. Name the skills it should invoke. Reference plans, ADRs, ` +
-  `issues and commits by path or number rather than duplicating them. Redact anything ` +
-  `sensitive — tokens, keys, personal data.\n\n` +
-  `Emit the note as your ONLY output, inside one \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` ` +
-  `tag. Do not write it to a file: you are in a sandbox with no credentials, and a file ` +
-  `you leave behind dirties the worktree the work is judged on.`;
+  // The argument is what the NEXT session focuses on — the skill tailors the note to it.
+  `/handoff continuing and finishing this work in a fresh session\n\n` +
+  `Two overrides on that skill, both mandatory here:\n\n` +
+  `1. Emit the note as your ONLY output, inside one \`<${HANDOFF_TAG}>…</${HANDOFF_TAG}>\` ` +
+  `tag. Do NOT save it to a file — the host reads the note from the tag, and a file you ` +
+  `leave behind goes away with this worktree.\n` +
+  `2. Do ONLY that: write no code, change no file, make no commit, run nothing.`;
 
 /** Frames the note for the fresh session — its own predecessor's words, not somebody's brief. */
 const CONTINUE_LEADIN =
